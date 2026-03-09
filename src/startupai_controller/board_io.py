@@ -253,13 +253,41 @@ def enable_pull_request_automerge(
     pr_number: int,
     *,
     delete_branch: bool = False,
+    confirm_retries: int = 3,
+    confirm_delay_seconds: float = 1.0,
     gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Enable squash auto-merge on a PR."""
+) -> str:
+    """Enable squash auto-merge on a PR.
+
+    Returns:
+        "confirmed" — GitHub persisted autoMergeRequest
+        "pending"   — enable call succeeded but GitHub hasn't confirmed yet
+
+    Raises:
+        GhQueryError — if the enable call itself fails (transport/API error).
+            Callers should let this propagate for partial-failure backoff.
+    """
     args = ["pr", "merge", str(pr_number), "--repo", pr_repo, "--auto", "--squash"]
     if delete_branch:
         args.append("--delete-branch")
+    # Enable call — let GhQueryError propagate (no catch).
     _run_gh(args, gh_runner=gh_runner, operation_type="automerge")
+
+    # Bounded verification — catch transport errors per-read.
+    for _attempt in range(confirm_retries):
+        time.sleep(confirm_delay_seconds)
+        try:
+            raw = _run_gh(
+                ["pr", "view", str(pr_number), "--repo", pr_repo,
+                 "--json", "autoMergeRequest"],
+                gh_runner=gh_runner,
+            )
+            data = json.loads(raw) if raw else {}
+            if data.get("autoMergeRequest") is not None:
+                return "confirmed"
+        except (GhQueryError, json.JSONDecodeError):
+            continue
+    return "pending"
 
 
 def close_pull_request(

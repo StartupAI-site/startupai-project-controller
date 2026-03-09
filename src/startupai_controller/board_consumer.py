@@ -156,7 +156,9 @@ REVIEW_QUEUE_PENDING_RETRY_SECONDS = 120
 REVIEW_QUEUE_FAILED_RETRY_SECONDS = 900
 REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS = 1800
 REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS = 3600
+REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS = 120
 REVIEW_QUEUE_SKIPPED_RETRY_SECONDS = 3600
+MAX_REQUEUE_CYCLES = 3  # After 3 Review→Ready→InProgress→Review loops on the same PR, stop requeuing
 REVIEW_QUEUE_STABLE_RESULTS = {
     "auto_merge_enabled",
     "blocked",
@@ -244,6 +246,7 @@ class ReviewQueueDrainSummary:
     requeued: tuple[str, ...] = ()
     blocked: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
+    escalated: tuple[str, ...] = ()
     partial_failure: bool = False
     error: str | None = None
 
@@ -2884,6 +2887,57 @@ def _backfill_review_verdicts_from_snapshots(
     return tuple(backfilled)
 
 
+def _pre_backfill_verdicts_for_due_prs(
+    db: ConsumerDB,
+    due_items: list[ReviewQueueEntry],
+    *,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[str, ...]:
+    """Post missing verdicts BEFORE snapshot build for verdict-blocked and newly seeded entries."""
+    backfilled: list[str] = []
+    for entry in due_items:
+        is_verdict_blocked = (
+            entry.last_result == "blocked"
+            and entry.last_reason is not None
+            and "missing codex verdict marker" in entry.last_reason.lower()
+        )
+        is_newly_seeded = entry.last_result is None
+        if not is_verdict_blocked and not is_newly_seeded:
+            continue
+        try:
+            session = (
+                db.get_session(entry.source_session_id)
+                if entry.source_session_id
+                else db.latest_session_for_issue(entry.issue_ref)
+            )
+            if session is None:
+                continue
+            if session.status != "success" or session.phase != "review" or not session.pr_url:
+                continue
+            # Guard: session.pr_url must match entry.pr_url
+            if session.pr_url != entry.pr_url:
+                continue
+            posted = _post_pr_codex_verdict(
+                session.pr_url,
+                session.id,
+                comment_checker=comment_checker,
+                comment_poster=comment_poster,
+                gh_runner=gh_runner,
+            )
+            if posted:
+                backfilled.append(entry.issue_ref)
+        except Exception as err:
+            logger.warning(
+                "Pre-backfill verdict failed for %s: %s",
+                entry.issue_ref,
+                err,
+            )
+            continue
+    return tuple(backfilled)
+
+
 def _review_scope_issue_refs(
     config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
@@ -2916,6 +2970,8 @@ def _review_queue_next_attempt_at(
 def _review_queue_retry_seconds_for_blocked_reason(blocked_reason: str) -> int:
     """Return the retry delay for a blocked review outcome."""
     normalized = blocked_reason.strip().lower()
+    if "auto-merge pending verification" in normalized:
+        return REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
     if (
         "required checks pending" in normalized
         or "review checks pending" in normalized
@@ -2997,6 +3053,55 @@ def _queue_review_item(
     return db.get_review_queue_item(issue_ref)
 
 
+# ---------------------------------------------------------------------------
+# M5: Blocked-streak escalation policy
+# ---------------------------------------------------------------------------
+
+ESCALATION_CEILING_TRANSIENT = 12   # ~24 min at 2-min pending retry
+ESCALATION_CEILING_FAILED = 6       # ~90 min at 15-min failed retry
+ESCALATION_CEILING_STABLE = 4       # ~120 min at 30-min stable retry
+ESCALATION_CEILING_AUTOMERGE = 3    # ~3 hr at 1-hr automerge retry
+ESCALATION_CEILING_DEFAULT = 8      # ~40 min at 5-min default retry
+
+
+def _blocker_class(blocked_reason: str) -> str:
+    """Classify a blocked_reason into a stable blocker class string."""
+    normalized = blocked_reason.strip().lower()
+    if "auto-merge pending verification" in normalized:
+        return "automerge"
+    if (
+        "required checks pending" in normalized
+        or "review checks pending" in normalized
+    ):
+        return "transient"
+    if (
+        "required checks failed" in normalized
+        or "review checks failed" in normalized
+        or "mergeable=conflicting" in normalized
+        or normalized == "automerge-not-enabled"
+    ):
+        return "failed_checks"
+    if (
+        "missing codex verdict marker" in normalized
+        or normalized == "missing-copilot-review"
+        or normalized == "draft-pr"
+        or normalized.startswith("state=")
+    ):
+        return "stable"
+    return "default"
+
+
+def _escalation_ceiling_for_blocker_class(blocker_class: str) -> int:
+    """Return the max blocked-streak before escalation for a given class."""
+    return {
+        "transient": ESCALATION_CEILING_TRANSIENT,
+        "failed_checks": ESCALATION_CEILING_FAILED,
+        "stable": ESCALATION_CEILING_STABLE,
+        "automerge": ESCALATION_CEILING_AUTOMERGE,
+        "default": ESCALATION_CEILING_DEFAULT,
+    }.get(blocker_class, ESCALATION_CEILING_DEFAULT)
+
+
 def _apply_review_queue_result(
     db: ConsumerDB,
     entry: ReviewQueueEntry,
@@ -3005,8 +3110,12 @@ def _apply_review_queue_result(
     now: datetime | None = None,
     retry_seconds: int | None = None,
     last_state_digest: str | None = None,
-) -> None:
-    """Persist the outcome of processing one review-queue entry."""
+) -> bool:
+    """Persist the outcome of processing one review-queue entry.
+
+    Returns True when blocked-streak escalation is needed (caller handles).
+    Requeued results are NOT handled here — see _drain_review_queue().
+    """
     current = now or datetime.now(timezone.utc)
     effective_state_digest = (
         entry.last_state_digest if last_state_digest is None else last_state_digest
@@ -3020,10 +3129,10 @@ def _apply_review_queue_result(
         now=current,
         delay_seconds=effective_retry_seconds,
     )
+
     if result.requeued_refs:
-        for issue_ref in result.requeued_refs:
-            db.delete_review_queue_item(issue_ref)
-        return
+        # Requeue handling is done entirely in _drain_review_queue()
+        return False
 
     if result.auto_merge_enabled:
         db.update_review_queue_item(
@@ -3032,9 +3141,11 @@ def _apply_review_queue_result(
             last_result="auto_merge_enabled",
             last_reason=None,
             last_state_digest=effective_state_digest,
+            blocked_streak=0,
+            blocked_class=None,
             now=current,
         )
-        return
+        return False
 
     if result.rerun_checks:
         db.update_review_queue_item(
@@ -3043,20 +3154,30 @@ def _apply_review_queue_result(
             last_result="rerun_checks",
             last_reason=",".join(result.rerun_checks),
             last_state_digest=effective_state_digest,
+            blocked_streak=0,
+            blocked_class=None,
             now=current,
         )
-        return
+        return False
 
     if result.blocked_reason:
+        new_class = _blocker_class(result.blocked_reason)
+        new_streak = (
+            (entry.blocked_streak + 1)
+            if new_class == entry.blocked_class
+            else 1
+        )
         db.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="blocked",
             last_reason=result.blocked_reason,
             last_state_digest=effective_state_digest,
+            blocked_streak=new_streak,
+            blocked_class=new_class,
             now=current,
         )
-        return
+        return new_streak >= _escalation_ceiling_for_blocker_class(new_class)
 
     if result.skipped_reason:
         db.update_review_queue_item(
@@ -3065,9 +3186,11 @@ def _apply_review_queue_result(
             last_result="skipped",
             last_reason=result.skipped_reason,
             last_state_digest=effective_state_digest,
+            blocked_streak=0,
+            blocked_class=None,
             now=current,
         )
-        return
+        return False
 
     db.update_review_queue_item(
         entry.issue_ref,
@@ -3075,8 +3198,11 @@ def _apply_review_queue_result(
         last_result="processed",
         last_reason=None,
         last_state_digest=effective_state_digest,
+        blocked_streak=0,
+        blocked_class=None,
         now=current,
     )
+    return False
 
 
 def _apply_review_queue_partial_failure(
@@ -3181,6 +3307,35 @@ def _drain_review_queue(
                 continue
         seeded.append(issue_ref)
 
+    # Reconcile queue rows + requeue counters against current PR identity
+    if not dry_run:
+        for entry in db.list_review_queue_items():
+            if entry.issue_ref not in review_refs:
+                continue
+            current_pr_url = entry.pr_url
+            latest_session = db.latest_session_for_issue(entry.issue_ref)
+            if latest_session is not None and latest_session.pr_url:
+                current_pr_url = latest_session.pr_url
+            if current_pr_url != entry.pr_url:
+                parsed = _parse_pr_url(current_pr_url)
+                if parsed is None:
+                    continue
+                owner, repo, pr_number = parsed
+                db.enqueue_review_item(
+                    entry.issue_ref,
+                    pr_url=current_pr_url,
+                    pr_repo=f"{owner}/{repo}",
+                    pr_number=pr_number,
+                    source_session_id=(
+                        latest_session.id if latest_session is not None else entry.source_session_id
+                    ),
+                    next_attempt_at=entry.next_attempt_at,
+                    now=now,
+                )
+            _count, stored_pr_url = db.get_requeue_state(entry.issue_ref)
+            if stored_pr_url is not None and stored_pr_url != current_pr_url:
+                db.reset_requeue_count(entry.issue_ref)
+
     queue_items = [
         entry for entry in db.list_review_queue_items() if entry.issue_ref in review_refs
     ]
@@ -3228,12 +3383,19 @@ def _drain_review_queue(
         for entry in entries
     ]
 
+    pre_backfilled: tuple[str, ...] = ()
+    if not dry_run and due_items:
+        pre_backfilled = _pre_backfill_verdicts_for_due_prs(
+            db, due_items, gh_runner=gh_runner,
+        )
+
     verdict_backfilled: tuple[str, ...] = ()
     rerun: list[str] = []
     auto_merge_enabled: list[str] = []
     requeued: list[str] = []
     blocked: list[str] = []
     skipped: list[str] = []
+    escalated: list[str] = []
     partial_failure = False
     error: str | None = None
     updated_snapshot = board_snapshot
@@ -3277,11 +3439,14 @@ def _drain_review_queue(
             partial_failure = True
             error = str(err)
         if not dry_run and not partial_failure:
-            verdict_backfilled = _backfill_review_verdicts_from_snapshots(
+            secondary_backfilled = _backfill_review_verdicts_from_snapshots(
                 db,
                 due_items,
                 snapshots,
                 gh_runner=gh_runner,
+            )
+            verdict_backfilled = tuple(
+                dict.fromkeys(pre_backfilled + secondary_backfilled)
             )
 
     for (pr_repo, pr_number), entries in due_pr_groups:
@@ -3321,25 +3486,60 @@ def _drain_review_queue(
                     else None
                 )
             for entry in entries:
-                _apply_review_queue_result(
+                needs_escalation = _apply_review_queue_result(
                     db,
                     entry,
                     result,
                     now=now,
                     last_state_digest=state_digest,
                 )
+                if needs_escalation:
+                    _escalate_to_claude(
+                        entry.issue_ref,
+                        critical_path_config,
+                        config.project_owner,
+                        config.project_number,
+                        reason=f"review queue blocked escalation: "
+                               f"{result.blocked_reason}",
+                        gh_runner=gh_runner,
+                    )
+                    db.delete_review_queue_item(entry.issue_ref)
+                    escalated.append(entry.issue_ref)
         pr_ref = f"{pr_repo}#{pr_number}"
         if result.rerun_checks:
             rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
         elif result.auto_merge_enabled:
             auto_merge_enabled.append(pr_ref)
         elif result.requeued_refs:
-            requeued.extend(result.requeued_refs)
-            updated_snapshot = _update_board_snapshot_statuses(
-                updated_snapshot,
-                critical_path_config,
-                {issue_ref: "Ready" for issue_ref in result.requeued_refs},
-            )
+            for issue_ref in result.requeued_refs:
+                entry = next((e for e in entries if e.issue_ref == issue_ref), None)
+                pr_url = entry.pr_url if entry is not None else ""
+                requeue_count, _ = db.get_requeue_state(issue_ref)
+                if requeue_count >= MAX_REQUEUE_CYCLES:
+                    if not dry_run:
+                        _escalate_to_claude(
+                            issue_ref,
+                            critical_path_config,
+                            config.project_owner,
+                            config.project_number,
+                            reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
+                                   f"{result.blocked_reason or 'persistent check failure / conflict'}",
+                            gh_runner=gh_runner,
+                        )
+                        db.delete_review_queue_item(issue_ref)
+                    escalated.append(issue_ref)
+                else:
+                    if not dry_run:
+                        db.increment_requeue_count(issue_ref, pr_url)
+                        db.delete_review_queue_item(issue_ref)
+                    requeued.append(issue_ref)
+            requeued_this_group = [r for r in result.requeued_refs if r not in escalated]
+            if requeued_this_group:
+                updated_snapshot = _update_board_snapshot_statuses(
+                    updated_snapshot,
+                    critical_path_config,
+                    {ref: "Ready" for ref in requeued_this_group},
+                )
         elif result.blocked_reason:
             blocked.append(f"{pr_ref}:{result.blocked_reason}")
         elif result.skipped_reason:
@@ -3365,6 +3565,7 @@ def _drain_review_queue(
         requeued=tuple(requeued),
         blocked=tuple(blocked),
         skipped=tuple(skipped),
+        escalated=tuple(escalated),
         partial_failure=partial_failure,
         error=error,
     )

@@ -22,13 +22,18 @@ from startupai_controller.board_consumer import (
     ConsumerConfig,
     CycleResult,
     RepairBranchReconcileOutcome,
+    ESCALATION_CEILING_FAILED,
+    ESCALATION_CEILING_TRANSIENT,
+    MAX_REQUEUE_CYCLES,
     REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS,
     REVIEW_QUEUE_FAILED_RETRY_SECONDS,
+    REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS,
     REVIEW_QUEUE_PENDING_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
     _backfill_review_verdicts,
-    _apply_review_queue_partial_failure,
     _apply_review_queue_result,
+    _apply_review_queue_partial_failure,
+    _blocker_class,
     _build_review_snapshots_for_queue_entries,
     _cmd_drain,
     _cmd_report_slo,
@@ -45,18 +50,21 @@ from startupai_controller.board_consumer import (
     _create_worktree,
     _drain_requested,
     _escalate_to_claude,
+    _escalation_ceiling_for_blocker_class,
     _extract_acceptance_criteria,
     _fetch_issue_context,
     _hydrate_issue_context,
     _has_commits_on_branch,
     _parse_codex_result,
     _post_pr_codex_verdict,
+    _pre_backfill_verdicts_for_due_prs,
     _prepare_worktree,
     _post_result_comment,
     _reconcile_repair_branch,
     _reconcile_board_truth,
     _recover_interrupted_sessions,
     _request_drain,
+    _review_queue_retry_seconds_for_blocked_reason,
     _review_queue_retry_seconds_for_result,
     _transition_issue_to_review,
     _resolve_cli_command,
@@ -3621,3 +3629,446 @@ class TestRunDaemonLoop:
             )
 
         assert launched == [("crew#84", 1), ("crew#85", 2)]
+
+
+# -- Fix D: Pre-backfill verdicts before snapshot ----------------------------
+
+
+class TestPreBackfillVerdicts:
+    def test_pre_backfill_posts_verdict_for_blocked_verdict_entry(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/210"
+        sess_id = db.create_session("crew#84", "codex", session_kind="repair")
+        db.update_session(sess_id, status="success", phase="review", pr_url=pr_url)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url=pr_url,
+            pr_repo="StartupAI-site/startupai-crew",
+            pr_number=210,
+            source_session_id=sess_id,
+            now=now - timedelta(minutes=10),
+        )
+        db.update_review_queue_item(
+            "crew#84",
+            next_attempt_at=now.isoformat(),
+            last_result="blocked",
+            last_reason="missing codex verdict marker",
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+        posted_calls: list[str] = []
+
+        def mock_poster(owner, repo, number, body, **kwargs):
+            posted_calls.append(f"{owner}/{repo}#{number}")
+
+        result = _pre_backfill_verdicts_for_due_prs(
+            db,
+            [entry],
+            comment_checker=lambda *_, **__: False,
+            comment_poster=mock_poster,
+        )
+        assert "crew#84" in result
+        assert len(posted_calls) == 1
+
+    def test_pre_backfill_posts_verdict_for_newly_seeded_entry(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/210"
+        sess_id = db.create_session("crew#84", "codex", session_kind="repair")
+        db.update_session(sess_id, status="success", phase="review", pr_url=pr_url)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url=pr_url,
+            pr_repo="StartupAI-site/startupai-crew",
+            pr_number=210,
+            source_session_id=sess_id,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+        assert entry.last_result is None  # newly seeded
+        posted: list[str] = []
+
+        result = _pre_backfill_verdicts_for_due_prs(
+            db,
+            [entry],
+            comment_checker=lambda *_, **__: False,
+            comment_poster=lambda *a, **kw: posted.append("posted"),
+        )
+        assert "crew#84" in result
+        assert len(posted) == 1
+
+    def test_pre_backfill_skips_non_verdict_blocked_entries(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/210"
+        sess_id = db.create_session("crew#84", "codex", session_kind="repair")
+        db.update_session(sess_id, status="success", phase="review", pr_url=pr_url)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url=pr_url,
+            pr_repo="StartupAI-site/startupai-crew",
+            pr_number=210,
+            source_session_id=sess_id,
+            now=now - timedelta(minutes=10),
+        )
+        db.update_review_queue_item(
+            "crew#84",
+            next_attempt_at=now.isoformat(),
+            last_result="blocked",
+            last_reason="required checks pending",
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+
+        result = _pre_backfill_verdicts_for_due_prs(
+            db,
+            [entry],
+            comment_checker=lambda *_, **__: False,
+            comment_poster=lambda *a, **kw: None,
+        )
+        assert result == ()
+
+
+# -- Fix A1: Repair-requeue ceiling ------------------------------------------
+
+
+class TestRepairRequeueCeiling:
+    def test_requeue_inhibited_at_ceiling(self, tmp_path: Path) -> None:
+        """At ceiling, escalate instead of requeuing."""
+        db = _make_db(tmp_path)
+        pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/42"
+        # Set requeue count at ceiling
+        for _ in range(MAX_REQUEUE_CYCLES):
+            db.increment_requeue_count("crew#88", pr_url)
+        count, _ = db.get_requeue_state("crew#88")
+        assert count == MAX_REQUEUE_CYCLES
+
+    def test_requeue_allowed_below_ceiling(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/42"
+        db.increment_requeue_count("crew#88", pr_url)
+        count, _ = db.get_requeue_state("crew#88")
+        assert count == 1
+        assert count < MAX_REQUEUE_CYCLES
+
+    def test_requeue_count_resets_on_pr_url_change(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        old_url = "https://github.com/o/r/pull/42"
+        new_url = "https://github.com/o/r/pull/55"
+        db.increment_requeue_count("crew#88", old_url)
+        db.increment_requeue_count("crew#88", old_url)
+        count, stored = db.get_requeue_state("crew#88")
+        assert count == 2
+        assert stored == old_url
+        # Simulate PR identity change detection
+        if stored != new_url:
+            db.reset_requeue_count("crew#88")
+        count, _ = db.get_requeue_state("crew#88")
+        assert count == 0
+
+    def test_requeue_count_preserved_on_same_pr_url(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        url = "https://github.com/o/r/pull/42"
+        db.increment_requeue_count("crew#88", url)
+        db.increment_requeue_count("crew#88", url)
+        count, stored = db.get_requeue_state("crew#88")
+        assert count == 2
+        # Same URL → no reset
+        if stored != url:
+            db.reset_requeue_count("crew#88")
+        count, _ = db.get_requeue_state("crew#88")
+        assert count == 2  # unchanged
+
+    def test_requeue_results_not_deleted_by_apply_review_queue_result(
+        self, tmp_path: Path
+    ) -> None:
+        """_apply_review_queue_result no longer handles requeued_refs — returns False."""
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/200",
+            pr_repo="o/r",
+            pr_number=200,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+
+        result = _apply_review_queue_result(
+            db,
+            entry,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=False,
+                requeued_refs=("crew#84",),
+                blocked_reason=None,
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        # Returns False (no escalation) and does NOT delete the queue item
+        assert result is False
+        assert db.get_review_queue_item("crew#84") is not None
+
+
+# -- Fix A2: Blocked-streak escalation policy --------------------------------
+
+
+class TestBlockedStreakEscalation:
+    def test_blocker_class_categories(self) -> None:
+        assert _blocker_class("required checks pending [ci]") == "transient"
+        assert _blocker_class("required checks failed [ci]") == "failed_checks"
+        assert _blocker_class("mergeable=CONFLICTING") == "failed_checks"
+        assert _blocker_class("missing codex verdict marker") == "stable"
+        assert _blocker_class("draft-pr") == "stable"
+        assert _blocker_class("auto-merge pending verification") == "automerge"
+        assert _blocker_class("some unknown reason") == "default"
+
+    def test_escalation_ceiling_for_blocker_class(self) -> None:
+        assert _escalation_ceiling_for_blocker_class("transient") == ESCALATION_CEILING_TRANSIENT
+        assert _escalation_ceiling_for_blocker_class("failed_checks") == ESCALATION_CEILING_FAILED
+        assert _escalation_ceiling_for_blocker_class("unknown") == 8  # default
+
+    def test_blocked_streak_increments_within_same_class(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+
+        _apply_review_queue_result(
+            db,
+            entry,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=False,
+                requeued_refs=(),
+                blocked_reason="required checks failed [ci]",
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        updated = db.get_review_queue_item("crew#84")
+        assert updated is not None
+        assert updated.blocked_streak == 1
+        assert updated.blocked_class == "failed_checks"
+
+        # Second block with same class
+        _apply_review_queue_result(
+            db,
+            updated,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=False,
+                requeued_refs=(),
+                blocked_reason="required checks failed [ci, e2e]",
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        updated2 = db.get_review_queue_item("crew#84")
+        assert updated2 is not None
+        assert updated2.blocked_streak == 2
+        assert updated2.blocked_class == "failed_checks"
+
+    def test_blocked_streak_resets_on_class_change(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+
+        # Build up streak of 5 for "transient"
+        current = entry
+        for _ in range(5):
+            _apply_review_queue_result(
+                db,
+                current,
+                SimpleNamespace(
+                    rerun_checks=(),
+                    auto_merge_enabled=False,
+                    requeued_refs=(),
+                    blocked_reason="required checks pending [ci]",
+                    skipped_reason=None,
+                ),
+                now=now,
+            )
+            current = db.get_review_queue_item("crew#84")
+        assert current.blocked_streak == 5
+        assert current.blocked_class == "transient"
+
+        # Different class → resets to 1
+        _apply_review_queue_result(
+            db,
+            current,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=False,
+                requeued_refs=(),
+                blocked_reason="required checks failed [ci]",
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        final = db.get_review_queue_item("crew#84")
+        assert final.blocked_streak == 1
+        assert final.blocked_class == "failed_checks"
+
+    def test_blocked_streak_resets_on_non_blocked_result(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+
+        _apply_review_queue_result(
+            db,
+            entry,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=False,
+                requeued_refs=(),
+                blocked_reason="required checks failed [ci]",
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        blocked = db.get_review_queue_item("crew#84")
+        assert blocked.blocked_streak == 1
+
+        _apply_review_queue_result(
+            db,
+            blocked,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=True,
+                requeued_refs=(),
+                blocked_reason=None,
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        cleared = db.get_review_queue_item("crew#84")
+        assert cleared.blocked_streak == 0
+        assert cleared.blocked_class is None
+
+    def test_apply_result_signals_escalation_at_ceiling(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        # Build up streak just below ceiling for failed_checks (6)
+        current = entry
+        for i in range(ESCALATION_CEILING_FAILED - 1):
+            _apply_review_queue_result(
+                db,
+                current,
+                SimpleNamespace(
+                    rerun_checks=(),
+                    auto_merge_enabled=False,
+                    requeued_refs=(),
+                    blocked_reason="required checks failed [ci]",
+                    skipped_reason=None,
+                ),
+                now=now,
+            )
+            current = db.get_review_queue_item("crew#84")
+
+        assert current.blocked_streak == ESCALATION_CEILING_FAILED - 1
+
+        # This one should trigger escalation
+        needs_escalation = _apply_review_queue_result(
+            db,
+            current,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=False,
+                requeued_refs=(),
+                blocked_reason="required checks failed [ci]",
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        assert needs_escalation is True
+
+    def test_apply_result_no_escalation_below_ceiling(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+
+        needs_escalation = _apply_review_queue_result(
+            db,
+            entry,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=False,
+                requeued_refs=(),
+                blocked_reason="required checks failed [ci]",
+                skipped_reason=None,
+            ),
+            now=now,
+        )
+        assert needs_escalation is False
+
+
+# -- Fix B (consumer side): pending automerge retry --------------------------
+
+
+class TestPendingAutomergeRetry:
+    def test_review_queue_short_retry_for_pending_verification(self) -> None:
+        from startupai_controller.board_consumer import (
+            _review_queue_retry_seconds_for_blocked_reason,
+        )
+        seconds = _review_queue_retry_seconds_for_blocked_reason(
+            "auto-merge pending verification"
+        )
+        assert seconds == REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS

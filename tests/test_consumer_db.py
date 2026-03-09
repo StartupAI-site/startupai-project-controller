@@ -848,3 +848,114 @@ class TestInvalidFields:
         with pytest.raises(ValueError, match="Invalid session kind"):
             db.update_session(sess_id, session_kind="bogus")
         db.close()
+
+
+# -- Requeue cycle tracking -----------------------------------------------
+
+
+class TestRequeueCycleTracking:
+    def test_get_requeue_state_returns_zero_when_absent(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        count, pr_url = db.get_requeue_state("crew#88")
+        assert count == 0
+        assert pr_url is None
+        db.close()
+
+    def test_increment_requeue_count_stores_pr_url(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        new_count = db.increment_requeue_count("crew#88", "https://github.com/o/r/pull/42")
+        assert new_count == 1
+        count, pr_url = db.get_requeue_state("crew#88")
+        assert count == 1
+        assert pr_url == "https://github.com/o/r/pull/42"
+        new_count2 = db.increment_requeue_count("crew#88", "https://github.com/o/r/pull/42")
+        assert new_count2 == 2
+        db.close()
+
+    def test_reset_requeue_count(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.increment_requeue_count("crew#88", "https://github.com/o/r/pull/42")
+        db.increment_requeue_count("crew#88", "https://github.com/o/r/pull/42")
+        count, _ = db.get_requeue_state("crew#88")
+        assert count == 2
+        db.reset_requeue_count("crew#88")
+        count, pr_url = db.get_requeue_state("crew#88")
+        assert count == 0
+        assert pr_url is None
+        db.close()
+
+
+# -- Review queue blocked_streak + blocked_class columns -------------------
+
+
+class TestReviewQueueBlockedStreakColumns:
+    def test_blocked_streak_defaults_to_zero(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+        assert entry.blocked_streak == 0
+        assert entry.blocked_class is None
+        db.close()
+
+    def test_update_review_queue_item_writes_streak_and_class(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        now = _now()
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            now=now,
+        )
+        db.update_review_queue_item(
+            "crew#84",
+            next_attempt_at=(now + datetime.resolution).isoformat(),
+            last_result="blocked",
+            last_reason="required checks failed",
+            blocked_streak=3,
+            blocked_class="failed_checks",
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+        assert entry.blocked_streak == 3
+        assert entry.blocked_class == "failed_checks"
+        db.close()
+
+    def test_update_review_queue_item_clears_streak(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        now = _now()
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            now=now,
+        )
+        db.update_review_queue_item(
+            "crew#84",
+            next_attempt_at=(now + datetime.resolution).isoformat(),
+            last_result="blocked",
+            blocked_streak=5,
+            blocked_class="transient",
+            now=now,
+        )
+        db.update_review_queue_item(
+            "crew#84",
+            next_attempt_at=(now + datetime.resolution).isoformat(),
+            last_result="auto_merge_enabled",
+            blocked_streak=0,
+            blocked_class=None,
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+        assert entry.blocked_streak == 0
+        assert entry.blocked_class is None
+        db.close()

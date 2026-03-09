@@ -533,3 +533,62 @@ def test_query_latest_codex_verdict_prefers_latest_marker(
     assert verdict is not None
     assert verdict.decision == "pass"
     assert verdict.actor == "codex-bot"
+
+
+# -- enable_pull_request_automerge (M3: bounded verification) ----------------
+
+
+from startupai_controller.board_io import enable_pull_request_automerge, GhCommandError
+
+
+def test_enable_automerge_confirmed_after_retries() -> None:
+    """Verification reads succeed on second attempt → "confirmed"."""
+    call_count = {"enable": 0, "view": 0}
+
+    def fake_gh(args):
+        if "merge" in args and "--auto" in args:
+            call_count["enable"] += 1
+            return ""
+        if "view" in args and "--json" in args:
+            call_count["view"] += 1
+            if call_count["view"] >= 2:
+                return json.dumps({"autoMergeRequest": {"enabledAt": "2026-03-09"}})
+            return json.dumps({"autoMergeRequest": None})
+        return ""
+
+    result = enable_pull_request_automerge(
+        "o/r", 42, confirm_retries=3, confirm_delay_seconds=0, gh_runner=fake_gh,
+    )
+    assert result == "confirmed"
+    assert call_count["enable"] == 1
+    assert call_count["view"] >= 2
+
+
+def test_enable_automerge_pending_when_never_confirmed() -> None:
+    """All verify reads return null → "pending"."""
+    def fake_gh(args):
+        if "merge" in args and "--auto" in args:
+            return ""
+        if "view" in args:
+            return json.dumps({"autoMergeRequest": None})
+        return ""
+
+    result = enable_pull_request_automerge(
+        "o/r", 42, confirm_retries=3, confirm_delay_seconds=0, gh_runner=fake_gh,
+    )
+    assert result == "pending"
+
+
+def test_enable_automerge_propagates_gh_error_on_enable() -> None:
+    """Enable call raises GhQueryError → exception propagates (NOT caught)."""
+    from startupai_controller.validate_critical_path_promotion import GhQueryError
+
+    def fake_gh(args):
+        if "merge" in args and "--auto" in args:
+            raise GhQueryError("transport error")
+        return ""
+
+    with pytest.raises(GhQueryError, match="transport error"):
+        enable_pull_request_automerge(
+            "o/r", 42, confirm_retries=3, confirm_delay_seconds=0, gh_runner=fake_gh,
+        )
