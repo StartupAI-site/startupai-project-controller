@@ -980,8 +980,9 @@ class ConsumerDB:
                 "INSERT INTO review_queue ("
                 "issue_ref, pr_url, pr_repo, pr_number, source_session_id, "
                 "enqueued_at, updated_at, next_attempt_at, last_attempt_at, "
-                "attempt_count, last_result, last_reason, last_state_digest"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL) "
+                "attempt_count, last_result, last_reason, last_state_digest, "
+                "blocked_streak, blocked_class"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, 0, NULL) "
                 "ON CONFLICT(issue_ref) DO UPDATE SET "
                 "pr_url = excluded.pr_url, "
                 "pr_repo = excluded.pr_repo, "
@@ -994,7 +995,9 @@ class ConsumerDB:
                 "attempt_count = 0, "
                 "last_result = NULL, "
                 "last_reason = NULL, "
-                "last_state_digest = NULL",
+                "last_state_digest = NULL, "
+                "blocked_streak = 0, "
+                "blocked_class = NULL",
                 (
                     issue_ref,
                     pr_url,

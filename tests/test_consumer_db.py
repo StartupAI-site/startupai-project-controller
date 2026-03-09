@@ -959,3 +959,47 @@ class TestReviewQueueBlockedStreakColumns:
         assert entry.blocked_streak == 0
         assert entry.blocked_class is None
         db.close()
+
+    def test_enqueue_review_item_resets_blocked_streak_on_pr_change(
+        self, tmp_path: Path
+    ) -> None:
+        """PR replacement via enqueue_review_item must clear blocked_streak/blocked_class."""
+        db = _make_db(tmp_path)
+        now = _now()
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/1",
+            pr_repo="o/r",
+            pr_number=1,
+            source_session_id="sess-1",
+            now=now,
+        )
+        # Simulate blocked state accumulation
+        db.update_review_queue_item(
+            "crew#84",
+            next_attempt_at=(now + datetime.resolution).isoformat(),
+            last_result="blocked",
+            last_reason="required checks failed",
+            blocked_streak=4,
+            blocked_class="failed_checks",
+            now=now,
+        )
+        entry = db.get_review_queue_item("crew#84")
+        assert entry is not None
+        assert entry.blocked_streak == 4
+
+        # PR replacement triggers reset path (pr_url changed)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/o/r/pull/2",
+            pr_repo="o/r",
+            pr_number=2,
+            source_session_id="sess-2",
+            now=now,
+        )
+        updated = db.get_review_queue_item("crew#84")
+        assert updated is not None
+        assert updated.pr_url == "https://github.com/o/r/pull/2"
+        assert updated.blocked_streak == 0
+        assert updated.blocked_class is None
+        db.close()

@@ -3228,6 +3228,8 @@ def _apply_review_queue_partial_failure(
             last_result="partial_failure",
             last_reason=error,
             last_state_digest=entry.last_state_digest,
+            blocked_streak=0,
+            blocked_class=None,
             now=current,
         )
 

@@ -2138,6 +2138,47 @@ class TestRunOneCycle:
             for entry in updated
         )
 
+    def test_partial_failure_clears_blocked_streak(
+        self, tmp_path: Path
+    ) -> None:
+        """Partial-failure must not preserve stale blocked_streak/blocked_class."""
+        db = _make_db(tmp_path)
+        config = _make_consumer_config(tmp_path)
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        db.enqueue_review_item(
+            "crew#84",
+            pr_url="https://github.com/StartupAI-site/startupai-crew/pull/200",
+            pr_repo="StartupAI-site/startupai-crew",
+            pr_number=200,
+            now=now,
+        )
+        # Simulate accumulated blocked state
+        db.update_review_queue_item(
+            "crew#84",
+            next_attempt_at=now.isoformat(),
+            last_result="blocked",
+            last_reason="required checks pending",
+            blocked_streak=5,
+            blocked_class="transient",
+            now=now,
+        )
+        entries = db.list_review_queue_items()
+        assert entries[0].blocked_streak == 5
+
+        _apply_review_queue_partial_failure(
+            db,
+            entries,
+            config=config,
+            error="query:network:connection reset",
+            now=now,
+        )
+
+        updated = db.get_review_queue_item("crew#84")
+        assert updated is not None
+        assert updated.last_result == "partial_failure"
+        assert updated.blocked_streak == 0
+        assert updated.blocked_class is None
+
     def test_review_queue_partial_failure_retries_are_not_immediately_due(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
