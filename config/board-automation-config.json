@@ -1,0 +1,98 @@
+{
+  "version": 2,
+  "wip_limits": {
+    "codex": {
+      "crew": 4,
+      "app": 4,
+      "site": 4
+    },
+    "claude": {
+      "crew": 3,
+      "app": 3,
+      "site": 3
+    },
+    "human": {
+      "crew": 3,
+      "app": 3,
+      "site": 3
+    }
+  },
+  "freshness_hours": 24,
+  "stale_confirmation_cycles": 2,
+  "trusted_codex_actors": [
+    "chris00walker",
+    "codex",
+    "codex[bot]"
+  ],
+  "trusted_local_authors": [
+    "chris00walker",
+    "codex",
+    "codex[bot]"
+  ],
+  "execution_authority": {
+    "mode": "single_machine",
+    "repos": ["crew", "app", "site"],
+    "executors": ["codex"],
+    "global_concurrency": 4,
+    "issue_context_cache_enabled": true,
+    "issue_context_cache_ttl_seconds": 900,
+    "launch_hydration_concurrency": 1,
+    "rate_limit_pause_enabled": true,
+    "rate_limit_cooldown_seconds": 300,
+    "worktree_reuse_enabled": true,
+    "slo_metrics_enabled": true
+  },
+  "deprecated_workflow_mutations": {
+    "ready-scheduler": false,
+    "wip-rebalance": false,
+    "stale-work-guard": false
+  },
+  "required_checks_by_repo": {
+    "startupai-site/app.startupai-site": [
+      "ci",
+      "db-test-gate",
+      "e2e",
+      "tag-contract",
+      "codex-review-gate"
+    ],
+    "startupai-site/startupai-crew": [
+      "Unit & Integration Tests",
+      "Planning Surface Guard",
+      "tag-contract",
+      "codex-review-gate"
+    ],
+    "startupai-site/startupai.site": [
+      "ci",
+      "No local DB migrations",
+      "tag-contract",
+      "codex-review-gate"
+    ]
+  },
+  "feature_flags": {
+    "deferred_replay": true,
+    "multi_worker": true
+  },
+  "admission": {
+    "enabled": true,
+    "source_statuses": ["Backlog"],
+    "ready_floor_multiplier": 2,
+    "ready_cap_multiplier": 3,
+    "assignment_owner": "codex:local-consumer",
+    "max_batch_size": 6,
+    "acceptance_headings": [
+      "Acceptance Criteria",
+      "Definition of Done"
+    ]
+  },
+  "non_local_pr_policy": "block",
+  "dispatch": {
+    "target": "executor"
+  },
+  "canary_thresholds": {
+    "dispatch_success_rate": 0.95,
+    "automerge_per_repo_min": 1,
+    "duplicate_markers": 0,
+    "review_regressions": 0,
+    "dispatch_config_mutation_incidents": 0
+  }
+}

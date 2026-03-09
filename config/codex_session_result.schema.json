@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodexSessionResult",
+  "type": "object",
+  "required": [
+    "outcome",
+    "summary",
+    "tests_run",
+    "tests_passed",
+    "changed_files",
+    "commit_shas",
+    "pr_url",
+    "resolution",
+    "blocker_reason",
+    "needs_handoff_to",
+    "duration_seconds"
+  ],
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["success", "failed", "blocked"],
+      "description": "Terminal execution status."
+    },
+    "summary": {
+      "type": "string",
+      "description": "1-3 sentence human-readable summary of what was done or why it failed."
+    },
+    "tests_run": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Total tests executed. Null if tests were not run."
+    },
+    "tests_passed": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Tests that passed. Null if tests were not run."
+    },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Paths of files modified, relative to worktree root."
+    },
+    "commit_shas": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "SHA(s) of commits created. Empty if no commits."
+    },
+    "pr_url": {
+      "type": ["string", "null"],
+      "description": "PR URL if codex created one. Null if not (consumer creates PR)."
+    },
+    "resolution": {
+      "type": ["object", "null"],
+      "description": "Structured no-op resolution evidence when no PR or commits are produced.",
+      "required": [
+        "kind",
+        "summary",
+        "code_refs",
+        "commit_shas",
+        "pr_urls",
+        "validated_on_main",
+        "validation_command",
+        "validation_exit_code",
+        "acceptance_criteria_met",
+        "acceptance_criteria_notes",
+        "equivalence_claim"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "already_on_main",
+            "superseded_by_existing_solution",
+            "duplicate",
+            "superseded",
+            "no_action_needed"
+          ]
+        },
+        "summary": { "type": "string" },
+        "code_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "commit_shas": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "pr_urls": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "validated_on_main": { "type": "boolean" },
+        "validation_command": { "type": ["string", "null"] },
+        "validation_exit_code": { "type": ["integer", "null"] },
+        "acceptance_criteria_met": { "type": "boolean" },
+        "acceptance_criteria_notes": { "type": "string" },
+        "equivalence_claim": {
+          "type": "string",
+          "enum": ["exact_match", "strict_superset", "unknown"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "blocker_reason": {
+      "type": ["string", "null"],
+      "description": "Why execution is blocked (only when outcome=blocked). Null otherwise."
+    },
+    "needs_handoff_to": {
+      "type": ["string", "null"],
+      "enum": ["claude", null],
+      "description": "Suggested escalation target. v0 supports claude only; human escalation deferred to v1. Null if no escalation needed."
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Wall-clock seconds codex spent executing."
+    }
+  },
+  "additionalProperties": false
+}
