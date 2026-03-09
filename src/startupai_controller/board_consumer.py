@@ -146,6 +146,16 @@ from startupai_controller.domain.review_queue_policy import (
     review_queue_retry_seconds_for_skipped_reason as _review_queue_retry_seconds_for_skipped_reason,
     session_retry_due_at as _session_retry_due_at,
 )
+from startupai_controller.domain.verdict_policy import (
+    is_pre_backfill_eligible as _is_pre_backfill_eligible,
+    is_session_verdict_eligible as _is_session_verdict_eligible,
+    marker_already_present as _marker_already_present,
+    verdict_comment_body as _verdict_comment_body,
+    verdict_marker_text as _verdict_marker_text,
+)
+from startupai_controller.domain.launch_policy import (
+    classify_pr_candidates as _classify_pr_candidates_pure,
+)
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,
@@ -2337,41 +2347,13 @@ def _classify_open_pr_candidates(
         issue_number,
         gh_runner=gh_runner,
     )
-    if not candidates:
-        return "none", None, "no-open-pr"
-
-    adoptable: list[OpenPullRequestMatch] = []
-    ambiguous_reasons: list[str] = []
-    branch_pattern = _deterministic_branch_pattern(issue_ref)
-    for candidate in candidates:
-        provenance = candidate.provenance
-        if provenance is None:
-            ambiguous_reasons.append(f"missing-provenance:{candidate.url}")
-            continue
-        if provenance.get("issue_ref") != issue_ref:
-            ambiguous_reasons.append(f"issue-mismatch:{candidate.url}")
-            continue
-        if provenance.get("executor") != "codex":
-            ambiguous_reasons.append(f"executor-mismatch:{candidate.url}")
-            continue
-        if candidate.author not in automation_config.trusted_local_authors:
-            ambiguous_reasons.append(f"untrusted-author:{candidate.url}")
-            continue
-        if expected_branch and candidate.branch_name != expected_branch:
-            ambiguous_reasons.append(f"branch-mismatch:{candidate.url}")
-            continue
-        if not branch_pattern.match(candidate.branch_name):
-            ambiguous_reasons.append(f"branch-noncanonical:{candidate.url}")
-            continue
-        adoptable.append(candidate)
-
-    if len(adoptable) == 1 and not ambiguous_reasons:
-        return "adoptable", adoptable[0], "qualifying-open-pr"
-    if adoptable and not ambiguous_reasons:
-        return "ambiguous", None, "multiple-adoptable-prs"
-    if adoptable and ambiguous_reasons:
-        return "ambiguous", None, ";".join(ambiguous_reasons)
-    return "non-local", None, ";".join(ambiguous_reasons)
+    return _classify_pr_candidates_pure(
+        issue_ref,
+        candidates,
+        trusted_authors=automation_config.trusted_local_authors,
+        expected_branch=expected_branch,
+        issue_number=issue_number,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2449,22 +2431,12 @@ def _post_pr_codex_verdict(
         raise GhQueryError(f"Invalid PR URL for codex verdict: {pr_url}")
 
     owner, repo, pr_number = parsed
-    marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session={session_id} -->"
+    marker = _verdict_marker_text(session_id)
     checker = comment_checker or _comment_exists
     if checker(owner, repo, pr_number, marker, gh_runner=gh_runner):
         return False
 
-    body = "\n".join(
-        [
-            marker,
-            "codex-review: pass",
-            "codex-route: none",
-            "",
-            (
-                "Trusted local verdict after successful consumer session "
-                f"`{session_id}`."
-            ),
-        ]
+    body = _verdict_comment_body(session_id
     )
     poster = comment_poster or _post_comment
     poster(owner, repo, pr_number, body, gh_runner=gh_runner)
@@ -2739,9 +2711,13 @@ def _backfill_review_verdicts_from_snapshots(
         )
         if session is None:
             continue
-        if session.status != "success" or session.phase != "review" or not session.pr_url:
+        if not _is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+        ):
             continue
-        marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session={session.id} -->"
+        marker = _verdict_marker_text(session.id)
         seen_markers = posted_markers.setdefault(
             (entry.pr_repo, entry.pr_number),
             {
@@ -2750,7 +2726,7 @@ def _backfill_review_verdicts_from_snapshots(
                 if isinstance(body, str)
             },
         )
-        if any(marker in body for body in seen_markers):
+        if _marker_already_present(marker, seen_markers):
             continue
         try:
             posted = _post_pr_codex_verdict(
@@ -2785,13 +2761,10 @@ def _pre_backfill_verdicts_for_due_prs(
     """Post missing verdicts BEFORE snapshot build for verdict-blocked and newly seeded entries."""
     backfilled: list[str] = []
     for entry in due_items:
-        is_verdict_blocked = (
-            entry.last_result == "blocked"
-            and entry.last_reason is not None
-            and "missing codex verdict marker" in entry.last_reason.lower()
-        )
-        is_newly_seeded = entry.last_result is None
-        if not is_verdict_blocked and not is_newly_seeded:
+        if not _is_pre_backfill_eligible(
+            last_result=entry.last_result,
+            last_reason=entry.last_reason,
+        ):
             continue
         try:
             session = (
@@ -2801,10 +2774,12 @@ def _pre_backfill_verdicts_for_due_prs(
             )
             if session is None:
                 continue
-            if session.status != "success" or session.phase != "review" or not session.pr_url:
-                continue
-            # Guard: session.pr_url must match entry.pr_url
-            if session.pr_url != entry.pr_url:
+            if not _is_session_verdict_eligible(
+                session_status=session.status,
+                session_phase=session.phase,
+                session_pr_url=session.pr_url,
+                entry_pr_url=entry.pr_url,
+            ):
                 continue
             posted = _post_pr_codex_verdict(
                 session.pr_url,
