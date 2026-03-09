@@ -18,6 +18,7 @@ from startupai_controller.domain.review_queue_policy import (
     ESCALATION_CEILING_FAILED,
     ESCALATION_CEILING_STABLE,
     ESCALATION_CEILING_TRANSIENT,
+    MAX_REQUEUE_CYCLES,
     RETRYABLE_FAILURE_REASONS,
     REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS,
     REVIEW_QUEUE_FAILED_RETRY_SECONDS,
@@ -25,9 +26,11 @@ from startupai_controller.domain.review_queue_policy import (
     REVIEW_QUEUE_PENDING_RETRY_SECONDS,
     REVIEW_QUEUE_SKIPPED_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
+    blocked_streak_needs_escalation as _blocked_streak_needs_escalation,
     blocker_class as _blocker_class,
     effective_retry_backoff as _effective_retry_backoff,
     escalation_ceiling_for_blocker_class as _escalation_ceiling_for_blocker_class,
+    requeue_or_escalate as _requeue_or_escalate,
     is_retryable_failure_reason as _is_retryable_failure_reason,
     parse_iso8601_timestamp as _parse_iso8601_timestamp,
     retry_delay_seconds as _retry_delay_seconds,
@@ -460,3 +463,76 @@ class TestParseIso8601Timestamp:
         result = _parse_iso8601_timestamp("2025-01-15T12:00:00+02:00")
         assert result is not None
         assert result.hour == 10  # 12:00 +02:00 → 10:00 UTC
+
+
+# ---------------------------------------------------------------------------
+# requeue_or_escalate
+# ---------------------------------------------------------------------------
+
+
+class TestRequeueOrEscalate:
+    """Characterize requeue_or_escalate domain function."""
+
+    def test_below_ceiling_returns_requeue(self) -> None:
+        assert _requeue_or_escalate(0) == "requeue"
+
+    def test_one_below_ceiling_returns_requeue(self) -> None:
+        assert _requeue_or_escalate(MAX_REQUEUE_CYCLES - 1) == "requeue"
+
+    def test_at_ceiling_returns_escalate(self) -> None:
+        assert _requeue_or_escalate(MAX_REQUEUE_CYCLES) == "escalate"
+
+    def test_above_ceiling_returns_escalate(self) -> None:
+        assert _requeue_or_escalate(MAX_REQUEUE_CYCLES + 5) == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# blocked_streak_needs_escalation
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedStreakNeedsEscalation:
+    """Characterize blocked_streak_needs_escalation domain function."""
+
+    def test_first_block_no_escalation(self) -> None:
+        new_class, new_streak, needs = _blocked_streak_needs_escalation(
+            "required checks pending", 0, None,
+        )
+        assert new_class == "transient"
+        assert new_streak == 1
+        assert needs is False
+
+    def test_same_class_increments_streak(self) -> None:
+        _, streak, _ = _blocked_streak_needs_escalation(
+            "required checks pending", 5, "transient",
+        )
+        assert streak == 6
+
+    def test_different_class_resets_streak(self) -> None:
+        new_class, streak, _ = _blocked_streak_needs_escalation(
+            "required checks failed", 5, "transient",
+        )
+        assert new_class == "failed_checks"
+        assert streak == 1
+
+    def test_transient_escalation_at_ceiling(self) -> None:
+        _, _, needs = _blocked_streak_needs_escalation(
+            "required checks pending",
+            ESCALATION_CEILING_TRANSIENT - 1,
+            "transient",
+        )
+        assert needs is True
+
+    def test_failed_escalation_at_ceiling(self) -> None:
+        _, _, needs = _blocked_streak_needs_escalation(
+            "required checks failed",
+            ESCALATION_CEILING_FAILED - 1,
+            "failed_checks",
+        )
+        assert needs is True
+
+    def test_below_ceiling_no_escalation(self) -> None:
+        _, _, needs = _blocked_streak_needs_escalation(
+            "required checks failed", 1, "failed_checks",
+        )
+        assert needs is False

@@ -19,6 +19,7 @@ from startupai_controller.domain.repair_policy import (
 )
 from startupai_controller.domain.launch_policy import (
     classify_pr_candidates,
+    launch_session_kind,
     reconcile_in_progress_decision,
 )
 
@@ -281,3 +282,28 @@ class TestReconcileInProgressDecision:
             session_status="success",
         )
         assert result == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# launch_session_kind
+# ---------------------------------------------------------------------------
+
+
+class TestLaunchSessionKind:
+    """Characterize launch_session_kind domain function."""
+
+    def test_adoptable_with_match_returns_repair(self) -> None:
+        pr_match = _make_candidate(issue_ref="crew#42")
+        assert launch_session_kind("adoptable", pr_match) == "repair"
+
+    def test_adoptable_without_match_returns_new_work(self) -> None:
+        assert launch_session_kind("adoptable", None) == "new_work"
+
+    def test_none_classification_returns_new_work(self) -> None:
+        assert launch_session_kind("none", None) == "new_work"
+
+    def test_ambiguous_returns_new_work(self) -> None:
+        assert launch_session_kind("ambiguous", None) == "new_work"
+
+    def test_non_local_returns_new_work(self) -> None:
+        assert launch_session_kind("non-local", None) == "new_work"

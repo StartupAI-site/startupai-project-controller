@@ -38,8 +38,6 @@ from typing import Any, Callable
 
 from startupai_controller.board_automation import (
     BoardAutomationConfig,
-    ClaimReadyResult,
-    ReviewSnapshot,
     _build_review_snapshot_from_payload,
     admission_summary_payload,
     admit_backlog_items,
@@ -70,10 +68,9 @@ from startupai_controller.consumer_workflow import (
     workflow_status_payload,
     write_workflow_snapshot,
 )
-from startupai_controller.board_io import (
+from startupai_controller.board_io import (  # transitional: mechanism access (see ADR-002)
     CycleBoardSnapshot,
     CycleGitHubMemo,
-    MARKER_PREFIX,
     LinkedIssue,
     _ProjectItemSnapshot,
     _comment_exists,
@@ -96,13 +93,11 @@ from startupai_controller.board_io import (
     review_state_digest_from_payload,
     review_state_digest_from_probe,
 )
-from startupai_controller.github_http import begin_request_stats, end_request_stats
-from startupai_controller.consumer_db import (
+from startupai_controller.github_http import begin_request_stats, end_request_stats  # transitional: transport stats
+from startupai_controller.consumer_db import (  # transitional: concrete DB + adapter-internal types
     ConsumerDB,
     MetricEvent,
     RecoveredLease,
-    ReviewQueueEntry,
-    SessionInfo,
 )
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
@@ -112,11 +107,18 @@ from startupai_controller.domain.resolution_policy import (
     resolution_has_meaningful_signal,
 )
 from startupai_controller.domain.models import (
+    ClaimReadyResult,
     CycleResult,
     OpenPullRequestMatch,
     RepairBranchReconcileOutcome,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
+    ReviewQueueEntry,
+    ReviewSnapshot,
+    SessionInfo,
+)
+from startupai_controller.domain.repair_policy import (
+    MARKER_PREFIX,
 )
 from startupai_controller.domain.review_queue_policy import (
     DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
@@ -135,9 +137,11 @@ from startupai_controller.domain.review_queue_policy import (
     REVIEW_QUEUE_SKIPPED_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_RESULTS,
+    blocked_streak_needs_escalation as _blocked_streak_needs_escalation,
     blocker_class as _blocker_class,
     effective_retry_backoff as _effective_retry_backoff_primitives,
     escalation_ceiling_for_blocker_class as _escalation_ceiling_for_blocker_class,
+    requeue_or_escalate as _requeue_or_escalate,
     is_retryable_failure_reason as _is_retryable_failure_reason,
     parse_iso8601_timestamp as _parse_iso8601_timestamp,
     retry_delay_seconds as _retry_delay_seconds,
@@ -155,6 +159,7 @@ from startupai_controller.domain.verdict_policy import (
 )
 from startupai_controller.domain.launch_policy import (
     classify_pr_candidates as _classify_pr_candidates_pure,
+    launch_session_kind as _launch_session_kind,
     reconcile_in_progress_decision,
 )
 from startupai_controller.validate_critical_path_promotion import (
@@ -1065,7 +1070,7 @@ def _set_issue_handoff_target(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    from startupai_controller.board_io import _set_single_select_field
+    from startupai_controller.board_io import _set_single_select_field  # transitional
     from startupai_controller.promote_ready import _query_issue_board_info
 
     resolve_info = board_info_resolver or _query_issue_board_info
@@ -2943,11 +2948,10 @@ def _apply_review_queue_result(
         return False
 
     if result.blocked_reason:
-        new_class = _blocker_class(result.blocked_reason)
-        new_streak = (
-            (entry.blocked_streak + 1)
-            if new_class == entry.blocked_class
-            else 1
+        new_class, new_streak, needs_escalation = _blocked_streak_needs_escalation(
+            result.blocked_reason,
+            entry.blocked_streak,
+            entry.blocked_class,
         )
         db.update_review_queue_item(
             entry.issue_ref,
@@ -2959,7 +2963,7 @@ def _apply_review_queue_result(
             blocked_class=new_class,
             now=current,
         )
-        return new_streak >= _escalation_ceiling_for_blocker_class(new_class)
+        return needs_escalation
 
     if result.skipped_reason:
         db.update_review_queue_item(
@@ -3299,7 +3303,7 @@ def _drain_review_queue(
                 entry = next((e for e in entries if e.issue_ref == issue_ref), None)
                 pr_url = entry.pr_url if entry is not None else ""
                 requeue_count, _ = db.get_requeue_state(issue_ref)
-                if requeue_count >= MAX_REQUEUE_CYCLES:
+                if _requeue_or_escalate(requeue_count) == "escalate":
                     if not dry_run:
                         _escalate_to_claude(
                             issue_ref,
@@ -3949,7 +3953,7 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    from startupai_controller.board_io import _set_single_select_field
+    from startupai_controller.board_io import _set_single_select_field  # transitional
     from startupai_controller.promote_ready import _query_issue_board_info
 
     marker = _marker_for("consumer-escalation", issue_ref)
@@ -4285,6 +4289,8 @@ def _prepare_launch_candidate(
 
     repair_pr_url: str | None = None
     repair_branch_name: str | None = None
+    classification: str | None = None
+    pr_match: OpenPullRequestMatch | None = None
     session_kind = "new_work"
     if auto_config is not None:
         classification, pr_match, _reason = _classify_open_pr_candidates(
@@ -4295,8 +4301,8 @@ def _prepare_launch_candidate(
             auto_config,
             gh_runner=gh_runner,
         )
-        if classification == "adoptable" and pr_match is not None:
-            session_kind = "repair"
+        session_kind = _launch_session_kind(classification, pr_match)
+        if session_kind == "repair" and pr_match is not None:
             repair_pr_url = pr_match.url
             repair_branch_name = pr_match.branch_name
 

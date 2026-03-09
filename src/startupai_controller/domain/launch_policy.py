@@ -77,6 +77,25 @@ def classify_pr_candidates(
 
 
 # ---------------------------------------------------------------------------
+# Session kind determination
+# ---------------------------------------------------------------------------
+
+
+def launch_session_kind(
+    classification: str,
+    pr_match: OpenPullRequestMatch | None,
+) -> str:
+    """Determine the session kind for a launch candidate.
+
+    Returns ``"repair"`` when an adoptable PR exists, ``"new_work"`` otherwise.
+    Pure decision — no side effects.
+    """
+    if classification == "adoptable" and pr_match is not None:
+        return "repair"
+    return "new_work"
+
+
+# ---------------------------------------------------------------------------
 # Board reconciliation truth table
 # ---------------------------------------------------------------------------
 

@@ -36,24 +36,18 @@ import sys
 from typing import Callable
 
 
-from startupai_controller.board_io import (
-    MARKER_PREFIX,
+from startupai_controller.board_io import (  # transitional: mechanism access (see ADR-002)
     COPILOT_CODING_AGENT_LOGINS,
     CycleBoardSnapshot,
     CycleGitHubMemo,
-    VALID_EXECUTORS,
     _ProjectItemSnapshot,
     LinkedIssue,
-    CheckObservation,
     CodexReviewVerdict,
-    OpenPullRequest,
     PullRequestViewPayload,
-    PrGateStatus,
     _run_gh,
     _parse_github_timestamp,
     _is_automation_login,
     _is_copilot_coding_agent_actor,
-    _priority_rank,
     _repo_to_prefix,
     _issue_ref_to_repo_parts,
     _snapshot_to_issue_ref,
@@ -99,7 +93,6 @@ from startupai_controller.board_io import (
     rerun_actions_run,
     update_pull_request_branch,
 )
-from startupai_controller.resolution_proof import parse_resolution_comment
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,
@@ -112,19 +105,14 @@ from startupai_controller.validate_critical_path_promotion import (
     parse_issue_ref,
 )
 from startupai_controller.board_graph import (
-    AdmissionCandidate,
-    AdmissionDecision,
-    AdmissionSkip,
     _issue_sort_key,
     _resolve_issue_coordinates,
     _admission_candidate_rank,
     _ready_snapshot_rank,
     _count_wip_by_executor,
     _count_wip_by_executor_lane,
-    admission_watermarks,
     classify_parallelism_snapshot,
     find_unmet_ready_dependencies,
-    has_structured_acceptance_criteria,
 )
 from startupai_controller.promote_ready import (
     BoardInfo,
@@ -135,22 +123,38 @@ from startupai_controller.promote_ready import (
 )
 from startupai_controller.domain.automerge_policy import automerge_gate_decision
 from startupai_controller.domain.rescue_policy import rescue_decision
+from startupai_controller.domain.repair_policy import (
+    MARKER_PREFIX,
+)
+from startupai_controller.domain.resolution_policy import (
+    parse_resolution_comment,
+)
 from startupai_controller.domain.scheduling_policy import (
     VALID_DISPATCH_TARGETS,
     VALID_EXECUTION_AUTHORITY_MODES,
+    VALID_EXECUTORS,
     PROTECTED_QUEUE_ROUTING_STATUSES,
+    admission_watermarks,
+    has_structured_acceptance_criteria,
+    priority_rank as _priority_rank,
     wip_limit_for_lane as _domain_wip_limit_for_lane,
     protected_queue_executor_target as _domain_protected_queue_executor_target,
 )
 from startupai_controller.domain.models import (
-    PromotionResult,
-    SchedulingDecision,
+    AdmissionCandidate,
+    AdmissionDecision,
+    AdmissionSkip,
+    CheckObservation,
     ClaimReadyResult,
-    ExecutorRoutingDecision,
     ExecutionPolicyDecision,
-    ReviewSnapshot,
+    ExecutorRoutingDecision,
+    OpenPullRequest,
+    PrGateStatus,
+    PromotionResult,
     ReviewRescueResult,
     ReviewRescueSweep,
+    ReviewSnapshot,
+    SchedulingDecision,
 )
 
 # ---------------------------------------------------------------------------
