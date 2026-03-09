@@ -25,10 +25,7 @@ import sys
 import time
 from typing import Callable
 
-# Ensure project root is on sys.path so sibling script imports work
-# when invoked directly (e.g., `python scripts/promote_ready.py`).
-
-from startupai_controller.validate_critical_path_promotion import (  # noqa: E402
+from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,
     GhQueryError,
@@ -39,8 +36,9 @@ from startupai_controller.validate_critical_path_promotion import (  # noqa: E40
 from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
 from startupai_controller.github_http import GitHubTransportError, run_github_command
 
-DEFAULT_AUTOMATION_CONFIG_PATH = (
-    "docs/master-architecture/reference/board-automation-config.json"
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_AUTOMATION_CONFIG_PATH = str(
+    _REPO_ROOT / "config" / "board-automation-config.json"
 )
 PROMOTABLE_STATUSES = frozenset({"Backlog", "Blocked"})
 _GH_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
@@ -471,7 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--issue", required=True, help="Issue ref, e.g. crew#88")
     parser.add_argument(
         "--file",
-        default="docs/master-architecture/reference/critical-paths.json",
+        default=str(_REPO_ROOT / "config" / "critical-paths.json"),
         help="Path to critical-paths JSON file",
     )
     parser.add_argument(

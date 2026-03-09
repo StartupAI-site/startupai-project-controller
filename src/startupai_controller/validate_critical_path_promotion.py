@@ -23,6 +23,7 @@ from typing import Callable
 from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
 from startupai_controller.github_http import GitHubTransportError, run_github_command
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ISSUE_REF_RE = re.compile(r"^(app|crew|site)#(\d+)$")
 _GH_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 _GH_RETRYABLE_ERROR_MARKERS = (
@@ -414,7 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--issue", required=True, help="Issue ref, e.g. crew#88")
     parser.add_argument(
         "--file",
-        default="docs/master-architecture/reference/critical-paths.json",
+        default=str(_REPO_ROOT / "config" / "critical-paths.json"),
         help="Path to critical-paths JSON file",
     )
     parser.add_argument(
