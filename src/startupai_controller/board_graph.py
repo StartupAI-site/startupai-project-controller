@@ -17,12 +17,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 
-from startupai_controller.board_io import (
-    VALID_EXECUTORS,
+from startupai_controller.board_io import (  # transitional: board query mechanism
     _ProjectItemSnapshot,
     _list_project_items_by_status,
     _snapshot_to_issue_ref,
-    _priority_rank,
 )
 from startupai_controller.domain.models import (
     AdmissionCandidate,
@@ -30,10 +28,12 @@ from startupai_controller.domain.models import (
     AdmissionDecision,
 )
 from startupai_controller.domain.scheduling_policy import (
+    VALID_EXECUTORS,
     admission_watermarks as admission_watermarks,  # canonical (M5)
     admission_candidate_rank as _domain_admission_candidate_rank,
     has_structured_acceptance_criteria as has_structured_acceptance_criteria,  # canonical (M5)
     normalize_heading as _normalize_heading,  # canonical (M5)
+    priority_rank as _priority_rank,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,

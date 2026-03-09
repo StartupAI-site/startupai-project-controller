@@ -217,6 +217,36 @@ def parse_iso8601_timestamp(value: str | None) -> datetime | None:
 # ---------------------------------------------------------------------------
 
 
+def requeue_or_escalate(requeue_count: int) -> str:
+    """Decide whether to requeue or escalate based on cycle count.
+
+    Returns ``"escalate"`` when the requeue ceiling is reached,
+    ``"requeue"`` otherwise.
+    """
+    if requeue_count >= MAX_REQUEUE_CYCLES:
+        return "escalate"
+    return "requeue"
+
+
+def blocked_streak_needs_escalation(
+    blocked_reason: str,
+    current_streak: int,
+    current_class: str | None,
+) -> tuple[str, int, bool]:
+    """Compute updated blocked streak and whether escalation is needed.
+
+    Returns (new_class, new_streak, needs_escalation).
+    """
+    new_class = blocker_class(blocked_reason)
+    new_streak = (
+        (current_streak + 1)
+        if new_class == current_class
+        else 1
+    )
+    ceiling = escalation_ceiling_for_blocker_class(new_class)
+    return new_class, new_streak, new_streak >= ceiling
+
+
 def session_retry_due_at(
     session: SessionInfo,
     *,

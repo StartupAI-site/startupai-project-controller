@@ -38,8 +38,6 @@ from typing import Any, Callable
 
 from startupai_controller.board_automation import (
     BoardAutomationConfig,
-    ClaimReadyResult,
-    ReviewSnapshot,
     _build_review_snapshot_from_payload,
     admission_summary_payload,
     admit_backlog_items,
@@ -70,10 +68,9 @@ from startupai_controller.consumer_workflow import (
     workflow_status_payload,
     write_workflow_snapshot,
 )
-from startupai_controller.board_io import (
+from startupai_controller.board_io import (  # transitional: mechanism access (see ADR-002)
     CycleBoardSnapshot,
     CycleGitHubMemo,
-    MARKER_PREFIX,
     LinkedIssue,
     _ProjectItemSnapshot,
     _comment_exists,
@@ -83,7 +80,6 @@ from startupai_controller.board_io import (
     memoized_query_required_status_checks,
     _list_project_items_by_status,
     _marker_for,
-    _parse_pr_url,
     _post_comment,
     _run_gh,
     _set_status_if_changed,
@@ -96,13 +92,11 @@ from startupai_controller.board_io import (
     review_state_digest_from_payload,
     review_state_digest_from_probe,
 )
-from startupai_controller.github_http import begin_request_stats, end_request_stats
-from startupai_controller.consumer_db import (
+from startupai_controller.github_http import begin_request_stats, end_request_stats  # transitional: transport stats
+from startupai_controller.consumer_db import (  # transitional: concrete DB + adapter-internal types
     ConsumerDB,
     MetricEvent,
     RecoveredLease,
-    ReviewQueueEntry,
-    SessionInfo,
 )
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
@@ -112,12 +106,21 @@ from startupai_controller.domain.resolution_policy import (
     resolution_has_meaningful_signal,
 )
 from startupai_controller.domain.models import (
+    ClaimReadyResult,
     CycleResult,
     OpenPullRequestMatch,
     RepairBranchReconcileOutcome,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
+    ReviewQueueEntry,
+    ReviewSnapshot,
+    SessionInfo,
 )
+from startupai_controller.domain.repair_policy import (
+    MARKER_PREFIX,
+    parse_pr_url as _parse_pr_url,
+)
+from startupai_controller.adapters.sqlite_store import SqliteSessionStore
 from startupai_controller.domain.review_queue_policy import (
     DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
     DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
@@ -135,9 +138,11 @@ from startupai_controller.domain.review_queue_policy import (
     REVIEW_QUEUE_SKIPPED_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_RESULTS,
+    blocked_streak_needs_escalation as _blocked_streak_needs_escalation,
     blocker_class as _blocker_class,
     effective_retry_backoff as _effective_retry_backoff_primitives,
     escalation_ceiling_for_blocker_class as _escalation_ceiling_for_blocker_class,
+    requeue_or_escalate as _requeue_or_escalate,
     is_retryable_failure_reason as _is_retryable_failure_reason,
     parse_iso8601_timestamp as _parse_iso8601_timestamp,
     retry_delay_seconds as _retry_delay_seconds,
@@ -155,6 +160,8 @@ from startupai_controller.domain.verdict_policy import (
 )
 from startupai_controller.domain.launch_policy import (
     classify_pr_candidates as _classify_pr_candidates_pure,
+    launch_session_kind as _launch_session_kind,
+    reconcile_in_progress_decision,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -1064,7 +1071,7 @@ def _set_issue_handoff_target(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    from startupai_controller.board_io import _set_single_select_field
+    from startupai_controller.board_io import _set_single_select_field  # transitional
     from startupai_controller.promote_ready import _query_issue_board_info
 
     resolve_info = board_info_resolver or _query_issue_board_info
@@ -2942,11 +2949,10 @@ def _apply_review_queue_result(
         return False
 
     if result.blocked_reason:
-        new_class = _blocker_class(result.blocked_reason)
-        new_streak = (
-            (entry.blocked_streak + 1)
-            if new_class == entry.blocked_class
-            else 1
+        new_class, new_streak, needs_escalation = _blocked_streak_needs_escalation(
+            result.blocked_reason,
+            entry.blocked_streak,
+            entry.blocked_class,
         )
         db.update_review_queue_item(
             entry.issue_ref,
@@ -2958,7 +2964,7 @@ def _apply_review_queue_result(
             blocked_class=new_class,
             now=current,
         )
-        return new_streak >= _escalation_ceiling_for_blocker_class(new_class)
+        return needs_escalation
 
     if result.skipped_reason:
         db.update_review_queue_item(
@@ -3039,39 +3045,38 @@ def _update_board_snapshot_statuses(
     )
 
 
-def _drain_review_queue(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig | None,
-    *,
-    board_snapshot: CycleBoardSnapshot,
-    dry_run: bool = False,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
-    """Process a bounded batch of queued Review items."""
-    if automation_config is None:
-        return ReviewQueueDrainSummary(), board_snapshot
+# ---------------------------------------------------------------------------
+# _drain_review_queue sub-functions: focused extraction from god-function
+# ---------------------------------------------------------------------------
 
-    now = datetime.now(timezone.utc)
-    review_refs = set(
-        _review_scope_issue_refs(
-            config,
-            critical_path_config,
-            board_snapshot,
-        )
-    )
-    existing_entries = db.list_review_queue_items()
+
+def _prune_stale_review_entries(
+    db: ConsumerDB,
+    review_refs: set[str],
+    existing_entries: list[ReviewQueueEntry],
+    *,
+    dry_run: bool = False,
+) -> list[str]:
+    """Remove queue entries for issues no longer in Review scope."""
     removed: list[str] = []
-    existing_refs = {entry.issue_ref for entry in existing_entries}
     for entry in existing_entries:
         if entry.issue_ref in review_refs:
             continue
         if not dry_run:
             db.delete_review_queue_item(entry.issue_ref)
         removed.append(entry.issue_ref)
+    return removed
 
+
+def _seed_new_review_entries(
+    db: ConsumerDB,
+    review_refs: set[str],
+    existing_refs: set[str],
+    *,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> list[str]:
+    """Seed queue entries for Review issues not yet tracked."""
     seeded: list[str] = []
     for issue_ref in sorted(review_refs):
         if issue_ref in existing_refs:
@@ -3089,38 +3094,84 @@ def _drain_review_queue(
             ) is None:
                 continue
         seeded.append(issue_ref)
+    return seeded
 
-    # Reconcile queue rows + requeue counters against current PR identity
-    if not dry_run:
-        for entry in db.list_review_queue_items():
-            if entry.issue_ref not in review_refs:
+
+def _reconcile_review_queue_identity(
+    db: ConsumerDB,
+    review_refs: set[str],
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Reconcile queue rows and requeue counters against current PR identity.
+
+    When the active session's PR URL changes, update the queue entry and
+    reset the requeue counter to avoid false escalation.
+    """
+    for entry in db.list_review_queue_items():
+        if entry.issue_ref not in review_refs:
+            continue
+        current_pr_url = entry.pr_url
+        latest_session = db.latest_session_for_issue(entry.issue_ref)
+        if latest_session is not None and latest_session.pr_url:
+            current_pr_url = latest_session.pr_url
+        if current_pr_url != entry.pr_url:
+            parsed = _parse_pr_url(current_pr_url)
+            if parsed is None:
                 continue
-            current_pr_url = entry.pr_url
-            latest_session = db.latest_session_for_issue(entry.issue_ref)
-            if latest_session is not None and latest_session.pr_url:
-                current_pr_url = latest_session.pr_url
-            if current_pr_url != entry.pr_url:
-                parsed = _parse_pr_url(current_pr_url)
-                if parsed is None:
-                    continue
-                owner, repo, pr_number = parsed
-                db.enqueue_review_item(
-                    entry.issue_ref,
-                    pr_url=current_pr_url,
-                    pr_repo=f"{owner}/{repo}",
-                    pr_number=pr_number,
-                    source_session_id=(
-                        latest_session.id if latest_session is not None else entry.source_session_id
-                    ),
-                    next_attempt_at=entry.next_attempt_at,
-                    now=now,
-                )
-            _count, stored_pr_url = db.get_requeue_state(entry.issue_ref)
-            if stored_pr_url is not None and stored_pr_url != current_pr_url:
-                db.reset_requeue_count(entry.issue_ref)
+            owner, repo, pr_number = parsed
+            db.enqueue_review_item(
+                entry.issue_ref,
+                pr_url=current_pr_url,
+                pr_repo=f"{owner}/{repo}",
+                pr_number=pr_number,
+                source_session_id=(
+                    latest_session.id if latest_session is not None else entry.source_session_id
+                ),
+                next_attempt_at=entry.next_attempt_at,
+                now=now,
+            )
+        _count, stored_pr_url = db.get_requeue_state(entry.issue_ref)
+        if stored_pr_url is not None and stored_pr_url != current_pr_url:
+            db.reset_requeue_count(entry.issue_ref)
+
+
+def _drain_review_queue(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
+    *,
+    session_store: SqliteSessionStore | None = None,
+    board_snapshot: CycleBoardSnapshot,
+    dry_run: bool = False,
+    github_memo: CycleGitHubMemo | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
+    """Process a bounded batch of queued Review items."""
+    if automation_config is None:
+        return ReviewQueueDrainSummary(), board_snapshot
+
+    store = session_store or SqliteSessionStore(db)
+    now = datetime.now(timezone.utc)
+    review_refs = set(
+        _review_scope_issue_refs(
+            config,
+            critical_path_config,
+            board_snapshot,
+        )
+    )
+    existing_entries = store.list_review_queue_items()
+    existing_refs = {entry.issue_ref for entry in existing_entries}
+
+    # Phase 1: Prune stale entries, seed new ones, reconcile identity
+    removed = _prune_stale_review_entries(db, review_refs, existing_entries, dry_run=dry_run)
+    seeded = _seed_new_review_entries(db, review_refs, existing_refs, dry_run=dry_run, now=now)
+    if not dry_run:
+        _reconcile_review_queue_identity(db, review_refs, now=now)
 
     queue_items = [
-        entry for entry in db.list_review_queue_items() if entry.issue_ref in review_refs
+        entry for entry in store.list_review_queue_items() if entry.issue_ref in review_refs
     ]
     if not review_refs and not queue_items:
         return (
@@ -3147,7 +3198,7 @@ def _drain_review_queue(
         memo = github_memo or CycleGitHubMemo()
     if not dry_run:
         queue_items = [
-            entry for entry in db.list_review_queue_items() if entry.issue_ref in review_refs
+            entry for entry in store.list_review_queue_items() if entry.issue_ref in review_refs
         ]
     queue_pr_groups = dict(_group_review_queue_entries_by_pr(queue_items))
     due_entries_all = [
@@ -3286,7 +3337,7 @@ def _drain_review_queue(
                                f"{result.blocked_reason}",
                         gh_runner=gh_runner,
                     )
-                    db.delete_review_queue_item(entry.issue_ref)
+                    store.delete_review_queue_item(entry.issue_ref)
                     escalated.append(entry.issue_ref)
         pr_ref = f"{pr_repo}#{pr_number}"
         if result.rerun_checks:
@@ -3297,8 +3348,8 @@ def _drain_review_queue(
             for issue_ref in result.requeued_refs:
                 entry = next((e for e in entries if e.issue_ref == issue_ref), None)
                 pr_url = entry.pr_url if entry is not None else ""
-                requeue_count, _ = db.get_requeue_state(issue_ref)
-                if requeue_count >= MAX_REQUEUE_CYCLES:
+                requeue_count, _ = store.get_requeue_state(issue_ref)
+                if _requeue_or_escalate(requeue_count) == "escalate":
                     if not dry_run:
                         _escalate_to_claude(
                             issue_ref,
@@ -3309,12 +3360,12 @@ def _drain_review_queue(
                                    f"{result.blocked_reason or 'persistent check failure / conflict'}",
                             gh_runner=gh_runner,
                         )
-                        db.delete_review_queue_item(issue_ref)
+                        store.delete_review_queue_item(issue_ref)
                     escalated.append(issue_ref)
                 else:
                     if not dry_run:
-                        db.increment_requeue_count(issue_ref, pr_url)
-                        db.delete_review_queue_item(issue_ref)
+                        store.increment_requeue_count(issue_ref, pr_url)
+                        store.delete_review_queue_item(issue_ref)
                     requeued.append(issue_ref)
             requeued_this_group = [r for r in result.requeued_refs if r not in escalated]
             if requeued_this_group:
@@ -3673,6 +3724,9 @@ def _prepare_cycle(
     gh_runner: Callable[..., str] | None = None,
 ) -> PreparedCycleContext:
     """Run control-plane preflight once for a daemon tick."""
+    # Composition root: construct port instances for this cycle
+    session_store = SqliteSessionStore(db)
+
     request_stats_token = begin_request_stats()
     timings_ms: dict[str, int] = {}
     expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
@@ -3747,6 +3801,7 @@ def _prepare_cycle(
         cp_config,
         auto_config,
         db,
+        session_store=session_store,
         board_snapshot=board_snapshot,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
@@ -3769,6 +3824,7 @@ def _prepare_cycle(
         db,
         cp_config,
         auto_config,
+        session_store=session_store,
         board_snapshot=board_snapshot,
         dry_run=dry_run,
         github_memo=github_memo,
@@ -3948,7 +4004,7 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    from startupai_controller.board_io import _set_single_select_field
+    from startupai_controller.board_io import _set_single_select_field  # transitional
     from startupai_controller.promote_ready import _query_issue_board_info
 
     marker = _marker_for("consumer-escalation", issue_ref)
@@ -4073,6 +4129,7 @@ def _reconcile_board_truth(
     automation_config: BoardAutomationConfig | None,
     db: ConsumerDB,
     *,
+    session_store: SqliteSessionStore | None = None,
     dry_run: bool = False,
     board_snapshot: CycleBoardSnapshot | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
@@ -4083,7 +4140,8 @@ def _reconcile_board_truth(
     if automation_config is None:
         return ReconciliationResult()
 
-    active_workers = db.active_workers()
+    store = session_store or SqliteSessionStore(db)
+    active_workers = store.active_workers()
     active_issue_refs = {worker.issue_ref for worker in active_workers}
     active_repair_issue_refs = {
         worker.issue_ref
@@ -4152,7 +4210,7 @@ def _reconcile_board_truth(
             continue
 
         owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
-        latest_session = db.latest_session_for_issue(issue_ref)
+        latest_session = store.latest_session_for_issue(issue_ref)
         expected_branch = latest_session.branch_name if latest_session else None
         classification, pr_match, reason = _classify_open_pr_candidates(
             issue_ref,
@@ -4163,51 +4221,41 @@ def _reconcile_board_truth(
             expected_branch=expected_branch,
             gh_runner=gh_runner,
         )
-        if classification == "adoptable" and pr_match is not None:
-            if latest_session is not None and not dry_run:
-                db.update_session(latest_session.id, pr_url=pr_match.url)
+        # Domain policy: decide target status based on classification + session
+        target = reconcile_in_progress_decision(
+            classification,
+            has_latest_session=latest_session is not None,
+            session_kind=latest_session.session_kind if latest_session else None,
+            session_status=latest_session.status if latest_session else None,
+        )
 
-            should_requeue_repair = (
-                latest_session is not None
-                and latest_session.session_kind == "repair"
-                and latest_session.status != "success"
-            )
-            if should_requeue_repair:
-                if not dry_run:
-                    _return_issue_to_ready(
-                        issue_ref,
-                        critical_path_config,
-                        consumer_config.project_owner,
-                        consumer_config.project_number,
-                        from_statuses={"In Progress"},
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                moved_ready.append(issue_ref)
-            else:
+        if target == "ready":
+            if classification == "adoptable" and pr_match is not None:
                 if latest_session is not None and not dry_run:
-                    db.update_session(
-                        latest_session.id,
-                        pr_url=pr_match.url,
-                        phase="review",
-                    )
-                if not dry_run:
-                    _transition_issue_to_review(
-                        issue_ref,
-                        critical_path_config,
-                        consumer_config.project_owner,
-                        consumer_config.project_number,
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                moved_review.append(issue_ref)
-            continue
-
-        if classification == "none":
+                    store.update_session(latest_session.id, pr_url=pr_match.url)
             if not dry_run:
                 _return_issue_to_ready(
+                    issue_ref,
+                    critical_path_config,
+                    consumer_config.project_owner,
+                    consumer_config.project_number,
+                    from_statuses={"In Progress"},
+                    board_info_resolver=board_info_resolver,
+                    board_mutator=board_mutator,
+                    gh_runner=gh_runner,
+                )
+            moved_ready.append(issue_ref)
+            continue
+
+        if target == "review":
+            if latest_session is not None and pr_match is not None and not dry_run:
+                store.update_session(
+                    latest_session.id,
+                    pr_url=pr_match.url,
+                    phase="review",
+                )
+            if not dry_run:
+                _transition_issue_to_review(
                     issue_ref,
                     critical_path_config,
                     consumer_config.project_owner,
@@ -4216,9 +4264,10 @@ def _reconcile_board_truth(
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
                 )
-            moved_ready.append(issue_ref)
+            moved_review.append(issue_ref)
             continue
 
+        # target == "blocked"
         if not dry_run:
             _set_blocked_with_reason(
                 issue_ref,
@@ -4272,54 +4321,30 @@ def _block_prelaunch_issue(
         )
 
 
-def _prepare_launch_candidate(
+# ---------------------------------------------------------------------------
+# _prepare_launch_candidate sub-functions: focused extraction from god-function
+# ---------------------------------------------------------------------------
+
+
+def _setup_launch_worktree(
     issue_ref: str,
+    title: str,
+    session_kind: str,
+    repair_branch_name: str | None,
     *,
     config: ConsumerConfig,
-    prepared: PreparedCycleContext,
+    cp_config: CriticalPathConfig,
     db: ConsumerDB,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
-) -> PreparedLaunchContext:
-    """Prepare local launch state for an issue before board claim."""
-    cp_config = prepared.cp_config
-    auto_config = prepared.auto_config
-    candidate_prefix = parse_issue_ref(issue_ref).prefix
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, cp_config)
-    snapshot = _snapshot_for_issue(prepared.board_snapshot, issue_ref, cp_config)
+) -> tuple[str, str, str | None, str | None]:
+    """Set up worktree and reconcile repair branch if needed.
 
-    repair_pr_url: str | None = None
-    repair_branch_name: str | None = None
-    session_kind = "new_work"
-    if auto_config is not None:
-        classification, pr_match, _reason = _classify_open_pr_candidates(
-            issue_ref,
-            owner,
-            repo,
-            number,
-            auto_config,
-            gh_runner=gh_runner,
-        )
-        if classification == "adoptable" and pr_match is not None:
-            session_kind = "repair"
-            repair_pr_url = pr_match.url
-            repair_branch_name = pr_match.branch_name
-
-    context = _hydrate_issue_context(
-        issue_ref,
-        owner=owner,
-        repo=repo,
-        number=number,
-        snapshot=snapshot,
-        config=config,
-        db=db,
-        gh_runner=gh_runner,
-    )
-    title = str(context.get("title") or (snapshot.title if snapshot is not None else f"issue-{number}"))
-
+    Returns (worktree_path, branch_name, reconcile_state, reconcile_error).
+    Raises WorktreePrepareError on blocking failure.
+    """
     try:
         worktree_path, branch_name = _prepare_worktree(
             issue_ref,
@@ -4408,6 +4433,20 @@ def _prepare_launch_candidate(
             )
             raise WorktreePrepareError("repair_reconcile_error", blocked_reason)
 
+    return worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error
+
+
+def _resolve_launch_runtime(
+    candidate_prefix: str,
+    worktree_path: str,
+    *,
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+) -> tuple[Any, ConsumerConfig]:
+    """Load worktree workflow and compute effective runtime config.
+
+    Returns (workflow_definition, effective_consumer_config).
+    """
     workflow_definition = load_worktree_workflow(
         candidate_prefix,
         Path(worktree_path),
@@ -4435,6 +4474,83 @@ def _prepare_launch_candidate(
         validation_cmd=effective_validation_cmd,
         codex_timeout_seconds=effective_timeout_seconds,
         max_retries=effective_max_retries,
+    )
+    return workflow_definition, effective_consumer_config
+
+
+def _prepare_launch_candidate(
+    issue_ref: str,
+    *,
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    db: ConsumerDB,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> PreparedLaunchContext:
+    """Prepare local launch state for an issue before board claim."""
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    candidate_prefix = parse_issue_ref(issue_ref).prefix
+    owner, repo, number = _resolve_issue_coordinates(issue_ref, cp_config)
+    snapshot = _snapshot_for_issue(prepared.board_snapshot, issue_ref, cp_config)
+
+    repair_pr_url: str | None = None
+    repair_branch_name: str | None = None
+    classification: str | None = None
+    pr_match: OpenPullRequestMatch | None = None
+    session_kind = "new_work"
+    if auto_config is not None:
+        classification, pr_match, _reason = _classify_open_pr_candidates(
+            issue_ref,
+            owner,
+            repo,
+            number,
+            auto_config,
+            gh_runner=gh_runner,
+        )
+        session_kind = _launch_session_kind(classification, pr_match)
+        if session_kind == "repair" and pr_match is not None:
+            repair_pr_url = pr_match.url
+            repair_branch_name = pr_match.branch_name
+
+    context = _hydrate_issue_context(
+        issue_ref,
+        owner=owner,
+        repo=repo,
+        number=number,
+        snapshot=snapshot,
+        config=config,
+        db=db,
+        gh_runner=gh_runner,
+    )
+    title = str(context.get("title") or (snapshot.title if snapshot is not None else f"issue-{number}"))
+
+    # Phase 2: Set up worktree and reconcile repair branch
+    worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error = (
+        _setup_launch_worktree(
+            issue_ref,
+            title,
+            session_kind,
+            repair_branch_name,
+            config=config,
+            cp_config=cp_config,
+            db=db,
+            subprocess_runner=subprocess_runner,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+    )
+
+    # Phase 3: Resolve workflow and effective config
+    workflow_definition, effective_consumer_config = _resolve_launch_runtime(
+        candidate_prefix,
+        worktree_path,
+        config=config,
+        prepared=prepared,
     )
 
     _run_workspace_hooks(
@@ -6263,11 +6379,13 @@ def _cmd_reconcile(config: ConsumerConfig, *, dry_run: bool = False) -> int:
         cp_config = load_config(config.critical_paths_path)
         auto_config = load_automation_config(config.automation_config_path)
         _apply_automation_runtime(config, auto_config)
+        session_store = SqliteSessionStore(db)
         result = _reconcile_board_truth(
             config,
             cp_config,
             auto_config,
             db,
+            session_store=session_store,
             dry_run=dry_run,
         )
     finally:

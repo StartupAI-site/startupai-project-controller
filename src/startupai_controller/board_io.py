@@ -1104,20 +1104,9 @@ def _query_issue_updated_at(
 
 def _parse_pr_url(pr_field: str) -> tuple[str, str, int] | None:
     """Extract owner/repo/pr_number from a GitHub PR URL in project field."""
-    text = pr_field.strip()
-    if not text:
-        return None
-    match = re.search(
-        r"github\.com/([^/]+)/([^/]+)/pull/(\d+)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        return None
-    owner = match.group(1)
-    repo = match.group(2)
-    number = int(match.group(3))
-    return owner, repo, number
+    from startupai_controller.domain.repair_policy import parse_pr_url  # canonical (M5)
+
+    return parse_pr_url(pr_field)
 
 
 def _is_pr_open(

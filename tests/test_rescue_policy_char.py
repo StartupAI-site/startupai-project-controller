@@ -1,8 +1,7 @@
 """Characterization tests for rescue + automerge policy functions (M2).
 
 Locks down the pure gate-evaluation decision within review_rescue() and
-automerge_review() before extraction to domain/rescue_policy.py and
-domain/automerge_policy.py.
+automerge_review(). Imports from domain modules directly.
 """
 
 from __future__ import annotations
@@ -12,12 +11,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from startupai_controller.board_automation import (
+from startupai_controller.domain.rescue_policy import (
+    configured_review_checks as _configured_review_checks,
+    rescue_decision,
+)
+from startupai_controller.domain.automerge_policy import automerge_gate_decision
+from startupai_controller.domain.models import (
     ReviewRescueResult,
     ReviewSnapshot,
-    _configured_review_checks,
+    CheckObservation,
+    PrGateStatus,
 )
-from startupai_controller.board_io import CheckObservation, PrGateStatus
 
 
 # ---------------------------------------------------------------------------
@@ -29,26 +33,21 @@ class TestConfiguredReviewChecks:
     """Characterize _configured_review_checks."""
 
     def test_matching_repo(self) -> None:
-        config = SimpleNamespace(
-            required_checks_by_repo={
-                "startupai-site/startupai-crew": ("ci", "test"),
-            }
-        )
-        result = _configured_review_checks("StartupAI-site/startupai-crew", config)
+        checks_by_repo = {
+            "startupai-site/startupai-crew": ("ci", "test"),
+        }
+        result = _configured_review_checks("StartupAI-site/startupai-crew", checks_by_repo)
         assert result == ("ci", "test")
 
     def test_no_matching_repo(self) -> None:
-        config = SimpleNamespace(required_checks_by_repo={})
-        result = _configured_review_checks("unknown/repo", config)
+        result = _configured_review_checks("unknown/repo", {})
         assert result == ()
 
     def test_case_and_whitespace_normalized(self) -> None:
-        config = SimpleNamespace(
-            required_checks_by_repo={
-                "org/repo": ("check1",),
-            }
-        )
-        result = _configured_review_checks("  Org/Repo  ", config)
+        checks_by_repo = {
+            "org/repo": ("check1",),
+        }
+        result = _configured_review_checks("  Org/Repo  ", checks_by_repo)
         assert result == ("check1",)
 
 
@@ -364,3 +363,155 @@ class TestAutomergeGateDecisionTable:
         assert not snapshot.gate_status.failed
         assert not snapshot.gate_status.pending
         assert snapshot.gate_status.mergeable in {"MERGEABLE", "UNKNOWN"}
+
+
+# ---------------------------------------------------------------------------
+# rescue_decision — domain function direct tests
+# ---------------------------------------------------------------------------
+
+
+class TestRescueDecisionDirect:
+    """Exercise domain.rescue_policy.rescue_decision() directly."""
+
+    def _call(self, snapshot: ReviewSnapshot) -> tuple[str, str]:
+        return rescue_decision(
+            review_refs=tuple(snapshot.review_refs),
+            has_cancelled_checks=bool(snapshot.rescue_cancelled),
+            pr_state=snapshot.gate_status.state,
+            is_draft=snapshot.gate_status.is_draft,
+            mergeable=snapshot.gate_status.mergeable,
+            copilot_review_present=snapshot.copilot_review_present,
+            codex_gate_code=snapshot.codex_gate_code,
+            codex_gate_message=snapshot.codex_gate_message,
+            required_failed=snapshot.gate_status.failed,
+            required_pending=snapshot.gate_status.pending,
+            rescue_failed=snapshot.rescue_failed,
+            rescue_pending=snapshot.rescue_pending,
+            rescue_missing=snapshot.rescue_missing,
+            auto_merge_enabled=snapshot.gate_status.auto_merge_enabled,
+        )
+
+    def test_no_review_refs(self) -> None:
+        action, _ = self._call(_make_snapshot(review_refs=()))
+        assert action == "skipped"
+
+    def test_cancelled_checks(self) -> None:
+        action, _ = self._call(_make_snapshot(rescue_cancelled={"ci"}))
+        assert action == "rerun_cancelled"
+
+    def test_not_open(self) -> None:
+        action, reason = self._call(_make_snapshot(
+            gate_status=_make_gate_status(state="CLOSED"),
+        ))
+        assert action == "blocked"
+        assert "state=" in reason
+
+    def test_draft(self) -> None:
+        action, reason = self._call(_make_snapshot(
+            gate_status=_make_gate_status(is_draft=True),
+        ))
+        assert action == "blocked"
+        assert reason == "draft-pr"
+
+    def test_conflicting(self) -> None:
+        action, _ = self._call(_make_snapshot(
+            gate_status=_make_gate_status(mergeable="CONFLICTING"),
+        ))
+        assert action == "requeue_conflicting"
+
+    def test_missing_copilot(self) -> None:
+        action, _ = self._call(_make_snapshot(copilot_review_present=False))
+        assert action == "blocked"
+
+    def test_codex_gate_fail(self) -> None:
+        action, _ = self._call(_make_snapshot(codex_gate_code=2, codex_gate_message="fail"))
+        assert action == "blocked"
+
+    def test_required_failed(self) -> None:
+        action, _ = self._call(_make_snapshot(
+            gate_status=_make_gate_status(failed={"ci"}),
+        ))
+        assert action == "requeue_failed"
+
+    def test_required_pending(self) -> None:
+        action, _ = self._call(_make_snapshot(
+            gate_status=_make_gate_status(pending={"ci"}),
+        ))
+        assert action == "blocked"
+
+    def test_rescue_failed(self) -> None:
+        action, _ = self._call(_make_snapshot(rescue_failed={"test"}))
+        assert action == "blocked"
+
+    def test_rescue_pending(self) -> None:
+        action, _ = self._call(_make_snapshot(rescue_pending={"test"}))
+        assert action == "blocked"
+
+    def test_auto_merge_already_enabled(self) -> None:
+        action, _ = self._call(_make_snapshot(
+            gate_status=_make_gate_status(auto_merge_enabled=True),
+        ))
+        assert action == "skipped"
+
+    def test_all_clear(self) -> None:
+        action, _ = self._call(_make_snapshot())
+        assert action == "enable_automerge"
+
+
+# ---------------------------------------------------------------------------
+# automerge_gate_decision — domain function direct tests
+# ---------------------------------------------------------------------------
+
+
+class TestAutomergeGateDecisionDirect:
+    """Exercise domain.automerge_policy.automerge_gate_decision() directly."""
+
+    def _call(self, snapshot: ReviewSnapshot) -> tuple[int, str, str]:
+        return automerge_gate_decision(
+            pr_repo=snapshot.pr_repo,
+            pr_number=snapshot.pr_number,
+            review_refs=tuple(snapshot.review_refs),
+            copilot_review_present=snapshot.copilot_review_present,
+            codex_gate_code=snapshot.codex_gate_code,
+            codex_gate_message=snapshot.codex_gate_message,
+            pr_state=snapshot.gate_status.state,
+            is_draft=snapshot.gate_status.is_draft,
+            auto_merge_enabled=snapshot.gate_status.auto_merge_enabled,
+            required_failed=snapshot.gate_status.failed,
+            required_pending=snapshot.gate_status.pending,
+            mergeable=snapshot.gate_status.mergeable,
+            merge_state_status=snapshot.gate_status.merge_state_status,
+        )
+
+    def test_no_review_refs(self) -> None:
+        code, _, action = self._call(_make_snapshot(review_refs=()))
+        assert code == 2
+        assert action == "no_op"
+
+    def test_missing_copilot(self) -> None:
+        code, _, action = self._call(_make_snapshot(copilot_review_present=False))
+        assert code == 2
+        assert action == "no_op"
+
+    def test_codex_gate_fail(self) -> None:
+        code, _, action = self._call(_make_snapshot(codex_gate_code=2))
+        assert action == "no_op"
+
+    def test_already_enabled(self) -> None:
+        code, _, action = self._call(_make_snapshot(
+            gate_status=_make_gate_status(auto_merge_enabled=True),
+        ))
+        assert code == 0
+        assert action == "already_enabled"
+
+    def test_behind(self) -> None:
+        code, _, action = self._call(_make_snapshot(
+            gate_status=_make_gate_status(merge_state_status="BEHIND"),
+        ))
+        assert code == 0
+        assert action == "update_branch_then_enable"
+
+    def test_all_clear(self) -> None:
+        code, _, action = self._call(_make_snapshot())
+        assert code == 0
+        assert action == "enable"

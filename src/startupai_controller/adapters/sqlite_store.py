@@ -7,7 +7,7 @@ and the existing SQLite access layer.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
 
@@ -53,3 +53,46 @@ class SqliteSessionStore:
 
     def get_requeue_state(self, issue_ref: str) -> tuple[int, str | None]:
         return self._db.get_requeue_state(issue_ref)
+
+    # -- Methods used by dependency-violating orchestrator functions --------
+
+    def list_review_queue_items(self) -> list[ReviewQueueEntry]:
+        return self._db.list_review_queue_items()
+
+    def delete_review_queue_item(self, issue_ref: str) -> None:
+        self._db.delete_review_queue_item(issue_ref)
+
+    def update_review_queue_item(
+        self,
+        issue_ref: str,
+        *,
+        next_attempt_at: str,
+        last_result: str,
+        last_reason: str | None = None,
+        last_state_digest: str | None = None,
+        blocked_streak: int = 0,
+        blocked_class: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        self._db.update_review_queue_item(
+            issue_ref,
+            next_attempt_at=next_attempt_at,
+            last_result=last_result,
+            last_reason=last_reason,
+            last_state_digest=last_state_digest,
+            blocked_streak=blocked_streak,
+            blocked_class=blocked_class,
+            now=now,
+        )
+
+    def reset_requeue_count(self, issue_ref: str) -> None:
+        self._db.reset_requeue_count(issue_ref)
+
+    def increment_requeue_count(self, issue_ref: str, pr_url: str) -> int:
+        return self._db.increment_requeue_count(issue_ref, pr_url)
+
+    def active_workers(self) -> list[SessionInfo]:
+        return self._db.active_workers()
+
+    def update_session(self, session_id: str, **fields: Any) -> None:
+        self._db.update_session(session_id, **fields)

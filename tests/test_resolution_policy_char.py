@@ -1,7 +1,7 @@
 """Characterization tests for resolution policy functions (M2).
 
-Locks down exact input/output behavior of resolution_proof.py before
-it moves wholesale to domain/resolution_policy.py.
+Locks down exact input/output behavior. Imports from
+domain/resolution_policy.py directly.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from startupai_controller.resolution_proof import (
+from startupai_controller.domain.resolution_policy import (
     AUTO_CLOSE_RESOLUTION_KINDS,
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     VALID_EQUIVALENCE_CLAIMS,

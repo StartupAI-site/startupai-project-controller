@@ -1,15 +1,21 @@
 """Characterization tests for verdict policy functions (M1).
 
 Locks down exact input/output behavior of verdict trust/backfill decision
-logic before extraction to domain/verdict_policy.py.
+logic. Imports from domain/verdict_policy.py directly.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from startupai_controller.board_io import MARKER_PREFIX
-from startupai_controller.consumer_db import ReviewQueueEntry, SessionInfo
+from startupai_controller.domain.repair_policy import MARKER_PREFIX
+from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
+from startupai_controller.domain.verdict_policy import (
+    is_pre_backfill_eligible,
+    is_session_verdict_eligible,
+    marker_already_present,
+    verdict_marker_text,
+)
 
 
 # ---------------------------------------------------------------------------
