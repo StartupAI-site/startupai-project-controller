@@ -104,12 +104,19 @@ from startupai_controller.consumer_db import (
     ReviewQueueEntry,
     SessionInfo,
 )
-from startupai_controller.resolution_proof import (
+from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     build_resolution_comment,
     normalize_resolution_payload,
     resolution_allows_autoclose,
     resolution_has_meaningful_signal,
+)
+from startupai_controller.domain.models import (
+    CycleResult,
+    OpenPullRequestMatch,
+    RepairBranchReconcileOutcome,
+    ResolutionEvaluation,
+    ReviewQueueDrainSummary,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -221,34 +228,8 @@ class ConsumerConfig:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class CycleResult:
-    """Outcome of a single poll-claim-execute cycle."""
-
-    action: str  # "claimed", "idle", "error"
-    issue_ref: str | None = None
-    session_id: str | None = None
-    reason: str = ""
-    pr_url: str | None = None
-
-
-@dataclass(frozen=True)
-class ReviewQueueDrainSummary:
-    """Summary of one bounded review-queue drain pass."""
-
-    queued_count: int = 0
-    due_count: int = 0
-    seeded: tuple[str, ...] = ()
-    removed: tuple[str, ...] = ()
-    verdict_backfilled: tuple[str, ...] = ()
-    rerun: tuple[str, ...] = ()
-    auto_merge_enabled: tuple[str, ...] = ()
-    requeued: tuple[str, ...] = ()
-    blocked: tuple[str, ...] = ()
-    skipped: tuple[str, ...] = ()
-    escalated: tuple[str, ...] = ()
-    partial_failure: bool = False
-    error: str | None = None
+# CycleResult: re-exported from domain.models
+# ReviewQueueDrainSummary: re-exported from domain.models
 
 
 @dataclass(frozen=True)
@@ -304,24 +285,8 @@ class PreparedLaunchContext:
     branch_reconcile_error: str | None = None
 
 
-@dataclass(frozen=True)
-class RepairBranchReconcileOutcome:
-    """Outcome of reconciling a repair branch against origin/main."""
-
-    state: str
-    error: str | None = None
-
-
-@dataclass(frozen=True)
-class ResolutionEvaluation:
-    """Deterministic resolution verification result."""
-
-    resolution_kind: str | None
-    verification_class: str
-    final_action: str
-    summary: str
-    evidence: dict[str, Any] = field(default_factory=dict)
-    blocked_reason: str | None = None
+# RepairBranchReconcileOutcome: re-exported from domain.models
+# ResolutionEvaluation: re-exported from domain.models
 
 
 class WorktreePrepareError(RuntimeError):
@@ -2375,16 +2340,7 @@ def _post_consumer_claim_comment(
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
-@dataclass(frozen=True)
-class OpenPullRequestMatch:
-    """Open PR candidate for consumer adoption/reconciliation."""
-
-    url: str
-    number: int
-    author: str
-    body: str
-    branch_name: str
-    provenance: dict[str, str] | None
+# OpenPullRequestMatch: re-exported from domain.models
 
 
 def _list_open_pr_candidates(
