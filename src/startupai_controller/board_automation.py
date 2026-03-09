@@ -133,6 +133,23 @@ from startupai_controller.promote_ready import (
     _set_board_status,
     promote_to_ready,
 )
+from startupai_controller.domain.scheduling_policy import (
+    VALID_DISPATCH_TARGETS,
+    VALID_EXECUTION_AUTHORITY_MODES,
+    PROTECTED_QUEUE_ROUTING_STATUSES,
+    wip_limit_for_lane as _domain_wip_limit_for_lane,
+    protected_queue_executor_target as _domain_protected_queue_executor_target,
+)
+from startupai_controller.domain.models import (
+    PromotionResult,
+    SchedulingDecision,
+    ClaimReadyResult,
+    ExecutorRoutingDecision,
+    ExecutionPolicyDecision,
+    ReviewSnapshot,
+    ReviewRescueResult,
+    ReviewRescueSweep,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -147,10 +164,7 @@ DEFAULT_PROJECT_OWNER = "StartupAI-site"
 DEFAULT_PROJECT_NUMBER = 1
 DEFAULT_MISSING_EXECUTOR_BLOCK_CAP = 5
 DEFAULT_REBALANCE_CYCLE_MINUTES = 30
-VALID_DISPATCH_TARGETS = {"executor"}
-VALID_EXECUTION_AUTHORITY_MODES = {"board", "single_machine"}
 VALID_NON_LOCAL_PR_POLICIES = {"block", "requeue", "close"}
-PROTECTED_QUEUE_ROUTING_STATUSES = ("Backlog", "Ready")
 
 
 @dataclass(frozen=True)
@@ -644,10 +658,8 @@ def _wip_limit_for_lane(
     fallback: int,
 ) -> int:
     """Resolve WIP limit for an executor/lane pair."""
-    if automation_config is None:
-        return fallback
-    executor_limits = automation_config.wip_limits.get(executor, {})
-    return executor_limits.get(lane, fallback)
+    wip_limits = automation_config.wip_limits if automation_config else None
+    return _domain_wip_limit_for_lane(wip_limits, executor, lane, fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -793,12 +805,7 @@ def mark_issues_done(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class PromotionResult:
-    promoted: list[str] = field(default_factory=list)
-    skipped: list[tuple[str, str]] = field(default_factory=list)  # (ref, reason)
-    cross_repo_pending: list[str] = field(default_factory=list)
-    handoff_jobs: list[str] = field(default_factory=list)
+# PromotionResult — imported from domain.models (M5)
 
 
 def auto_promote_successors(
@@ -1163,29 +1170,7 @@ def reconcile_handoffs(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class SchedulingDecision:
-    claimable: list[str] = field(default_factory=list)
-    claimed: list[str] = field(default_factory=list)
-    deferred_dependency: list[str] = field(default_factory=list)
-    deferred_wip: list[str] = field(default_factory=list)
-    blocked_invalid_ready: list[str] = field(default_factory=list)
-    blocked_missing_executor: list[str] = field(default_factory=list)
-    skipped_non_graph: list[str] = field(default_factory=list)
-    skipped_missing_executor: list[str] = field(default_factory=list)
-
-
-@dataclass
-class ClaimReadyResult:
-    claimed: str | None = None
-    reason: str = ""
-
-
-@dataclass
-class ExecutorRoutingDecision:
-    routed: list[str] = field(default_factory=list)
-    unchanged: list[str] = field(default_factory=list)
-    skipped: list[tuple[str, str]] = field(default_factory=list)
+# SchedulingDecision, ClaimReadyResult, ExecutorRoutingDecision — imported from domain.models (M5)
 
 
 def _protected_queue_executor_target(
@@ -1194,19 +1179,10 @@ def _protected_queue_executor_target(
     """Return the sole protected execution executor when routing is deterministic."""
     if automation_config is None:
         return None
-    if automation_config.execution_authority_mode != "single_machine":
-        return None
-    executors = tuple(
-        executor.strip().lower()
-        for executor in automation_config.execution_authority_executors
-        if executor.strip()
+    return _domain_protected_queue_executor_target(
+        execution_authority_mode=automation_config.execution_authority_mode,
+        execution_authority_executors=tuple(automation_config.execution_authority_executors),
     )
-    if len(executors) != 1:
-        return None
-    target = executors[0]
-    if target not in VALID_EXECUTORS:
-        return None
-    return target
 
 
 def route_protected_queue_executors(
@@ -3214,53 +3190,7 @@ def codex_review_gate(
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ReviewSnapshot:
-    """Typed review-state projection for one PR."""
-
-    pr_repo: str
-    pr_number: int
-    review_refs: tuple[str, ...]
-    pr_author: str
-    pr_body: str
-    pr_comment_bodies: tuple[str, ...]
-    copilot_review_present: bool
-    codex_verdict: CodexReviewVerdict | None
-    codex_gate_code: int
-    codex_gate_message: str
-    gate_status: PrGateStatus
-    rescue_checks: tuple[str, ...]
-    rescue_passed: set[str]
-    rescue_pending: set[str]
-    rescue_failed: set[str]
-    rescue_cancelled: set[str]
-    rescue_missing: set[str]
-
-
-@dataclass(frozen=True)
-class ReviewRescueResult:
-    """Result of reconciling one PR in Review."""
-
-    pr_repo: str
-    pr_number: int
-    rerun_checks: tuple[str, ...] = ()
-    auto_merge_enabled: bool = False
-    requeued_refs: tuple[str, ...] = ()
-    skipped_reason: str | None = None
-    blocked_reason: str | None = None
-
-
-@dataclass(frozen=True)
-class ReviewRescueSweep:
-    """Summary of one cross-repo review rescue sweep."""
-
-    scanned_repos: tuple[str, ...]
-    scanned_prs: int
-    rerun: tuple[str, ...] = ()
-    auto_merge_enabled: tuple[str, ...] = ()
-    requeued: tuple[str, ...] = ()
-    blocked: tuple[str, ...] = ()
-    skipped: tuple[str, ...] = ()
+# ReviewSnapshot, ReviewRescueResult, ReviewRescueSweep — imported from domain.models (M5)
 
 
 def _configured_review_checks(
@@ -3870,14 +3800,7 @@ def automerge_review(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ExecutionPolicyDecision:
-    skipped_reason: str | None = None
-    enforced_pr: bool = False
-    pr_closed: bool = False
-    requeued: list[str] = field(default_factory=list)
-    blocked: list[str] = field(default_factory=list)
-    copilot_unassigned: list[str] = field(default_factory=list)
+# ExecutionPolicyDecision — imported from domain.models (M5)
 
 
 def _parse_consumer_provenance(body: str) -> dict[str, str] | None:

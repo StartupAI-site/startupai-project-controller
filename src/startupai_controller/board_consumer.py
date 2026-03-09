@@ -1903,35 +1903,21 @@ Constraints:
 
 def _extract_acceptance_criteria(body: str) -> str:
     """Extract acceptance criteria section from issue body."""
-    if not body:
-        return ""
-    # Look for common headings
-    patterns = [
-        r"##\s*Acceptance\s+Criteria\s*\n(.*?)(?=\n##|\Z)",
-        r"##\s*AC\s*\n(.*?)(?=\n##|\Z)",
-        r"\*\*Acceptance\s+Criteria\*\*\s*\n(.*?)(?=\n\*\*|\Z)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, body, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-    return body.strip()
+    from startupai_controller.domain.repair_policy import extract_acceptance_criteria
+    return extract_acceptance_criteria(body)
 
 
 def _deterministic_branch_pattern(issue_ref: str) -> re.Pattern[str]:
     """Return the canonical issue branch pattern for PR adoption."""
+    from startupai_controller.domain.repair_policy import deterministic_branch_pattern
     parsed = parse_issue_ref(issue_ref)
-    return re.compile(rf"^feat/{parsed.number}-[a-z0-9-]+$")
+    return deterministic_branch_pattern(parsed.number)
 
 
 def _repo_to_prefix_for_repo(repo: str) -> str:
     """Best-effort repo name to board prefix mapping."""
-    mapping = {
-        "startupai-crew": "crew",
-        "app.startupai-site": "app",
-        "startupai.site": "site",
-    }
-    return mapping.get(repo, "crew")
+    from startupai_controller.domain.repair_policy import repo_to_prefix_for_repo
+    return repo_to_prefix_for_repo(repo)
 
 
 def _consumer_provenance_marker(
@@ -1943,32 +1929,20 @@ def _consumer_provenance_marker(
     executor: str,
 ) -> str:
     """Build a machine-readable provenance marker for issues and PRs."""
-    return (
-        f"<!-- {MARKER_PREFIX}:consumer:session={session_id} issue={issue_ref} "
-        f"repo={repo_prefix} branch={branch_name} executor={executor} -->"
+    from startupai_controller.domain.repair_policy import consumer_provenance_marker
+    return consumer_provenance_marker(
+        session_id=session_id,
+        issue_ref=issue_ref,
+        repo_prefix=repo_prefix,
+        branch_name=branch_name,
+        executor=executor,
     )
 
 
 def _parse_consumer_provenance(text: str) -> dict[str, str] | None:
     """Parse the consumer provenance marker from text."""
-    match = re.search(
-        rf"<!--\s*{re.escape(MARKER_PREFIX)}:consumer:"
-        r"session=(?P<session>[^\s]+)\s+"
-        r"issue=(?P<issue>[^\s]+)\s+"
-        r"repo=(?P<repo>[^\s]+)\s+"
-        r"branch=(?P<branch>[^\s]+)\s+"
-        r"executor=(?P<executor>[^\s]+)\s*-->",
-        text,
-    )
-    if not match:
-        return None
-    return {
-        "session_id": match.group("session"),
-        "issue_ref": match.group("issue"),
-        "repo_prefix": match.group("repo"),
-        "branch_name": match.group("branch"),
-        "executor": match.group("executor"),
-    }
+    from startupai_controller.domain.repair_policy import parse_consumer_provenance
+    return parse_consumer_provenance(text)
 
 
 # ---------------------------------------------------------------------------
