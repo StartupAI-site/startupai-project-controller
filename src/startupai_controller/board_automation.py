@@ -3370,12 +3370,7 @@ def _build_review_snapshot_from_payload(
         required=required_checks,
     )
 
-    rescue_checks = tuple(
-        sorted(
-            set(gate_status.required)
-            | set(_configured_review_checks(pr_repo, automation_config))
-        )
-    )
+    rescue_checks = tuple(sorted(gate_status.required))
     rescue_passed: set[str] = set()
     rescue_pending: set[str] = set()
     rescue_failed: set[str] = set()
@@ -3857,13 +3852,16 @@ def automerge_review(
             "(squash, strict gates)"
         )
 
-    enable_pull_request_automerge(
+    status = enable_pull_request_automerge(
         pr_repo,
         pr_number,
         delete_branch=delete_branch,
         gh_runner=gh_runner,
     )
-    return 0, f"{pr_repo}#{pr_number}: auto-merge enabled"
+    if status == "confirmed":
+        return 0, f"{pr_repo}#{pr_number}: auto-merge enabled (verified)"
+    # status == "pending"
+    return 2, f"{pr_repo}#{pr_number}: auto-merge pending verification"
 
 
 

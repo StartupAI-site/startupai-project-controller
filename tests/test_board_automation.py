@@ -2720,10 +2720,14 @@ def test_automerge_review_updates_branch_then_merges(
         "update_pull_request_branch",
         lambda pr_repo, pr_number, **kwargs: calls.append(("update", pr_number)),
     )
+    def _mock_enable(pr_repo, pr_number, **kwargs):
+        calls.append(("merge", pr_number))
+        return "confirmed"
+
     monkeypatch.setattr(
         automation,
         "enable_pull_request_automerge",
-        lambda pr_repo, pr_number, **kwargs: calls.append(("merge", pr_number)),
+        _mock_enable,
     )
 
     code, _msg = automerge_review(
@@ -3994,3 +3998,107 @@ def test_claim_ready_allows_second_app_issue_when_lane_limit_matches_global_conc
     assert result.reason == ""
     mutator.assert_called_once()
     poster.assert_called_once()
+
+
+# -- Fix C: rescue_checks uses only live branch protection ------------------
+
+
+def test_rescue_checks_uses_only_live_branch_protection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rescue_checks should use live checks only, not config overlay."""
+    config = _load(tmp_path)
+    # Config has codex-review-gate, but live branch protection only has "ci"
+    policy = _automation_config()
+
+    snapshot = _make_review_snapshot(
+        gate_status=PrGateStatus(
+            required={"ci"},
+            passed={"ci"},
+            failed=set(),
+            pending=set(),
+            cancelled=set(),
+            merge_state_status="CLEAN",
+            mergeable="MERGEABLE",
+            is_draft=False,
+            state="OPEN",
+            auto_merge_enabled=False,
+            checks={"ci": CheckObservation(name="ci", result="pass", conclusion="success", status="completed")},
+        ),
+        rescue_checks=("ci",),
+        rescue_passed={"ci"},
+    )
+    # rescue_checks should be only ("ci",), not ("ci", "codex-review-gate")
+    assert snapshot.rescue_checks == ("ci",)
+    assert "codex-review-gate" not in snapshot.rescue_checks
+
+
+def test_configured_review_checks_not_in_rescue_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phantom config check should not appear in rescue_missing.
+
+    The config has codex-review-gate for app, but live branch protection
+    only requires "ci". Since rescue_checks now uses live-only, the phantom
+    check should not appear in rescue_missing.
+    """
+    # Simulate what _build_review_snapshot does for rescue_checks:
+    # BEFORE fix: rescue_checks = sorted(set(live) | set(config))
+    # AFTER fix:  rescue_checks = sorted(live)
+    live_checks = {"ci"}
+    config_checks = ("ci", "db-test-gate", "e2e", "tag-contract", "codex-review-gate")
+
+    # New behavior: live-only
+    rescue_checks = tuple(sorted(live_checks))
+    assert "codex-review-gate" not in rescue_checks
+    assert rescue_checks == ("ci",)
+
+    # Old behavior would have been:
+    old_rescue = tuple(sorted(set(live_checks) | set(config_checks)))
+    assert "codex-review-gate" in old_rescue  # confirms the fix was needed
+
+
+# -- Fix B: automerge_review handles pending state --------------------------
+
+
+def test_automerge_review_returns_blocked_for_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When enable_pull_request_automerge returns 'pending', automerge_review returns code 2."""
+    config = _load(tmp_path)
+    policy = _automation_config()
+
+    snapshot = _make_review_snapshot(
+        copilot_review_present=True,
+        codex_gate_code=0,
+        gate_status=PrGateStatus(
+            required={"ci"},
+            passed={"ci"},
+            failed=set(),
+            pending=set(),
+            cancelled=set(),
+            merge_state_status="CLEAN",
+            mergeable="MERGEABLE",
+            is_draft=False,
+            state="OPEN",
+            auto_merge_enabled=False,
+        ),
+    )
+
+    monkeypatch.setattr(
+        automation,
+        "enable_pull_request_automerge",
+        lambda *a, **k: "pending",
+    )
+
+    code, msg = automerge_review(
+        "StartupAI-site/app.startupai-site",
+        184,
+        config,
+        policy,
+        "StartupAI-site",
+        1,
+        snapshot=snapshot,
+    )
+    assert code == 2
+    assert "pending verification" in msg

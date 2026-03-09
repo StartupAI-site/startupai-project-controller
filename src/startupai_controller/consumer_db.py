@@ -154,6 +154,8 @@ class ReviewQueueEntry:
     last_result: str | None
     last_reason: str | None
     last_state_digest: str | None
+    blocked_streak: int = 0
+    blocked_class: str | None = None
 
     def next_attempt_datetime(self) -> datetime:
         """Return the next-attempt timestamp normalized to UTC."""
@@ -323,6 +325,8 @@ class ConsumerDB:
         ConsumerDB._ensure_column(conn, "sessions", "resolution_action", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "done_reason", "TEXT")
         ConsumerDB._ensure_column(conn, "review_queue", "last_state_digest", "TEXT")
+        ConsumerDB._ensure_column(conn, "review_queue", "blocked_streak", "INTEGER NOT NULL DEFAULT 0")
+        ConsumerDB._ensure_column(conn, "review_queue", "blocked_class", "TEXT")
 
     @staticmethod
     def _ensure_column(
@@ -835,6 +839,36 @@ class ConsumerDB:
         rows = conn.execute("SELECT key, value FROM control_state").fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
+    # -- Requeue cycle tracking --------------------------------------------
+
+    def get_requeue_state(self, issue_ref: str) -> tuple[int, str | None]:
+        """Return (count, pr_url) for the current requeue cycle."""
+        raw = self.get_control_value(f"requeue:{issue_ref}")
+        if raw is None:
+            return 0, None
+        try:
+            data = json.loads(raw)
+            return int(data.get("count", 0)), data.get("pr_url")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return 0, None
+
+    def increment_requeue_count(self, issue_ref: str, pr_url: str) -> int:
+        """Increment and return the requeue count for the current PR cycle."""
+        count, _ = self.get_requeue_state(issue_ref)
+        new_count = count + 1
+        self.set_control_value(
+            f"requeue:{issue_ref}",
+            json.dumps({"count": new_count, "pr_url": pr_url}),
+        )
+        return new_count
+
+    def reset_requeue_count(self, issue_ref: str) -> None:
+        """Reset the requeue counter (e.g. when the PR URL changes)."""
+        self.set_control_value(
+            f"requeue:{issue_ref}",
+            json.dumps({"count": 0, "pr_url": None}),
+        )
+
     # -- Issue context cache ------------------------------------------------
 
     def get_issue_context(self, issue_ref: str) -> IssueContextCacheEntry | None:
@@ -946,8 +980,9 @@ class ConsumerDB:
                 "INSERT INTO review_queue ("
                 "issue_ref, pr_url, pr_repo, pr_number, source_session_id, "
                 "enqueued_at, updated_at, next_attempt_at, last_attempt_at, "
-                "attempt_count, last_result, last_reason, last_state_digest"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL) "
+                "attempt_count, last_result, last_reason, last_state_digest, "
+                "blocked_streak, blocked_class"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, 0, NULL) "
                 "ON CONFLICT(issue_ref) DO UPDATE SET "
                 "pr_url = excluded.pr_url, "
                 "pr_repo = excluded.pr_repo, "
@@ -960,7 +995,9 @@ class ConsumerDB:
                 "attempt_count = 0, "
                 "last_result = NULL, "
                 "last_reason = NULL, "
-                "last_state_digest = NULL",
+                "last_state_digest = NULL, "
+                "blocked_streak = 0, "
+                "blocked_class = NULL",
                 (
                     issue_ref,
                     pr_url,
@@ -1059,26 +1096,41 @@ class ConsumerDB:
         last_result: str,
         last_reason: str | None = None,
         last_state_digest: str | None = None,
+        blocked_streak: int | None = None,
+        blocked_class: str | None = None,
         now: datetime | None = None,
     ) -> None:
         """Persist the latest review-queue processing result."""
         current = (now or datetime.now(timezone.utc)).isoformat()
         conn = self._get_connection()
+        parts = [
+            "updated_at = ?",
+            "next_attempt_at = ?",
+            "last_attempt_at = ?",
+            "attempt_count = attempt_count + 1",
+            "last_result = ?",
+            "last_reason = ?",
+            "last_state_digest = ?",
+        ]
+        params: list[Any] = [
+            current,
+            next_attempt_at,
+            current,
+            last_result,
+            last_reason,
+            last_state_digest,
+        ]
+        if blocked_streak is not None:
+            parts.append("blocked_streak = ?")
+            params.append(blocked_streak)
+        if blocked_class is not None or blocked_streak is not None:
+            # When streak is explicitly set, always set class too (may be None to clear)
+            parts.append("blocked_class = ?")
+            params.append(blocked_class)
+        params.append(issue_ref)
         conn.execute(
-            "UPDATE review_queue "
-            "SET updated_at = ?, next_attempt_at = ?, last_attempt_at = ?, "
-            "attempt_count = attempt_count + 1, last_result = ?, last_reason = ?, "
-            "last_state_digest = ? "
-            "WHERE issue_ref = ?",
-            (
-                current,
-                next_attempt_at,
-                current,
-                last_result,
-                last_reason,
-                last_state_digest,
-                issue_ref,
-            ),
+            f"UPDATE review_queue SET {', '.join(parts)} WHERE issue_ref = ?",
+            tuple(params),
         )
         conn.commit()
 
@@ -1306,5 +1358,9 @@ class ConsumerDB:
                 str(row["last_state_digest"])
                 if row["last_state_digest"] is not None
                 else None
+            ),
+            blocked_streak=int(row["blocked_streak"]) if row["blocked_streak"] is not None else 0,
+            blocked_class=(
+                str(row["blocked_class"]) if row["blocked_class"] is not None else None
             ),
         )

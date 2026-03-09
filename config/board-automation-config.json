@@ -52,8 +52,7 @@
       "ci",
       "db-test-gate",
       "e2e",
-      "tag-contract",
-      "codex-review-gate"
+      "tag-contract"
     ],
     "startupai-site/startupai-crew": [
       "Unit & Integration Tests",
@@ -64,8 +63,7 @@
     "startupai-site/startupai.site": [
       "ci",
       "No local DB migrations",
-      "tag-contract",
-      "codex-review-gate"
+      "tag-contract"
     ]
   },
   "feature_flags": {
