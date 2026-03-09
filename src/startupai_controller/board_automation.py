@@ -3198,9 +3198,8 @@ def _configured_review_checks(
     automation_config: BoardAutomationConfig,
 ) -> tuple[str, ...]:
     """Return repo-specific review checks that should be reconciled."""
-    return automation_config.required_checks_by_repo.get(
-        pr_repo.strip().lower(), ()
-    )
+    from startupai_controller.domain.rescue_policy import configured_review_checks
+    return configured_review_checks(pr_repo, automation_config.required_checks_by_repo)
 
 
 def _build_review_snapshot(
