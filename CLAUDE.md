@@ -15,6 +15,22 @@ The controller manages the [StartupAI Alpha → Launch](https://github.com/orgs/
 3. **Control Plane** (`board_control_plane.py`) — Sync/recovery operations (tick, field sync)
 4. **Supporting modules** — board_io, board_graph, consumer_db, consumer_workflow, github_http, promote_ready, validate_critical_path_promotion, project_field_sync, resolution_proof, gh_cli_timeout
 
+## Architectural Guardrails
+
+This repo is a control plane. Reliability matters more than cleverness.
+
+- Refactors are behavior-preserving by default. Do not change queue semantics, retry policy, board transitions, launch behavior, review behavior, or status semantics unless the task explicitly requires it.
+- `domain/` is pure policy. No GitHub, SQLite, subprocess, env/config-loading, or shim imports.
+- `ports/` define typed boundaries only where the domain needs isolation from external mechanisms.
+- `adapters/` own GitHub, SQLite, worktree, subprocess, and transport mechanics.
+- `board_consumer.py`, `board_automation.py`, and `board_control_plane.py` are application coordinators. They should orchestrate use cases, not accumulate new policy.
+- New internal code must import from canonical paths (`domain/`, `ports/`, `adapters/`). Do not add new internal dependencies on `board_io.py`, `consumer_db.py`, or `github_http.py` except where explicitly documented as transitional.
+- Do not bypass a port by calling an adapter directly from orchestration. If the port is missing capability, extend the port.
+- Do not create new mega-modules. If you touch a large coordinator, prefer extracting one focused policy module instead of adding more branches.
+- Before moving behavior, add characterization tests for the current behavior. Pure policy modules need direct unit tests.
+- Prefer names that describe controller concepts: review, rescue, launch, repair, escalation, admission. Avoid `helpers`, `misc`, or generic wrappers that hide responsibility.
+- Leave the code cleaner than you found it: each change should improve boundaries, not just relocate complexity.
+
 ## Directory Structure
 ```
 src/startupai_controller/   # 13 Python modules
