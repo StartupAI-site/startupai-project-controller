@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "default_assignee": "chris00walker",
+  "executor_assignee_map": {
+    "claude": "chris00walker",
+    "codex": "chris00walker",
+    "human": "chris00walker"
+  },
+  "defaults": {
+    "priority": "P3 Low",
+    "sprint": "Backlog",
+    "agent": "project-manager",
+    "executor": "human",
+    "owner": "human:project-manager",
+    "handoff_to": "none",
+    "ci": "n/a",
+    "pr": "n/a",
+    "source": "project-board-sync",
+    "blocked_reason": "awaiting-triage"
+  },
+  "status_defaults": {
+    "Backlog": {
+      "ci": "n/a"
+    },
+    "Ready": {
+      "ci": "pending"
+    },
+    "In Progress": {
+      "ci": "pending"
+    },
+    "Review": {
+      "ci": "pending"
+    },
+    "Blocked": {
+      "ci": "failing"
+    },
+    "Done": {
+      "ci": "passing"
+    }
+  },
+  "sprint_to_milestone": {
+    "M1 Foundation": "M1 Foundation",
+    "M2 Core": "M2 Core",
+    "M3 Integration": "M3 Integration",
+    "M4 Launch": "M4 Launch",
+    "Backlog": "Backlog"
+  },
+  "sprint_windows": {
+    "M1 Foundation": {
+      "start": "2026-01-01",
+      "target": "2026-02-15"
+    },
+    "M2 Core": {
+      "start": "2026-02-16",
+      "target": "2026-04-15"
+    },
+    "M3 Integration": {
+      "start": "2026-04-16",
+      "target": "2026-06-15"
+    },
+    "M4 Launch": {
+      "start": "2026-06-16",
+      "target": "2026-08-15"
+    },
+    "Backlog": {
+      "start": "2026-01-01",
+      "target": "2026-12-31"
+    }
+  }
+}

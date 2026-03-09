@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "issue_prefixes": {
+    "app": "StartupAI-site/app.startupai-site",
+    "crew": "StartupAI-site/startupai-crew",
+    "site": "StartupAI-site/startupai.site"
+  },
+  "critical_paths": {
+    "planning-surface": {
+      "goal": "Founder reviews and approves experiment plan",
+      "first_value_at": "app#153",
+      "edges": [
+        ["app#149", "app#150"],
+        ["app#149", "crew#84"],
+        ["crew#84", "crew#85"],
+        ["crew#84", "app#151"],
+        ["app#150", "crew#86"],
+        ["app#150", "app#152"],
+        ["app#151", "app#152"],
+        ["crew#85", "crew#87"],
+        ["crew#86", "crew#87"],
+        ["crew#87", "crew#88"],
+        ["app#152", "app#153"],
+        ["crew#88", "app#153"],
+        ["app#153", "app#154"],
+        ["app#154", "app#155"],
+        ["crew#87", "crew#89"],
+        ["crew#88", "crew#90"],
+        ["crew#89", "crew#90"],
+        ["crew#89", "crew#91"],
+        ["crew#90", "crew#91"]
+      ]
+    }
+  }
+}

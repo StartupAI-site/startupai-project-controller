@@ -1,0 +1,38 @@
+# StartupAI Board Consumer — systemd user unit
+#
+# Install (DELL only):
+#   cp systemd/startupai-consumer.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable startupai-consumer
+#   systemctl --user start startupai-consumer
+#
+# Logs:
+#   journalctl --user -u startupai-consumer -f
+#
+# Status:
+#   systemctl --user status startupai-consumer
+#   python -m startupai_controller.board_consumer status
+
+[Unit]
+Description=StartupAI Board Consumer
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/chris/projects/startupai-project-controller
+ExecStart=/home/chris/projects/startupai-project-controller/.venv/bin/python \
+    -m startupai_controller.board_consumer \
+    --file /home/chris/projects/startupai-project-controller/config/critical-paths.json \
+    --automation-config /home/chris/projects/startupai-project-controller/config/board-automation-config.json \
+    run
+Restart=on-failure
+RestartSec=30
+RuntimeMaxSec=86400
+Environment=HOME=/home/chris
+EnvironmentFile=-/home/chris/.secrets/startupai
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=startupai-consumer
+
+[Install]
+WantedBy=default.target
