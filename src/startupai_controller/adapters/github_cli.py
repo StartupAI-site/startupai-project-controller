@@ -74,6 +74,11 @@ class GitHubCliAdapter:
         except Exception:
             return False
 
+    def update_branch(self, pr_repo: str, pr_number: int) -> None:
+        from startupai_controller.board_io import update_pull_request_branch
+
+        update_pull_request_branch(pr_repo, pr_number, gh_runner=self._gh_runner)
+
     # -- BoardMutationPort methods --
 
     def set_issue_status(self, issue_ref: str, status: str) -> None:

@@ -35,3 +35,7 @@ class PullRequestPort(Protocol):
     ) -> bool:
         """Re-run a failed/cancelled check. Returns True on success."""
         ...
+
+    def update_branch(self, pr_repo: str, pr_number: int) -> None:
+        """Update a PR branch to the latest base branch."""
+        ...
