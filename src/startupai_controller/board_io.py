@@ -42,7 +42,10 @@ from startupai_controller.github_http import GitHubTransportError, run_github_co
 # ---------------------------------------------------------------------------
 
 MARKER_PREFIX = "startupai-board-bot"
-VALID_EXECUTORS = {"claude", "codex", "human"}
+from startupai_controller.domain.scheduling_policy import (  # noqa: E402
+    VALID_EXECUTORS,
+    priority_rank as _priority_rank,  # re-export (compat)
+)
 COPILOT_CODING_AGENT_LOGINS = {
     "app/copilot-swe-agent",
     "copilot-swe-agent[bot]",
@@ -2077,13 +2080,8 @@ class CycleGitHubMemo:
     )
 
 
-def _priority_rank(priority: str) -> tuple[int, str]:
-    """Rank single-select priority labels such as P0/P1/P2/P3."""
-    normalized = priority.strip()
-    match = re.search(r"\bP(\d+)\b", normalized, flags=re.IGNORECASE)
-    if match:
-        return int(match.group(1)), normalized.lower()
-    return 99, normalized.lower()
+
+# _priority_rank re-exported from domain.scheduling_policy (M5)
 
 
 def _list_project_items_by_status(

@@ -104,12 +104,57 @@ from startupai_controller.consumer_db import (
     ReviewQueueEntry,
     SessionInfo,
 )
-from startupai_controller.resolution_proof import (
+from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     build_resolution_comment,
     normalize_resolution_payload,
     resolution_allows_autoclose,
     resolution_has_meaningful_signal,
+)
+from startupai_controller.domain.models import (
+    CycleResult,
+    OpenPullRequestMatch,
+    RepairBranchReconcileOutcome,
+    ResolutionEvaluation,
+    ReviewQueueDrainSummary,
+)
+from startupai_controller.domain.review_queue_policy import (
+    DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
+    DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
+    ESCALATION_CEILING_AUTOMERGE,
+    ESCALATION_CEILING_DEFAULT,
+    ESCALATION_CEILING_FAILED,
+    ESCALATION_CEILING_STABLE,
+    ESCALATION_CEILING_TRANSIENT,
+    MAX_REQUEUE_CYCLES,
+    RETRYABLE_FAILURE_REASONS,
+    REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS,
+    REVIEW_QUEUE_FAILED_RETRY_SECONDS,
+    REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS,
+    REVIEW_QUEUE_PENDING_RETRY_SECONDS,
+    REVIEW_QUEUE_SKIPPED_RETRY_SECONDS,
+    REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
+    REVIEW_QUEUE_STABLE_RESULTS,
+    blocker_class as _blocker_class,
+    effective_retry_backoff as _effective_retry_backoff_primitives,
+    escalation_ceiling_for_blocker_class as _escalation_ceiling_for_blocker_class,
+    is_retryable_failure_reason as _is_retryable_failure_reason,
+    parse_iso8601_timestamp as _parse_iso8601_timestamp,
+    retry_delay_seconds as _retry_delay_seconds,
+    review_queue_retry_seconds_for_blocked_reason as _review_queue_retry_seconds_for_blocked_reason,
+    review_queue_retry_seconds_for_result as _review_queue_retry_seconds_for_result,
+    review_queue_retry_seconds_for_skipped_reason as _review_queue_retry_seconds_for_skipped_reason,
+    session_retry_due_at as _session_retry_due_at,
+)
+from startupai_controller.domain.verdict_policy import (
+    is_pre_backfill_eligible as _is_pre_backfill_eligible,
+    is_session_verdict_eligible as _is_session_verdict_eligible,
+    marker_already_present as _marker_already_present,
+    verdict_comment_body as _verdict_comment_body,
+    verdict_marker_text as _verdict_marker_text,
+)
+from startupai_controller.domain.launch_policy import (
+    classify_pr_candidates as _classify_pr_candidates_pure,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -150,29 +195,7 @@ CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL = "claim_suppressed_until"
 CONTROL_KEY_CLAIM_SUPPRESSED_REASON = "claim_suppressed_reason"
 CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE = "claim_suppressed_scope"
 CONTROL_KEY_LAST_RATE_LIMIT_AT = "last_rate_limit_at"
-DEFAULT_REVIEW_QUEUE_BATCH_SIZE = 5
-DEFAULT_REVIEW_QUEUE_RETRY_SECONDS = 300
-REVIEW_QUEUE_PENDING_RETRY_SECONDS = 120
-REVIEW_QUEUE_FAILED_RETRY_SECONDS = 900
-REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS = 1800
-REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS = 3600
-REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS = 120
-REVIEW_QUEUE_SKIPPED_RETRY_SECONDS = 3600
-MAX_REQUEUE_CYCLES = 3  # After 3 Review→Ready→InProgress→Review loops on the same PR, stop requeuing
-REVIEW_QUEUE_STABLE_RESULTS = {
-    "auto_merge_enabled",
-    "blocked",
-    "skipped",
-    "partial_failure",
-}
-RETRYABLE_FAILURE_REASONS = {
-    "api_error",
-    "consumer_error",
-    "timeout",
-    "codex_error",
-    "validation_failed",
-    "pr_error",
-}
+# Review queue constants: re-exported from domain.review_queue_policy
 
 
 # ---------------------------------------------------------------------------
@@ -221,34 +244,8 @@ class ConsumerConfig:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class CycleResult:
-    """Outcome of a single poll-claim-execute cycle."""
-
-    action: str  # "claimed", "idle", "error"
-    issue_ref: str | None = None
-    session_id: str | None = None
-    reason: str = ""
-    pr_url: str | None = None
-
-
-@dataclass(frozen=True)
-class ReviewQueueDrainSummary:
-    """Summary of one bounded review-queue drain pass."""
-
-    queued_count: int = 0
-    due_count: int = 0
-    seeded: tuple[str, ...] = ()
-    removed: tuple[str, ...] = ()
-    verdict_backfilled: tuple[str, ...] = ()
-    rerun: tuple[str, ...] = ()
-    auto_merge_enabled: tuple[str, ...] = ()
-    requeued: tuple[str, ...] = ()
-    blocked: tuple[str, ...] = ()
-    skipped: tuple[str, ...] = ()
-    escalated: tuple[str, ...] = ()
-    partial_failure: bool = False
-    error: str | None = None
+# CycleResult: re-exported from domain.models
+# ReviewQueueDrainSummary: re-exported from domain.models
 
 
 @dataclass(frozen=True)
@@ -304,24 +301,8 @@ class PreparedLaunchContext:
     branch_reconcile_error: str | None = None
 
 
-@dataclass(frozen=True)
-class RepairBranchReconcileOutcome:
-    """Outcome of reconciling a repair branch against origin/main."""
-
-    state: str
-    error: str | None = None
-
-
-@dataclass(frozen=True)
-class ResolutionEvaluation:
-    """Deterministic resolution verification result."""
-
-    resolution_kind: str | None
-    verification_class: str
-    final_action: str
-    summary: str
-    evidence: dict[str, Any] = field(default_factory=dict)
-    blocked_reason: str | None = None
+# RepairBranchReconcileOutcome: re-exported from domain.models
+# ResolutionEvaluation: re-exported from domain.models
 
 
 class WorktreePrepareError(RuntimeError):
@@ -657,84 +638,35 @@ def _current_main_workflows(
     return workflows, statuses, effective_interval
 
 
-def _parse_iso8601_timestamp(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 timestamp if present."""
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _is_retryable_failure_reason(reason: str | None) -> bool:
-    """Return True when a failure reason should cool down and retry."""
-    return (reason or "").strip().lower() in RETRYABLE_FAILURE_REASONS
+# _parse_iso8601_timestamp: imported from domain.review_queue_policy
+# _is_retryable_failure_reason: imported from domain.review_queue_policy
+# _retry_delay_seconds: imported from domain.review_queue_policy
+# _session_retry_due_at: imported from domain.review_queue_policy
 
 
 def _effective_retry_backoff(
     config: ConsumerConfig,
     workflow: WorkflowDefinition | None,
 ) -> tuple[int, int]:
-    """Return effective retry backoff (base, max) in seconds."""
+    """Return effective retry backoff (base, max) in seconds.
+
+    Thin wrapper that destructures config/workflow for the domain function.
+    """
     runtime = workflow.runtime if workflow is not None else None
-    base_seconds = (
-        runtime.retry_backoff_base_seconds
-        if runtime is not None and runtime.retry_backoff_base_seconds is not None
-        else config.retry_backoff_base_seconds
+    return _effective_retry_backoff_primitives(
+        base_seconds=(
+            runtime.retry_backoff_base_seconds
+            if runtime is not None and runtime.retry_backoff_base_seconds is not None
+            else None
+        ),
+        max_seconds=(
+            runtime.retry_backoff_seconds
+            if runtime is not None and runtime.retry_backoff_seconds is not None
+            else None
+        ),
+        config_base=config.retry_backoff_base_seconds,
+        config_max=config.retry_backoff_seconds,
     )
-    max_seconds = (
-        runtime.retry_backoff_seconds
-        if runtime is not None and runtime.retry_backoff_seconds is not None
-        else config.retry_backoff_seconds
-    )
-    return max(1, base_seconds), max(max_seconds, max(1, base_seconds))
-
-
-def _retry_delay_seconds(
-    retry_count: int,
-    *,
-    base_seconds: int,
-    max_seconds: int,
-) -> int:
-    """Return bounded exponential backoff delay for a retry attempt count."""
-    if retry_count <= 0:
-        return 0
-    exponent = min(retry_count - 1, 10)
-    return min(max_seconds, base_seconds * (1 << exponent))
-
-
-def _session_retry_due_at(
-    session: SessionInfo,
-    *,
-    base_seconds: int,
-    max_seconds: int,
-) -> datetime | None:
-    """Return the next retry timestamp for a terminal session, if any."""
-    if session.status not in {"failed", "timeout", "aborted", "error"}:
-        return None
-    completed_at = _parse_iso8601_timestamp(session.completed_at)
-    if completed_at is None:
-        return None
-    if session.failure_reason is None:
-        if session.status not in {"failed", "timeout"}:
-            return None
-        retry_count = session.retry_count or 1
-    else:
-        if not _is_retryable_failure_reason(session.failure_reason):
-            return None
-        retry_count = session.retry_count or 1
-    delay_seconds = _retry_delay_seconds(
-        retry_count,
-        base_seconds=base_seconds,
-        max_seconds=max_seconds,
-    )
-    if delay_seconds <= 0:
-        return None
-    return completed_at + timedelta(seconds=delay_seconds)
 
 
 def _next_retry_count(
@@ -1981,35 +1913,21 @@ Constraints:
 
 def _extract_acceptance_criteria(body: str) -> str:
     """Extract acceptance criteria section from issue body."""
-    if not body:
-        return ""
-    # Look for common headings
-    patterns = [
-        r"##\s*Acceptance\s+Criteria\s*\n(.*?)(?=\n##|\Z)",
-        r"##\s*AC\s*\n(.*?)(?=\n##|\Z)",
-        r"\*\*Acceptance\s+Criteria\*\*\s*\n(.*?)(?=\n\*\*|\Z)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, body, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-    return body.strip()
+    from startupai_controller.domain.repair_policy import extract_acceptance_criteria
+    return extract_acceptance_criteria(body)
 
 
 def _deterministic_branch_pattern(issue_ref: str) -> re.Pattern[str]:
     """Return the canonical issue branch pattern for PR adoption."""
+    from startupai_controller.domain.repair_policy import deterministic_branch_pattern
     parsed = parse_issue_ref(issue_ref)
-    return re.compile(rf"^feat/{parsed.number}-[a-z0-9-]+$")
+    return deterministic_branch_pattern(parsed.number)
 
 
 def _repo_to_prefix_for_repo(repo: str) -> str:
     """Best-effort repo name to board prefix mapping."""
-    mapping = {
-        "startupai-crew": "crew",
-        "app.startupai-site": "app",
-        "startupai.site": "site",
-    }
-    return mapping.get(repo, "crew")
+    from startupai_controller.domain.repair_policy import repo_to_prefix_for_repo
+    return repo_to_prefix_for_repo(repo)
 
 
 def _consumer_provenance_marker(
@@ -2021,32 +1939,20 @@ def _consumer_provenance_marker(
     executor: str,
 ) -> str:
     """Build a machine-readable provenance marker for issues and PRs."""
-    return (
-        f"<!-- {MARKER_PREFIX}:consumer:session={session_id} issue={issue_ref} "
-        f"repo={repo_prefix} branch={branch_name} executor={executor} -->"
+    from startupai_controller.domain.repair_policy import consumer_provenance_marker
+    return consumer_provenance_marker(
+        session_id=session_id,
+        issue_ref=issue_ref,
+        repo_prefix=repo_prefix,
+        branch_name=branch_name,
+        executor=executor,
     )
 
 
 def _parse_consumer_provenance(text: str) -> dict[str, str] | None:
     """Parse the consumer provenance marker from text."""
-    match = re.search(
-        rf"<!--\s*{re.escape(MARKER_PREFIX)}:consumer:"
-        r"session=(?P<session>[^\s]+)\s+"
-        r"issue=(?P<issue>[^\s]+)\s+"
-        r"repo=(?P<repo>[^\s]+)\s+"
-        r"branch=(?P<branch>[^\s]+)\s+"
-        r"executor=(?P<executor>[^\s]+)\s*-->",
-        text,
-    )
-    if not match:
-        return None
-    return {
-        "session_id": match.group("session"),
-        "issue_ref": match.group("issue"),
-        "repo_prefix": match.group("repo"),
-        "branch_name": match.group("branch"),
-        "executor": match.group("executor"),
-    }
+    from startupai_controller.domain.repair_policy import parse_consumer_provenance
+    return parse_consumer_provenance(text)
 
 
 # ---------------------------------------------------------------------------
@@ -2375,16 +2281,7 @@ def _post_consumer_claim_comment(
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
-@dataclass(frozen=True)
-class OpenPullRequestMatch:
-    """Open PR candidate for consumer adoption/reconciliation."""
-
-    url: str
-    number: int
-    author: str
-    body: str
-    branch_name: str
-    provenance: dict[str, str] | None
+# OpenPullRequestMatch: re-exported from domain.models
 
 
 def _list_open_pr_candidates(
@@ -2450,41 +2347,13 @@ def _classify_open_pr_candidates(
         issue_number,
         gh_runner=gh_runner,
     )
-    if not candidates:
-        return "none", None, "no-open-pr"
-
-    adoptable: list[OpenPullRequestMatch] = []
-    ambiguous_reasons: list[str] = []
-    branch_pattern = _deterministic_branch_pattern(issue_ref)
-    for candidate in candidates:
-        provenance = candidate.provenance
-        if provenance is None:
-            ambiguous_reasons.append(f"missing-provenance:{candidate.url}")
-            continue
-        if provenance.get("issue_ref") != issue_ref:
-            ambiguous_reasons.append(f"issue-mismatch:{candidate.url}")
-            continue
-        if provenance.get("executor") != "codex":
-            ambiguous_reasons.append(f"executor-mismatch:{candidate.url}")
-            continue
-        if candidate.author not in automation_config.trusted_local_authors:
-            ambiguous_reasons.append(f"untrusted-author:{candidate.url}")
-            continue
-        if expected_branch and candidate.branch_name != expected_branch:
-            ambiguous_reasons.append(f"branch-mismatch:{candidate.url}")
-            continue
-        if not branch_pattern.match(candidate.branch_name):
-            ambiguous_reasons.append(f"branch-noncanonical:{candidate.url}")
-            continue
-        adoptable.append(candidate)
-
-    if len(adoptable) == 1 and not ambiguous_reasons:
-        return "adoptable", adoptable[0], "qualifying-open-pr"
-    if adoptable and not ambiguous_reasons:
-        return "ambiguous", None, "multiple-adoptable-prs"
-    if adoptable and ambiguous_reasons:
-        return "ambiguous", None, ";".join(ambiguous_reasons)
-    return "non-local", None, ";".join(ambiguous_reasons)
+    return _classify_pr_candidates_pure(
+        issue_ref,
+        candidates,
+        trusted_authors=automation_config.trusted_local_authors,
+        expected_branch=expected_branch,
+        issue_number=issue_number,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2562,22 +2431,12 @@ def _post_pr_codex_verdict(
         raise GhQueryError(f"Invalid PR URL for codex verdict: {pr_url}")
 
     owner, repo, pr_number = parsed
-    marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session={session_id} -->"
+    marker = _verdict_marker_text(session_id)
     checker = comment_checker or _comment_exists
     if checker(owner, repo, pr_number, marker, gh_runner=gh_runner):
         return False
 
-    body = "\n".join(
-        [
-            marker,
-            "codex-review: pass",
-            "codex-route: none",
-            "",
-            (
-                "Trusted local verdict after successful consumer session "
-                f"`{session_id}`."
-            ),
-        ]
+    body = _verdict_comment_body(session_id
     )
     poster = comment_poster or _post_comment
     poster(owner, repo, pr_number, body, gh_runner=gh_runner)
@@ -2852,9 +2711,13 @@ def _backfill_review_verdicts_from_snapshots(
         )
         if session is None:
             continue
-        if session.status != "success" or session.phase != "review" or not session.pr_url:
+        if not _is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+        ):
             continue
-        marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session={session.id} -->"
+        marker = _verdict_marker_text(session.id)
         seen_markers = posted_markers.setdefault(
             (entry.pr_repo, entry.pr_number),
             {
@@ -2863,7 +2726,7 @@ def _backfill_review_verdicts_from_snapshots(
                 if isinstance(body, str)
             },
         )
-        if any(marker in body for body in seen_markers):
+        if _marker_already_present(marker, seen_markers):
             continue
         try:
             posted = _post_pr_codex_verdict(
@@ -2898,13 +2761,10 @@ def _pre_backfill_verdicts_for_due_prs(
     """Post missing verdicts BEFORE snapshot build for verdict-blocked and newly seeded entries."""
     backfilled: list[str] = []
     for entry in due_items:
-        is_verdict_blocked = (
-            entry.last_result == "blocked"
-            and entry.last_reason is not None
-            and "missing codex verdict marker" in entry.last_reason.lower()
-        )
-        is_newly_seeded = entry.last_result is None
-        if not is_verdict_blocked and not is_newly_seeded:
+        if not _is_pre_backfill_eligible(
+            last_result=entry.last_result,
+            last_reason=entry.last_reason,
+        ):
             continue
         try:
             session = (
@@ -2914,10 +2774,12 @@ def _pre_backfill_verdicts_for_due_prs(
             )
             if session is None:
                 continue
-            if session.status != "success" or session.phase != "review" or not session.pr_url:
-                continue
-            # Guard: session.pr_url must match entry.pr_url
-            if session.pr_url != entry.pr_url:
+            if not _is_session_verdict_eligible(
+                session_status=session.status,
+                session_phase=session.phase,
+                session_pr_url=session.pr_url,
+                entry_pr_url=entry.pr_url,
+            ):
                 continue
             posted = _post_pr_codex_verdict(
                 session.pr_url,
@@ -2967,65 +2829,27 @@ def _review_queue_next_attempt_at(
     return (current + timedelta(seconds=delay_seconds)).isoformat()
 
 
-def _review_queue_retry_seconds_for_blocked_reason(blocked_reason: str) -> int:
-    """Return the retry delay for a blocked review outcome."""
-    normalized = blocked_reason.strip().lower()
-    if "auto-merge pending verification" in normalized:
-        return REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
-    if (
-        "required checks pending" in normalized
-        or "review checks pending" in normalized
-    ):
-        return REVIEW_QUEUE_PENDING_RETRY_SECONDS
-    if (
-        "required checks failed" in normalized
-        or "review checks failed" in normalized
-        or "mergeable=conflicting" in normalized
-        or normalized == "automerge-not-enabled"
-    ):
-        return REVIEW_QUEUE_FAILED_RETRY_SECONDS
-    if (
-        "missing codex verdict marker" in normalized
-        or normalized == "missing-copilot-review"
-        or normalized == "draft-pr"
-        or normalized.startswith("state=")
-    ):
-        return REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS
-    return DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
-
-
-def _review_queue_retry_seconds_for_skipped_reason(skipped_reason: str) -> int:
-    """Return the retry delay for a skipped review outcome."""
-    normalized = skipped_reason.strip().lower()
-    if normalized == "auto-merge-already-enabled":
-        return REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
-    return REVIEW_QUEUE_SKIPPED_RETRY_SECONDS
-
-
-def _review_queue_retry_seconds_for_result(result: Any) -> int:
-    """Return the next-attempt delay for one review-queue result."""
-    if result.auto_merge_enabled:
-        return REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
-    if result.rerun_checks:
-        return REVIEW_QUEUE_PENDING_RETRY_SECONDS
-    if result.blocked_reason:
-        return _review_queue_retry_seconds_for_blocked_reason(result.blocked_reason)
-    if result.skipped_reason:
-        return _review_queue_retry_seconds_for_skipped_reason(result.skipped_reason)
-    return DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
+# _review_queue_retry_seconds_for_blocked_reason: imported from domain.review_queue_policy
+# _review_queue_retry_seconds_for_skipped_reason: imported from domain.review_queue_policy
+# _review_queue_retry_seconds_for_result: imported from domain.review_queue_policy
 
 
 def _review_queue_retry_seconds_for_partial_failure(
     config: ConsumerConfig,
     error: str | None,
 ) -> int:
-    """Return the retry delay after a partial review-queue failure."""
-    if error and gh_reason_code(error) == "rate_limit":
-        return max(
-            config.rate_limit_cooldown_seconds,
-            DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
-        )
-    return DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
+    """Return the retry delay after a partial review-queue failure.
+
+    Thin wrapper: resolves reason code then delegates to domain function.
+    """
+    from startupai_controller.domain.review_queue_policy import (
+        review_queue_retry_seconds_for_partial_failure,
+    )
+    reason_code = gh_reason_code(error) if error else None
+    return review_queue_retry_seconds_for_partial_failure(
+        config.rate_limit_cooldown_seconds,
+        reason_code,
+    )
 
 
 def _queue_review_item(
@@ -3054,52 +2878,9 @@ def _queue_review_item(
 
 
 # ---------------------------------------------------------------------------
-# M5: Blocked-streak escalation policy
+# Blocked-streak escalation policy: imported from domain.review_queue_policy
+# _blocker_class, _escalation_ceiling_for_blocker_class, ESCALATION_CEILING_*
 # ---------------------------------------------------------------------------
-
-ESCALATION_CEILING_TRANSIENT = 12   # ~24 min at 2-min pending retry
-ESCALATION_CEILING_FAILED = 6       # ~90 min at 15-min failed retry
-ESCALATION_CEILING_STABLE = 4       # ~120 min at 30-min stable retry
-ESCALATION_CEILING_AUTOMERGE = 3    # ~3 hr at 1-hr automerge retry
-ESCALATION_CEILING_DEFAULT = 8      # ~40 min at 5-min default retry
-
-
-def _blocker_class(blocked_reason: str) -> str:
-    """Classify a blocked_reason into a stable blocker class string."""
-    normalized = blocked_reason.strip().lower()
-    if "auto-merge pending verification" in normalized:
-        return "automerge"
-    if (
-        "required checks pending" in normalized
-        or "review checks pending" in normalized
-    ):
-        return "transient"
-    if (
-        "required checks failed" in normalized
-        or "review checks failed" in normalized
-        or "mergeable=conflicting" in normalized
-        or normalized == "automerge-not-enabled"
-    ):
-        return "failed_checks"
-    if (
-        "missing codex verdict marker" in normalized
-        or normalized == "missing-copilot-review"
-        or normalized == "draft-pr"
-        or normalized.startswith("state=")
-    ):
-        return "stable"
-    return "default"
-
-
-def _escalation_ceiling_for_blocker_class(blocker_class: str) -> int:
-    """Return the max blocked-streak before escalation for a given class."""
-    return {
-        "transient": ESCALATION_CEILING_TRANSIENT,
-        "failed_checks": ESCALATION_CEILING_FAILED,
-        "stable": ESCALATION_CEILING_STABLE,
-        "automerge": ESCALATION_CEILING_AUTOMERGE,
-        "default": ESCALATION_CEILING_DEFAULT,
-    }.get(blocker_class, ESCALATION_CEILING_DEFAULT)
 
 
 def _apply_review_queue_result(

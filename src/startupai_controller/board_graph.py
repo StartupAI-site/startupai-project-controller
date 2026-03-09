@@ -12,11 +12,9 @@ It must NEVER import from board_automation or promote_ready.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import sys
 from collections.abc import Callable
 from pathlib import Path
-import re
 
 
 from startupai_controller.board_io import (
@@ -25,6 +23,17 @@ from startupai_controller.board_io import (
     _list_project_items_by_status,
     _snapshot_to_issue_ref,
     _priority_rank,
+)
+from startupai_controller.domain.models import (
+    AdmissionCandidate,
+    AdmissionSkip,
+    AdmissionDecision,
+)
+from startupai_controller.domain.scheduling_policy import (
+    admission_watermarks as admission_watermarks,  # canonical (M5)
+    admission_candidate_rank as _domain_admission_candidate_rank,
+    has_structured_acceptance_criteria as has_structured_acceptance_criteria,  # canonical (M5)
+    normalize_heading as _normalize_heading,  # canonical (M5)
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -41,98 +50,11 @@ from startupai_controller.validate_critical_path_promotion import (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class AdmissionCandidate:
-    """Eligible backlog item that may be admitted to Ready."""
-
-    issue_ref: str
-    repo_prefix: str
-    item_id: str
-    project_id: str
-    priority: str
-    title: str
-    is_graph_member: bool
+# AdmissionCandidate, AdmissionSkip, AdmissionDecision — imported from domain.models (M5)
 
 
-@dataclass(frozen=True)
-class AdmissionSkip:
-    """Ineligible backlog item and the reason it was skipped."""
-
-    issue_ref: str
-    reason_code: str
-
-
-@dataclass(frozen=True)
-class AdmissionDecision:
-    """Pure admission planning output before board mutations occur."""
-
-    ready_count: int
-    ready_floor: int
-    ready_cap: int
-    needed: int
-    scanned_backlog: int
-    eligible: tuple[AdmissionCandidate, ...] = ()
-    admitted: tuple[str, ...] = ()
-    skipped: tuple[AdmissionSkip, ...] = ()
-    resolved: tuple[str, ...] = ()
-    blocked: tuple[str, ...] = ()
-    partial_failure: bool = False
-    error: str | None = None
-    deep_evaluation_performed: bool = False
-    deep_evaluation_truncated: bool = False
-
-    @property
-    def eligible_count(self) -> int:
-        return len(self.eligible)
-
-    @property
-    def skip_reason_counts(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for skip in self.skipped:
-            counts[skip.reason_code] = counts.get(skip.reason_code, 0) + 1
-        return counts
-
-
-def _normalize_heading(text: str) -> str:
-    """Normalize markdown heading text for acceptance section matching."""
-    return re.sub(r"[:\s]+$", "", text.strip().lower())
-
-
-def has_structured_acceptance_criteria(
-    body: str,
-    headings: tuple[str, ...] = ("Acceptance Criteria", "Definition of Done"),
-) -> bool:
-    """Return True when the issue body contains a valid acceptance section."""
-    if not body.strip():
-        return False
-
-    target_headings = {_normalize_heading(item) for item in headings}
-    heading_re = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*$")
-    bullet_re = re.compile(r"^\s*(?:[-*+]\s+|\d+\.\s+|\[[ xX]\]\s+|- \[[ xX]\]\s+).+")
-    current_matches = False
-
-    for line in body.splitlines():
-        heading_match = heading_re.match(line)
-        if heading_match:
-            current_matches = _normalize_heading(heading_match.group("text")) in target_headings
-            continue
-        if current_matches and bullet_re.match(line):
-            return True
-
-    return False
-
-
-def admission_watermarks(
-    global_concurrency: int,
-    *,
-    floor_multiplier: int = 2,
-    cap_multiplier: int = 3,
-) -> tuple[int, int]:
-    """Compute Ready queue floor/cap from global concurrency."""
-    concurrency = max(1, int(global_concurrency))
-    floor = max(1, concurrency * max(1, int(floor_multiplier)))
-    cap = max(floor, concurrency * max(1, int(cap_multiplier)))
-    return floor, cap
+# _normalize_heading, has_structured_acceptance_criteria, admission_watermarks
+# — imported from domain.scheduling_policy (M5)
 
 
 def _issue_sort_key(issue_ref: str) -> tuple[str, int]:
@@ -176,8 +98,12 @@ def _admission_candidate_rank(
 ) -> tuple[int, tuple[int, str], int]:
     """Return deterministic scheduler ordering for Backlog admission."""
     parsed = parse_issue_ref(issue_ref)
-    graph_rank = 0 if is_graph_member else 1
-    return graph_rank, _priority_rank(priority), parsed.number
+    return _domain_admission_candidate_rank(
+        issue_ref,
+        priority=priority,
+        is_graph_member=is_graph_member,
+        issue_number=parsed.number,
+    )
 
 
 # ---------------------------------------------------------------------------
