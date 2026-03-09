@@ -118,6 +118,34 @@ from startupai_controller.domain.models import (
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
 )
+from startupai_controller.domain.review_queue_policy import (
+    DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
+    DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
+    ESCALATION_CEILING_AUTOMERGE,
+    ESCALATION_CEILING_DEFAULT,
+    ESCALATION_CEILING_FAILED,
+    ESCALATION_CEILING_STABLE,
+    ESCALATION_CEILING_TRANSIENT,
+    MAX_REQUEUE_CYCLES,
+    RETRYABLE_FAILURE_REASONS,
+    REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS,
+    REVIEW_QUEUE_FAILED_RETRY_SECONDS,
+    REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS,
+    REVIEW_QUEUE_PENDING_RETRY_SECONDS,
+    REVIEW_QUEUE_SKIPPED_RETRY_SECONDS,
+    REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
+    REVIEW_QUEUE_STABLE_RESULTS,
+    blocker_class as _blocker_class,
+    effective_retry_backoff as _effective_retry_backoff_primitives,
+    escalation_ceiling_for_blocker_class as _escalation_ceiling_for_blocker_class,
+    is_retryable_failure_reason as _is_retryable_failure_reason,
+    parse_iso8601_timestamp as _parse_iso8601_timestamp,
+    retry_delay_seconds as _retry_delay_seconds,
+    review_queue_retry_seconds_for_blocked_reason as _review_queue_retry_seconds_for_blocked_reason,
+    review_queue_retry_seconds_for_result as _review_queue_retry_seconds_for_result,
+    review_queue_retry_seconds_for_skipped_reason as _review_queue_retry_seconds_for_skipped_reason,
+    session_retry_due_at as _session_retry_due_at,
+)
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,
@@ -157,29 +185,7 @@ CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL = "claim_suppressed_until"
 CONTROL_KEY_CLAIM_SUPPRESSED_REASON = "claim_suppressed_reason"
 CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE = "claim_suppressed_scope"
 CONTROL_KEY_LAST_RATE_LIMIT_AT = "last_rate_limit_at"
-DEFAULT_REVIEW_QUEUE_BATCH_SIZE = 5
-DEFAULT_REVIEW_QUEUE_RETRY_SECONDS = 300
-REVIEW_QUEUE_PENDING_RETRY_SECONDS = 120
-REVIEW_QUEUE_FAILED_RETRY_SECONDS = 900
-REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS = 1800
-REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS = 3600
-REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS = 120
-REVIEW_QUEUE_SKIPPED_RETRY_SECONDS = 3600
-MAX_REQUEUE_CYCLES = 3  # After 3 Review→Ready→InProgress→Review loops on the same PR, stop requeuing
-REVIEW_QUEUE_STABLE_RESULTS = {
-    "auto_merge_enabled",
-    "blocked",
-    "skipped",
-    "partial_failure",
-}
-RETRYABLE_FAILURE_REASONS = {
-    "api_error",
-    "consumer_error",
-    "timeout",
-    "codex_error",
-    "validation_failed",
-    "pr_error",
-}
+# Review queue constants: re-exported from domain.review_queue_policy
 
 
 # ---------------------------------------------------------------------------
@@ -622,84 +628,35 @@ def _current_main_workflows(
     return workflows, statuses, effective_interval
 
 
-def _parse_iso8601_timestamp(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 timestamp if present."""
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _is_retryable_failure_reason(reason: str | None) -> bool:
-    """Return True when a failure reason should cool down and retry."""
-    return (reason or "").strip().lower() in RETRYABLE_FAILURE_REASONS
+# _parse_iso8601_timestamp: imported from domain.review_queue_policy
+# _is_retryable_failure_reason: imported from domain.review_queue_policy
+# _retry_delay_seconds: imported from domain.review_queue_policy
+# _session_retry_due_at: imported from domain.review_queue_policy
 
 
 def _effective_retry_backoff(
     config: ConsumerConfig,
     workflow: WorkflowDefinition | None,
 ) -> tuple[int, int]:
-    """Return effective retry backoff (base, max) in seconds."""
+    """Return effective retry backoff (base, max) in seconds.
+
+    Thin wrapper that destructures config/workflow for the domain function.
+    """
     runtime = workflow.runtime if workflow is not None else None
-    base_seconds = (
-        runtime.retry_backoff_base_seconds
-        if runtime is not None and runtime.retry_backoff_base_seconds is not None
-        else config.retry_backoff_base_seconds
+    return _effective_retry_backoff_primitives(
+        base_seconds=(
+            runtime.retry_backoff_base_seconds
+            if runtime is not None and runtime.retry_backoff_base_seconds is not None
+            else None
+        ),
+        max_seconds=(
+            runtime.retry_backoff_seconds
+            if runtime is not None and runtime.retry_backoff_seconds is not None
+            else None
+        ),
+        config_base=config.retry_backoff_base_seconds,
+        config_max=config.retry_backoff_seconds,
     )
-    max_seconds = (
-        runtime.retry_backoff_seconds
-        if runtime is not None and runtime.retry_backoff_seconds is not None
-        else config.retry_backoff_seconds
-    )
-    return max(1, base_seconds), max(max_seconds, max(1, base_seconds))
-
-
-def _retry_delay_seconds(
-    retry_count: int,
-    *,
-    base_seconds: int,
-    max_seconds: int,
-) -> int:
-    """Return bounded exponential backoff delay for a retry attempt count."""
-    if retry_count <= 0:
-        return 0
-    exponent = min(retry_count - 1, 10)
-    return min(max_seconds, base_seconds * (1 << exponent))
-
-
-def _session_retry_due_at(
-    session: SessionInfo,
-    *,
-    base_seconds: int,
-    max_seconds: int,
-) -> datetime | None:
-    """Return the next retry timestamp for a terminal session, if any."""
-    if session.status not in {"failed", "timeout", "aborted", "error"}:
-        return None
-    completed_at = _parse_iso8601_timestamp(session.completed_at)
-    if completed_at is None:
-        return None
-    if session.failure_reason is None:
-        if session.status not in {"failed", "timeout"}:
-            return None
-        retry_count = session.retry_count or 1
-    else:
-        if not _is_retryable_failure_reason(session.failure_reason):
-            return None
-        retry_count = session.retry_count or 1
-    delay_seconds = _retry_delay_seconds(
-        retry_count,
-        base_seconds=base_seconds,
-        max_seconds=max_seconds,
-    )
-    if delay_seconds <= 0:
-        return None
-    return completed_at + timedelta(seconds=delay_seconds)
 
 
 def _next_retry_count(
@@ -2923,65 +2880,27 @@ def _review_queue_next_attempt_at(
     return (current + timedelta(seconds=delay_seconds)).isoformat()
 
 
-def _review_queue_retry_seconds_for_blocked_reason(blocked_reason: str) -> int:
-    """Return the retry delay for a blocked review outcome."""
-    normalized = blocked_reason.strip().lower()
-    if "auto-merge pending verification" in normalized:
-        return REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
-    if (
-        "required checks pending" in normalized
-        or "review checks pending" in normalized
-    ):
-        return REVIEW_QUEUE_PENDING_RETRY_SECONDS
-    if (
-        "required checks failed" in normalized
-        or "review checks failed" in normalized
-        or "mergeable=conflicting" in normalized
-        or normalized == "automerge-not-enabled"
-    ):
-        return REVIEW_QUEUE_FAILED_RETRY_SECONDS
-    if (
-        "missing codex verdict marker" in normalized
-        or normalized == "missing-copilot-review"
-        or normalized == "draft-pr"
-        or normalized.startswith("state=")
-    ):
-        return REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS
-    return DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
-
-
-def _review_queue_retry_seconds_for_skipped_reason(skipped_reason: str) -> int:
-    """Return the retry delay for a skipped review outcome."""
-    normalized = skipped_reason.strip().lower()
-    if normalized == "auto-merge-already-enabled":
-        return REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
-    return REVIEW_QUEUE_SKIPPED_RETRY_SECONDS
-
-
-def _review_queue_retry_seconds_for_result(result: Any) -> int:
-    """Return the next-attempt delay for one review-queue result."""
-    if result.auto_merge_enabled:
-        return REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
-    if result.rerun_checks:
-        return REVIEW_QUEUE_PENDING_RETRY_SECONDS
-    if result.blocked_reason:
-        return _review_queue_retry_seconds_for_blocked_reason(result.blocked_reason)
-    if result.skipped_reason:
-        return _review_queue_retry_seconds_for_skipped_reason(result.skipped_reason)
-    return DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
+# _review_queue_retry_seconds_for_blocked_reason: imported from domain.review_queue_policy
+# _review_queue_retry_seconds_for_skipped_reason: imported from domain.review_queue_policy
+# _review_queue_retry_seconds_for_result: imported from domain.review_queue_policy
 
 
 def _review_queue_retry_seconds_for_partial_failure(
     config: ConsumerConfig,
     error: str | None,
 ) -> int:
-    """Return the retry delay after a partial review-queue failure."""
-    if error and gh_reason_code(error) == "rate_limit":
-        return max(
-            config.rate_limit_cooldown_seconds,
-            DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
-        )
-    return DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
+    """Return the retry delay after a partial review-queue failure.
+
+    Thin wrapper: resolves reason code then delegates to domain function.
+    """
+    from startupai_controller.domain.review_queue_policy import (
+        review_queue_retry_seconds_for_partial_failure,
+    )
+    reason_code = gh_reason_code(error) if error else None
+    return review_queue_retry_seconds_for_partial_failure(
+        config.rate_limit_cooldown_seconds,
+        reason_code,
+    )
 
 
 def _queue_review_item(
@@ -3010,52 +2929,9 @@ def _queue_review_item(
 
 
 # ---------------------------------------------------------------------------
-# M5: Blocked-streak escalation policy
+# Blocked-streak escalation policy: imported from domain.review_queue_policy
+# _blocker_class, _escalation_ceiling_for_blocker_class, ESCALATION_CEILING_*
 # ---------------------------------------------------------------------------
-
-ESCALATION_CEILING_TRANSIENT = 12   # ~24 min at 2-min pending retry
-ESCALATION_CEILING_FAILED = 6       # ~90 min at 15-min failed retry
-ESCALATION_CEILING_STABLE = 4       # ~120 min at 30-min stable retry
-ESCALATION_CEILING_AUTOMERGE = 3    # ~3 hr at 1-hr automerge retry
-ESCALATION_CEILING_DEFAULT = 8      # ~40 min at 5-min default retry
-
-
-def _blocker_class(blocked_reason: str) -> str:
-    """Classify a blocked_reason into a stable blocker class string."""
-    normalized = blocked_reason.strip().lower()
-    if "auto-merge pending verification" in normalized:
-        return "automerge"
-    if (
-        "required checks pending" in normalized
-        or "review checks pending" in normalized
-    ):
-        return "transient"
-    if (
-        "required checks failed" in normalized
-        or "review checks failed" in normalized
-        or "mergeable=conflicting" in normalized
-        or normalized == "automerge-not-enabled"
-    ):
-        return "failed_checks"
-    if (
-        "missing codex verdict marker" in normalized
-        or normalized == "missing-copilot-review"
-        or normalized == "draft-pr"
-        or normalized.startswith("state=")
-    ):
-        return "stable"
-    return "default"
-
-
-def _escalation_ceiling_for_blocker_class(blocker_class: str) -> int:
-    """Return the max blocked-streak before escalation for a given class."""
-    return {
-        "transient": ESCALATION_CEILING_TRANSIENT,
-        "failed_checks": ESCALATION_CEILING_FAILED,
-        "stable": ESCALATION_CEILING_STABLE,
-        "automerge": ESCALATION_CEILING_AUTOMERGE,
-        "default": ESCALATION_CEILING_DEFAULT,
-    }.get(blocker_class, ESCALATION_CEILING_DEFAULT)
 
 
 def _apply_review_queue_result(
