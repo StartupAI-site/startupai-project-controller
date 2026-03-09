@@ -1,7 +1,7 @@
 """Characterization tests for launch policy functions (M1).
 
 Locks down exact input/output behavior of candidate selection and PR
-classification before extraction to domain/launch_policy.py.
+classification. Imports from domain modules directly.
 """
 
 from __future__ import annotations
@@ -10,18 +10,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from startupai_controller.board_consumer import (
-    OpenPullRequestMatch,
-    _consumer_provenance_marker,
-    _deterministic_branch_pattern,
-    _parse_consumer_provenance,
+from startupai_controller.domain.models import OpenPullRequestMatch
+from startupai_controller.domain.repair_policy import (
+    MARKER_PREFIX,
+    consumer_provenance_marker as _consumer_provenance_marker,
+    deterministic_branch_pattern as _deterministic_branch_pattern,
+    parse_consumer_provenance as _parse_consumer_provenance,
 )
-from startupai_controller.board_io import MARKER_PREFIX
+from startupai_controller.domain.launch_policy import (
+    classify_pr_candidates,
+    reconcile_in_progress_decision,
+)
 
 
 # ---------------------------------------------------------------------------
 # _classify_open_pr_candidates decision table
-# (Testing the pure classification logic, not the GitHub query)
+# (Testing the pure classification logic via domain function)
 # ---------------------------------------------------------------------------
 
 
@@ -31,47 +35,13 @@ def _classify_candidates_pure(
     trusted_authors: set[str],
     expected_branch: str | None = None,
 ) -> tuple[str, OpenPullRequestMatch | None, str]:
-    """Reproduce the pure classification decision from _classify_open_pr_candidates.
-
-    This function encodes the exact decision table, separated from the GitHub
-    query that fetches candidates.
-    """
-    if not candidates:
-        return "none", None, "no-open-pr"
-
-    adoptable: list[OpenPullRequestMatch] = []
-    ambiguous_reasons: list[str] = []
-    branch_pattern = _deterministic_branch_pattern(issue_ref)
-
-    for candidate in candidates:
-        provenance = candidate.provenance
-        if provenance is None:
-            ambiguous_reasons.append(f"missing-provenance:{candidate.url}")
-            continue
-        if provenance.get("issue_ref") != issue_ref:
-            ambiguous_reasons.append(f"issue-mismatch:{candidate.url}")
-            continue
-        if provenance.get("executor") != "codex":
-            ambiguous_reasons.append(f"executor-mismatch:{candidate.url}")
-            continue
-        if candidate.author not in trusted_authors:
-            ambiguous_reasons.append(f"untrusted-author:{candidate.url}")
-            continue
-        if expected_branch and candidate.branch_name != expected_branch:
-            ambiguous_reasons.append(f"branch-mismatch:{candidate.url}")
-            continue
-        if not branch_pattern.match(candidate.branch_name):
-            ambiguous_reasons.append(f"branch-noncanonical:{candidate.url}")
-            continue
-        adoptable.append(candidate)
-
-    if len(adoptable) == 1 and not ambiguous_reasons:
-        return "adoptable", adoptable[0], "qualifying-open-pr"
-    if adoptable and not ambiguous_reasons:
-        return "ambiguous", None, "multiple-adoptable-prs"
-    if adoptable and ambiguous_reasons:
-        return "ambiguous", None, ";".join(ambiguous_reasons)
-    return "non-local", None, ";".join(ambiguous_reasons)
+    """Delegate to domain.launch_policy.classify_pr_candidates."""
+    return classify_pr_candidates(
+        issue_ref,
+        candidates,
+        trusted_authors,
+        expected_branch=expected_branch,
+    )
 
 
 def _make_candidate(
@@ -239,3 +209,75 @@ class TestClassifyOpenPrCandidates:
             "crew#42", [good, bad], self.TRUSTED_AUTHORS
         )
         assert cls == "ambiguous"
+
+
+# ---------------------------------------------------------------------------
+# reconcile_in_progress_decision — domain function direct tests
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileInProgressDecision:
+    """Characterize reconcile_in_progress_decision truth table."""
+
+    def test_adoptable_repair_not_success_returns_ready(self) -> None:
+        result = reconcile_in_progress_decision(
+            "adoptable",
+            has_latest_session=True,
+            session_kind="repair",
+            session_status="failed",
+        )
+        assert result == "ready"
+
+    def test_adoptable_repair_success_returns_review(self) -> None:
+        result = reconcile_in_progress_decision(
+            "adoptable",
+            has_latest_session=True,
+            session_kind="repair",
+            session_status="success",
+        )
+        assert result == "review"
+
+    def test_adoptable_fresh_session_returns_review(self) -> None:
+        result = reconcile_in_progress_decision(
+            "adoptable",
+            has_latest_session=True,
+            session_kind="fresh",
+            session_status="success",
+        )
+        assert result == "review"
+
+    def test_adoptable_no_session_returns_review(self) -> None:
+        result = reconcile_in_progress_decision(
+            "adoptable",
+            has_latest_session=False,
+            session_kind=None,
+            session_status=None,
+        )
+        assert result == "review"
+
+    def test_none_classification_returns_ready(self) -> None:
+        result = reconcile_in_progress_decision(
+            "none",
+            has_latest_session=True,
+            session_kind="fresh",
+            session_status="success",
+        )
+        assert result == "ready"
+
+    def test_ambiguous_returns_blocked(self) -> None:
+        result = reconcile_in_progress_decision(
+            "ambiguous",
+            has_latest_session=True,
+            session_kind="fresh",
+            session_status="success",
+        )
+        assert result == "blocked"
+
+    def test_non_local_returns_blocked(self) -> None:
+        result = reconcile_in_progress_decision(
+            "non-local",
+            has_latest_session=True,
+            session_kind="fresh",
+            session_status="success",
+        )
+        assert result == "blocked"

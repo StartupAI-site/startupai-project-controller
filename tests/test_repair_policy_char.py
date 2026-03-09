@@ -1,7 +1,7 @@
 """Characterization tests for repair policy functions (M1).
 
-Locks down exact input/output behavior of repair/requeue pure functions
-before extraction to domain/repair_policy.py.
+Locks down exact input/output behavior of repair/requeue pure functions.
+Imports from domain/repair_policy.py directly.
 """
 
 from __future__ import annotations
@@ -11,17 +11,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from startupai_controller.board_consumer import (
-    MAX_REQUEUE_CYCLES,
-    OpenPullRequestMatch,
-    _consumer_provenance_marker,
-    _deterministic_branch_pattern,
-    _extract_acceptance_criteria,
-    _parse_consumer_provenance,
-    _session_retry_due_at,
+from startupai_controller.domain.models import OpenPullRequestMatch
+from startupai_controller.domain.repair_policy import (
+    MARKER_PREFIX,
+    consumer_provenance_marker as _consumer_provenance_marker,
+    deterministic_branch_pattern as _deterministic_branch_pattern,
+    extract_acceptance_criteria as _extract_acceptance_criteria,
+    parse_consumer_provenance as _parse_consumer_provenance,
 )
-from startupai_controller.board_io import MARKER_PREFIX
-from startupai_controller.consumer_db import SessionInfo
+from startupai_controller.domain.review_queue_policy import (
+    MAX_REQUEUE_CYCLES,
+    session_retry_due_at as _session_retry_due_at,
+)
+from startupai_controller.domain.models import SessionInfo
 
 
 # ---------------------------------------------------------------------------
@@ -77,27 +79,27 @@ class TestDeterministicBranchPattern:
     """Characterize _deterministic_branch_pattern."""
 
     def test_matches_canonical_branch(self) -> None:
-        pattern = _deterministic_branch_pattern("crew#88")
+        pattern = _deterministic_branch_pattern(88)
         assert pattern.match("feat/88-fix-something") is not None
 
     def test_rejects_wrong_number(self) -> None:
-        pattern = _deterministic_branch_pattern("crew#88")
+        pattern = _deterministic_branch_pattern(88)
         assert pattern.match("feat/99-fix-something") is None
 
     def test_rejects_wrong_prefix(self) -> None:
-        pattern = _deterministic_branch_pattern("crew#88")
+        pattern = _deterministic_branch_pattern(88)
         assert pattern.match("fix/88-fix-something") is None
 
     def test_rejects_no_description(self) -> None:
-        pattern = _deterministic_branch_pattern("crew#88")
+        pattern = _deterministic_branch_pattern(88)
         assert pattern.match("feat/88") is None
 
     def test_requires_lowercase_description(self) -> None:
-        pattern = _deterministic_branch_pattern("crew#88")
+        pattern = _deterministic_branch_pattern(88)
         assert pattern.match("feat/88-FixSomething") is None
 
     def test_allows_digits_in_description(self) -> None:
-        pattern = _deterministic_branch_pattern("crew#88")
+        pattern = _deterministic_branch_pattern(88)
         assert pattern.match("feat/88-add-v2-support") is not None
 
 

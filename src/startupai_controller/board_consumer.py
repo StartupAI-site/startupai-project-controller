@@ -155,6 +155,7 @@ from startupai_controller.domain.verdict_policy import (
 )
 from startupai_controller.domain.launch_policy import (
     classify_pr_candidates as _classify_pr_candidates_pure,
+    reconcile_in_progress_decision,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -4163,51 +4164,41 @@ def _reconcile_board_truth(
             expected_branch=expected_branch,
             gh_runner=gh_runner,
         )
-        if classification == "adoptable" and pr_match is not None:
-            if latest_session is not None and not dry_run:
-                db.update_session(latest_session.id, pr_url=pr_match.url)
+        # Domain policy: decide target status based on classification + session
+        target = reconcile_in_progress_decision(
+            classification,
+            has_latest_session=latest_session is not None,
+            session_kind=latest_session.session_kind if latest_session else None,
+            session_status=latest_session.status if latest_session else None,
+        )
 
-            should_requeue_repair = (
-                latest_session is not None
-                and latest_session.session_kind == "repair"
-                and latest_session.status != "success"
-            )
-            if should_requeue_repair:
-                if not dry_run:
-                    _return_issue_to_ready(
-                        issue_ref,
-                        critical_path_config,
-                        consumer_config.project_owner,
-                        consumer_config.project_number,
-                        from_statuses={"In Progress"},
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                moved_ready.append(issue_ref)
-            else:
+        if target == "ready":
+            if classification == "adoptable" and pr_match is not None:
                 if latest_session is not None and not dry_run:
-                    db.update_session(
-                        latest_session.id,
-                        pr_url=pr_match.url,
-                        phase="review",
-                    )
-                if not dry_run:
-                    _transition_issue_to_review(
-                        issue_ref,
-                        critical_path_config,
-                        consumer_config.project_owner,
-                        consumer_config.project_number,
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                moved_review.append(issue_ref)
-            continue
-
-        if classification == "none":
+                    db.update_session(latest_session.id, pr_url=pr_match.url)
             if not dry_run:
                 _return_issue_to_ready(
+                    issue_ref,
+                    critical_path_config,
+                    consumer_config.project_owner,
+                    consumer_config.project_number,
+                    from_statuses={"In Progress"},
+                    board_info_resolver=board_info_resolver,
+                    board_mutator=board_mutator,
+                    gh_runner=gh_runner,
+                )
+            moved_ready.append(issue_ref)
+            continue
+
+        if target == "review":
+            if latest_session is not None and pr_match is not None and not dry_run:
+                db.update_session(
+                    latest_session.id,
+                    pr_url=pr_match.url,
+                    phase="review",
+                )
+            if not dry_run:
+                _transition_issue_to_review(
                     issue_ref,
                     critical_path_config,
                     consumer_config.project_owner,
@@ -4216,9 +4207,10 @@ def _reconcile_board_truth(
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
                 )
-            moved_ready.append(issue_ref)
+            moved_review.append(issue_ref)
             continue
 
+        # target == "blocked"
         if not dry_run:
             _set_blocked_with_reason(
                 issue_ref,

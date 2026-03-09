@@ -1,23 +1,19 @@
 """Characterization tests for scheduling policy functions (M1).
 
-Locks down exact input/output behavior of pure scheduling functions before
-extraction to domain/scheduling_policy.py.
+Locks down exact input/output behavior of pure scheduling functions.
+Imports from domain/scheduling_policy.py directly.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-from startupai_controller.board_automation import (
-    _wip_limit_for_lane,
-    _protected_queue_executor_target,
-)
-from startupai_controller.board_io import _priority_rank
-from startupai_controller.board_graph import (
-    _admission_candidate_rank,
-    _normalize_heading,
+from startupai_controller.domain.scheduling_policy import (
+    wip_limit_for_lane as _wip_limit_for_lane,
+    protected_queue_executor_target as _protected_queue_executor_target,
+    priority_rank as _priority_rank,
+    admission_candidate_rank as _admission_candidate_rank,
+    normalize_heading as _normalize_heading,
     admission_watermarks,
     has_structured_acceptance_criteria,
 )
@@ -35,20 +31,16 @@ class TestWipLimitForLane:
         assert _wip_limit_for_lane(None, "codex", "crew", 3) == 3
 
     def test_matching_executor_and_lane(self) -> None:
-        config = SimpleNamespace(wip_limits={"codex": {"crew": 5}})
-        assert _wip_limit_for_lane(config, "codex", "crew", 3) == 5
+        assert _wip_limit_for_lane({"codex": {"crew": 5}}, "codex", "crew", 3) == 5
 
     def test_missing_executor_returns_fallback(self) -> None:
-        config = SimpleNamespace(wip_limits={"claude": {"crew": 5}})
-        assert _wip_limit_for_lane(config, "codex", "crew", 3) == 3
+        assert _wip_limit_for_lane({"claude": {"crew": 5}}, "codex", "crew", 3) == 3
 
     def test_missing_lane_returns_fallback(self) -> None:
-        config = SimpleNamespace(wip_limits={"codex": {"app": 5}})
-        assert _wip_limit_for_lane(config, "codex", "crew", 3) == 3
+        assert _wip_limit_for_lane({"codex": {"app": 5}}, "codex", "crew", 3) == 3
 
     def test_empty_wip_limits(self) -> None:
-        config = SimpleNamespace(wip_limits={})
-        assert _wip_limit_for_lane(config, "codex", "crew", 3) == 3
+        assert _wip_limit_for_lane({}, "codex", "crew", 3) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -59,50 +51,26 @@ class TestWipLimitForLane:
 class TestProtectedQueueExecutorTarget:
     """Characterize _protected_queue_executor_target."""
 
-    def test_none_config(self) -> None:
-        assert _protected_queue_executor_target(None) is None
+    def test_none_mode(self) -> None:
+        assert _protected_queue_executor_target(None, ()) is None
 
     def test_board_authority_mode(self) -> None:
-        config = SimpleNamespace(
-            execution_authority_mode="board",
-            execution_authority_executors=["codex"],
-        )
-        assert _protected_queue_executor_target(config) is None
+        assert _protected_queue_executor_target("board", ("codex",)) is None
 
     def test_single_machine_single_executor(self) -> None:
-        config = SimpleNamespace(
-            execution_authority_mode="single_machine",
-            execution_authority_executors=["codex"],
-        )
-        assert _protected_queue_executor_target(config) == "codex"
+        assert _protected_queue_executor_target("single_machine", ("codex",)) == "codex"
 
     def test_single_machine_multiple_executors(self) -> None:
-        config = SimpleNamespace(
-            execution_authority_mode="single_machine",
-            execution_authority_executors=["codex", "claude"],
-        )
-        assert _protected_queue_executor_target(config) is None
+        assert _protected_queue_executor_target("single_machine", ("codex", "claude")) is None
 
     def test_single_machine_invalid_executor(self) -> None:
-        config = SimpleNamespace(
-            execution_authority_mode="single_machine",
-            execution_authority_executors=["bogus"],
-        )
-        assert _protected_queue_executor_target(config) is None
+        assert _protected_queue_executor_target("single_machine", ("bogus",)) is None
 
     def test_single_machine_empty_executors(self) -> None:
-        config = SimpleNamespace(
-            execution_authority_mode="single_machine",
-            execution_authority_executors=[],
-        )
-        assert _protected_queue_executor_target(config) is None
+        assert _protected_queue_executor_target("single_machine", ()) is None
 
     def test_executor_whitespace_stripped(self) -> None:
-        config = SimpleNamespace(
-            execution_authority_mode="single_machine",
-            execution_authority_executors=["  codex  "],
-        )
-        assert _protected_queue_executor_target(config) == "codex"
+        assert _protected_queue_executor_target("single_machine", ("  codex  ",)) == "codex"
 
 
 # ---------------------------------------------------------------------------
@@ -195,18 +163,18 @@ class TestAdmissionCandidateRank:
     """Characterize _admission_candidate_rank."""
 
     def test_graph_member_higher_priority(self) -> None:
-        graph = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=True)
-        non_graph = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=False)
+        graph = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=True, issue_number=1)
+        non_graph = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=False, issue_number=1)
         assert graph < non_graph
 
     def test_higher_priority_ranks_first(self) -> None:
-        p0 = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=True)
-        p2 = _admission_candidate_rank("crew#1", priority="P2", is_graph_member=True)
+        p0 = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=True, issue_number=1)
+        p2 = _admission_candidate_rank("crew#1", priority="P2", is_graph_member=True, issue_number=1)
         assert p0 < p2
 
     def test_lower_issue_number_first(self) -> None:
-        low = _admission_candidate_rank("crew#1", priority="P1", is_graph_member=True)
-        high = _admission_candidate_rank("crew#99", priority="P1", is_graph_member=True)
+        low = _admission_candidate_rank("crew#1", priority="P1", is_graph_member=True, issue_number=1)
+        high = _admission_candidate_rank("crew#99", priority="P1", is_graph_member=True, issue_number=99)
         assert low < high
 
 

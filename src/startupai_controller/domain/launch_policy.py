@@ -74,3 +74,37 @@ def classify_pr_candidates(
     if adoptable and ambiguous_reasons:
         return "ambiguous", None, ";".join(ambiguous_reasons)
     return "non-local", None, ";".join(ambiguous_reasons)
+
+
+# ---------------------------------------------------------------------------
+# Board reconciliation truth table
+# ---------------------------------------------------------------------------
+
+
+def reconcile_in_progress_decision(
+    classification: str,
+    *,
+    has_latest_session: bool,
+    session_kind: str | None,
+    session_status: str | None,
+) -> str:
+    """Decide where to move an In Progress issue with no active worker.
+
+    Given the PR classification result and the latest session state, returns
+    the target status: "ready", "review", or "blocked".
+
+    Pure decision — callers execute the board mutation.
+    """
+    if classification == "adoptable":
+        should_requeue_repair = (
+            has_latest_session
+            and session_kind == "repair"
+            and session_status != "success"
+        )
+        if should_requeue_repair:
+            return "ready"
+        return "review"
+    if classification == "none":
+        return "ready"
+    # "ambiguous" or "non-local" — cannot determine ownership
+    return "blocked"

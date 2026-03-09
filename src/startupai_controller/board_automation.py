@@ -133,6 +133,8 @@ from startupai_controller.promote_ready import (
     _set_board_status,
     promote_to_ready,
 )
+from startupai_controller.domain.automerge_policy import automerge_gate_decision
+from startupai_controller.domain.rescue_policy import rescue_decision
 from startupai_controller.domain.scheduling_policy import (
     VALID_DISPATCH_TARGETS,
     VALID_EXECUTION_AUTHORITY_MODES,
@@ -3448,154 +3450,107 @@ def review_rescue(
             dry_run=dry_run,
             gh_runner=gh_runner,
         )
-    if not snapshot.review_refs:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            skipped_reason="not-in-review-scope",
-        )
-
+    # Phase 1: Handle cancelled checks (side-effect attempt before policy)
     rerun_checks: list[str] = []
-    for check_name in sorted(snapshot.rescue_cancelled):
-        observation = snapshot.gate_status.checks.get(check_name)
-        if observation is None:
-            continue
-        if _rerun_check_observation(
-            pr_repo, observation, dry_run=dry_run, gh_runner=gh_runner
-        ):
-            rerun_checks.append(check_name)
-    if rerun_checks:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            rerun_checks=tuple(rerun_checks),
-        )
-
-    if snapshot.gate_status.state.upper() != "OPEN":
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason=f"state={snapshot.gate_status.state}",
-        )
-    if snapshot.gate_status.is_draft:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason="draft-pr",
-        )
-    if snapshot.gate_status.mergeable == "CONFLICTING":
-        requeued_refs = _requeue_local_review_failures(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            review_refs=snapshot.review_refs,
-            config=config,
-            automation_config=automation_config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=dry_run,
-            pr_author=snapshot.pr_author,
-            pr_body=snapshot.pr_body,
-            gh_runner=gh_runner,
-        )
-        if requeued_refs:
+    if snapshot.rescue_cancelled:
+        for check_name in sorted(snapshot.rescue_cancelled):
+            observation = snapshot.gate_status.checks.get(check_name)
+            if observation is None:
+                continue
+            if _rerun_check_observation(
+                pr_repo, observation, dry_run=dry_run, gh_runner=gh_runner
+            ):
+                rerun_checks.append(check_name)
+        if rerun_checks:
             return ReviewRescueResult(
                 pr_repo=pr_repo,
                 pr_number=pr_number,
-                requeued_refs=requeued_refs,
+                rerun_checks=tuple(rerun_checks),
             )
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason="mergeable=CONFLICTING",
-        )
-    if not snapshot.copilot_review_present:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason="missing-copilot-review",
-        )
-    if snapshot.codex_gate_code != 0:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason=snapshot.codex_gate_message,
-        )
-    if snapshot.gate_status.failed:
-        requeued_refs = _requeue_local_review_failures(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            review_refs=snapshot.review_refs,
-            config=config,
-            automation_config=automation_config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=dry_run,
-            pr_author=snapshot.pr_author,
-            pr_body=snapshot.pr_body,
-            gh_runner=gh_runner,
-        )
-        if requeued_refs:
-            return ReviewRescueResult(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                requeued_refs=requeued_refs,
-            )
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason=(
-                "required checks failed "
-                f"{sorted(snapshot.gate_status.failed)}"
-            ),
-        )
-    if snapshot.gate_status.pending:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason=(
-                "required checks pending "
-                f"{sorted(snapshot.gate_status.pending)}"
-            ),
-        )
-    if snapshot.rescue_failed:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason=(
-                "review checks failed "
-                f"{sorted(snapshot.rescue_failed)}"
-            ),
-        )
-    if snapshot.rescue_pending or snapshot.rescue_missing:
-        waiting = sorted(snapshot.rescue_pending | snapshot.rescue_missing)
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            blocked_reason=f"review checks pending {waiting}",
-        )
-    if snapshot.gate_status.auto_merge_enabled:
-        return ReviewRescueResult(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            skipped_reason="auto-merge-already-enabled",
-        )
 
-    code, _msg = automerge_review(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        config=config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        dry_run=dry_run,
-        snapshot=snapshot,
-        gh_runner=gh_runner,
+    # Phase 2: Domain policy decision (cancelled checks already handled above)
+    action, reason = rescue_decision(
+        review_refs=tuple(snapshot.review_refs),
+        has_cancelled_checks=False,
+        pr_state=snapshot.gate_status.state,
+        is_draft=snapshot.gate_status.is_draft,
+        mergeable=snapshot.gate_status.mergeable,
+        copilot_review_present=snapshot.copilot_review_present,
+        codex_gate_code=snapshot.codex_gate_code,
+        codex_gate_message=snapshot.codex_gate_message,
+        required_failed=snapshot.gate_status.failed,
+        required_pending=snapshot.gate_status.pending,
+        rescue_failed=snapshot.rescue_failed,
+        rescue_pending=snapshot.rescue_pending,
+        rescue_missing=snapshot.rescue_missing,
+        auto_merge_enabled=snapshot.gate_status.auto_merge_enabled,
     )
+
+    # Phase 3: Execute the decision
+    if action == "skipped":
+        return ReviewRescueResult(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            skipped_reason=reason,
+        )
+
+    if action == "blocked":
+        return ReviewRescueResult(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            blocked_reason=reason,
+        )
+
+    if action in ("requeue_conflicting", "requeue_failed"):
+        requeued_refs = _requeue_local_review_failures(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            review_refs=snapshot.review_refs,
+            config=config,
+            automation_config=automation_config,
+            project_owner=project_owner,
+            project_number=project_number,
+            dry_run=dry_run,
+            pr_author=snapshot.pr_author,
+            pr_body=snapshot.pr_body,
+            gh_runner=gh_runner,
+        )
+        if requeued_refs:
+            return ReviewRescueResult(
+                pr_repo=pr_repo,
+                pr_number=pr_number,
+                requeued_refs=requeued_refs,
+            )
+        return ReviewRescueResult(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            blocked_reason=reason,
+        )
+
+    if action == "enable_automerge":
+        code, _msg = automerge_review(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            config=config,
+            automation_config=automation_config,
+            project_owner=project_owner,
+            project_number=project_number,
+            dry_run=dry_run,
+            snapshot=snapshot,
+            gh_runner=gh_runner,
+        )
+        return ReviewRescueResult(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            auto_merge_enabled=code == 0,
+            blocked_reason=None if code == 0 else "automerge-not-enabled",
+        )
+
+    # Unreachable — all rescue_decision actions handled above
     return ReviewRescueResult(
         pr_repo=pr_repo,
         pr_number=pr_number,
-        auto_merge_enabled=code == 0,
-        blocked_reason=None if code == 0 else "automerge-not-enabled",
+        blocked_reason=reason,
     )
 
 
@@ -3729,46 +3684,33 @@ def automerge_review(
         )
         status = _query_pr_gate_status(pr_repo, pr_number, gh_runner=gh_runner)
 
-    if not review_refs:
-        return 2, (
-            f"{pr_repo}#{pr_number}: not in board Review scope; "
-            "automerge controller no-op"
-        )
+    # Domain policy decision
+    code, msg, action = automerge_gate_decision(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        review_refs=tuple(review_refs),
+        copilot_review_present=copilot_review_present,
+        codex_gate_code=gate_code,
+        codex_gate_message=gate_msg,
+        pr_state=status.state,
+        is_draft=status.is_draft,
+        auto_merge_enabled=status.auto_merge_enabled,
+        required_failed=status.failed,
+        required_pending=status.pending,
+        mergeable=status.mergeable,
+        merge_state_status=status.merge_state_status,
+    )
 
-    if not copilot_review_present:
-        return 2, (
-            f"{pr_repo}#{pr_number}: missing Copilot review signal "
-            "(COMMENTED|APPROVED)"
-        )
+    if action in ("no_op", "already_enabled"):
+        return code, msg
 
-    if gate_code != 0:
-        return gate_code, gate_msg
-
-    if status.state.upper() != "OPEN":
-        return 2, f"{pr_repo}#{pr_number}: state={status.state}, not OPEN"
-    if status.is_draft:
-        return 2, f"{pr_repo}#{pr_number}: draft PR, skipping auto-merge"
-    if status.auto_merge_enabled:
-        return 0, f"{pr_repo}#{pr_number}: auto-merge already enabled"
-    if status.failed:
-        return 2, (
-            f"{pr_repo}#{pr_number}: required checks failed "
-            f"{sorted(status.failed)}"
-        )
-    if status.pending:
-        return 2, (
-            f"{pr_repo}#{pr_number}: required checks pending "
-            f"{sorted(status.pending)}"
-        )
-
-    if status.merge_state_status == "BEHIND" and update_branch:
+    # Execute branch update if needed
+    if action == "update_branch_then_enable" and update_branch:
         if dry_run:
-            return 0, (
-                f"{pr_repo}#{pr_number}: would update branch then enable "
-                "auto-merge"
-            )
+            return code, msg
         update_pull_request_branch(pr_repo, pr_number, gh_runner=gh_runner)
 
+    # Post-update mergeable guard (preserves original fallthrough behavior)
     if status.mergeable not in {"MERGEABLE", "UNKNOWN"}:
         return 2, (
             f"{pr_repo}#{pr_number}: mergeable={status.mergeable}, "
@@ -3781,15 +3723,15 @@ def automerge_review(
             "(squash, strict gates)"
         )
 
-    status = enable_pull_request_automerge(
+    merge_status = enable_pull_request_automerge(
         pr_repo,
         pr_number,
         delete_branch=delete_branch,
         gh_runner=gh_runner,
     )
-    if status == "confirmed":
+    if merge_status == "confirmed":
         return 0, f"{pr_repo}#{pr_number}: auto-merge enabled (verified)"
-    # status == "pending"
+    # merge_status == "pending"
     return 2, f"{pr_repo}#{pr_number}: auto-merge pending verification"
 
 

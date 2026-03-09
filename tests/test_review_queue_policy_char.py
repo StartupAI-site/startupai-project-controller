@@ -1,7 +1,7 @@
 """Characterization tests for review-queue policy functions (M1).
 
-Locks down exact input/output behavior of pure policy functions before
-extraction to domain/review_queue_policy.py.
+Locks down exact input/output behavior of pure policy functions.
+Imports from domain/review_queue_policy.py directly.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from startupai_controller.board_consumer import (
+from startupai_controller.domain.review_queue_policy import (
     DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
     ESCALATION_CEILING_AUTOMERGE,
     ESCALATION_CEILING_DEFAULT,
@@ -25,19 +25,17 @@ from startupai_controller.board_consumer import (
     REVIEW_QUEUE_PENDING_RETRY_SECONDS,
     REVIEW_QUEUE_SKIPPED_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
-    ConsumerConfig,
-    _blocker_class,
-    _effective_retry_backoff,
-    _escalation_ceiling_for_blocker_class,
-    _is_retryable_failure_reason,
-    _parse_iso8601_timestamp,
-    _retry_delay_seconds,
-    _review_queue_retry_seconds_for_blocked_reason,
-    _review_queue_retry_seconds_for_partial_failure,
-    _review_queue_retry_seconds_for_result,
-    _review_queue_retry_seconds_for_skipped_reason,
+    blocker_class as _blocker_class,
+    effective_retry_backoff as _effective_retry_backoff,
+    escalation_ceiling_for_blocker_class as _escalation_ceiling_for_blocker_class,
+    is_retryable_failure_reason as _is_retryable_failure_reason,
+    parse_iso8601_timestamp as _parse_iso8601_timestamp,
+    retry_delay_seconds as _retry_delay_seconds,
+    review_queue_retry_seconds_for_blocked_reason as _review_queue_retry_seconds_for_blocked_reason,
+    review_queue_retry_seconds_for_partial_failure as _review_queue_retry_seconds_for_partial_failure,
+    review_queue_retry_seconds_for_result as _review_queue_retry_seconds_for_result,
+    review_queue_retry_seconds_for_skipped_reason as _review_queue_retry_seconds_for_skipped_reason,
 )
-from startupai_controller.consumer_workflow import WorkflowDefinition
 
 
 # ---------------------------------------------------------------------------
@@ -305,46 +303,22 @@ class TestRetrySecondsForResult:
 
 
 class TestRetrySecondsForPartialFailure:
-    """Characterize _review_queue_retry_seconds_for_partial_failure."""
+    """Characterize _review_queue_retry_seconds_for_partial_failure.
+
+    The domain function takes (rate_limit_cooldown_seconds, error_reason_code)
+    where error_reason_code is a pre-classified code ("rate_limit" or None).
+    """
 
     def test_rate_limit_error(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-            rate_limit_cooldown_seconds=600,
-        )
-        # Must match _GH_RATE_LIMIT_ERROR_MARKERS: "api rate limit exceeded" or "secondary rate limit"
-        result = _review_queue_retry_seconds_for_partial_failure(
-            config, "API rate limit exceeded"
-        )
+        result = _review_queue_retry_seconds_for_partial_failure(600, "rate_limit")
         assert result == max(600, DEFAULT_REVIEW_QUEUE_RETRY_SECONDS)
 
     def test_non_rate_limit_error(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-        )
-        result = _review_queue_retry_seconds_for_partial_failure(config, "some other error")
-        assert result == DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
-
-    def test_non_matching_rate_limit_string(self) -> None:
-        """Strings that don't match the rate-limit markers get default."""
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-            rate_limit_cooldown_seconds=600,
-        )
-        result = _review_queue_retry_seconds_for_partial_failure(
-            config, "rate_limit: exceeded"
-        )
+        result = _review_queue_retry_seconds_for_partial_failure(600, "some_other")
         assert result == DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
 
     def test_none_error(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-        )
-        result = _review_queue_retry_seconds_for_partial_failure(config, None)
+        result = _review_queue_retry_seconds_for_partial_failure(600, None)
         assert result == DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
 
 
@@ -384,70 +358,34 @@ class TestIsRetryableFailureReason:
 
 
 class TestEffectiveRetryBackoff:
-    """Characterize _effective_retry_backoff."""
+    """Characterize _effective_retry_backoff.
+
+    The domain function takes (base_seconds, max_seconds, config_base, config_max)
+    where base_seconds/max_seconds are workflow overrides (or None).
+    """
 
     def test_config_defaults(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-            retry_backoff_base_seconds=30,
-            retry_backoff_seconds=300,
-        )
-        base, max_s = _effective_retry_backoff(config, None)
+        base, max_s = _effective_retry_backoff(None, None, config_base=30, config_max=300)
         assert base == 30
         assert max_s == 300
 
     def test_workflow_overrides(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-            retry_backoff_base_seconds=30,
-            retry_backoff_seconds=300,
-        )
-        runtime = SimpleNamespace(
-            retry_backoff_base_seconds=10,
-            retry_backoff_seconds=120,
-        )
-        workflow = SimpleNamespace(runtime=runtime)
-        base, max_s = _effective_retry_backoff(config, workflow)
+        base, max_s = _effective_retry_backoff(10, 120, config_base=30, config_max=300)
         assert base == 10
         assert max_s == 120
 
     def test_workflow_none_fields_fallback_to_config(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-            retry_backoff_base_seconds=30,
-            retry_backoff_seconds=300,
-        )
-        runtime = SimpleNamespace(
-            retry_backoff_base_seconds=None,
-            retry_backoff_seconds=None,
-        )
-        workflow = SimpleNamespace(runtime=runtime)
-        base, max_s = _effective_retry_backoff(config, workflow)
+        base, max_s = _effective_retry_backoff(None, None, config_base=30, config_max=300)
         assert base == 30
         assert max_s == 300
 
     def test_base_floor_at_1(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-            retry_backoff_base_seconds=0,
-            retry_backoff_seconds=10,
-        )
-        base, max_s = _effective_retry_backoff(config, None)
+        base, max_s = _effective_retry_backoff(None, None, config_base=0, config_max=10)
         assert base == 1
         assert max_s == 10
 
     def test_max_at_least_base(self) -> None:
-        config = ConsumerConfig(
-            critical_paths_path="x",
-            automation_config_path="y",
-            retry_backoff_base_seconds=100,
-            retry_backoff_seconds=10,
-        )
-        base, max_s = _effective_retry_backoff(config, None)
+        base, max_s = _effective_retry_backoff(None, None, config_base=100, config_max=10)
         assert base == 100
         assert max_s >= base
 
