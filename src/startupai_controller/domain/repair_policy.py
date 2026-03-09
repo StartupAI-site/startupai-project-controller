@@ -74,6 +74,29 @@ def parse_consumer_provenance(text: str) -> dict[str, str] | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# PR URL parsing — pure string extraction, no side effects
+# ---------------------------------------------------------------------------
+
+
+def parse_pr_url(pr_field: str) -> tuple[str, str, int] | None:
+    """Extract owner/repo/pr_number from a GitHub PR URL in project field."""
+    text = pr_field.strip()
+    if not text:
+        return None
+    match = re.search(
+        r"github\.com/([^/]+)/([^/]+)/pull/(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    owner = match.group(1)
+    repo = match.group(2)
+    number = int(match.group(3))
+    return owner, repo, number
+
+
 def repo_to_prefix_for_repo(repo: str) -> str:
     """Best-effort repo name to board prefix mapping."""
     mapping = {

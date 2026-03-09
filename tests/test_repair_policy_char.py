@@ -18,6 +18,7 @@ from startupai_controller.domain.repair_policy import (
     deterministic_branch_pattern as _deterministic_branch_pattern,
     extract_acceptance_criteria as _extract_acceptance_criteria,
     parse_consumer_provenance as _parse_consumer_provenance,
+    parse_pr_url,
 )
 from startupai_controller.domain.review_queue_policy import (
     MAX_REQUEUE_CYCLES,
@@ -306,3 +307,37 @@ class TestMaxRequeueCycles:
 
     def test_value(self) -> None:
         assert MAX_REQUEUE_CYCLES == 3
+
+
+# ---------------------------------------------------------------------------
+# parse_pr_url — pure URL extraction
+# ---------------------------------------------------------------------------
+
+
+class TestParsePrUrl:
+    """Characterize parse_pr_url domain function."""
+
+    def test_standard_url(self) -> None:
+        result = parse_pr_url("https://github.com/StartupAI-site/startupai-crew/pull/42")
+        assert result == ("StartupAI-site", "startupai-crew", 42)
+
+    def test_empty_string(self) -> None:
+        assert parse_pr_url("") is None
+
+    def test_whitespace_only(self) -> None:
+        assert parse_pr_url("   ") is None
+
+    def test_no_match(self) -> None:
+        assert parse_pr_url("not a url") is None
+
+    def test_url_with_surrounding_text(self) -> None:
+        result = parse_pr_url("PR: https://github.com/org/repo/pull/123 done")
+        assert result == ("org", "repo", 123)
+
+    def test_case_insensitive(self) -> None:
+        result = parse_pr_url("https://GITHUB.COM/Org/Repo/pull/7")
+        assert result == ("Org", "Repo", 7)
+
+    def test_large_pr_number(self) -> None:
+        result = parse_pr_url("https://github.com/o/r/pull/99999")
+        assert result == ("o", "r", 99999)
