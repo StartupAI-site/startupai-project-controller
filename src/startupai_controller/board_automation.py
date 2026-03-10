@@ -1868,67 +1868,37 @@ def admission_summary_payload(
     }
 
 
-def admit_backlog_items(
-    config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig | None,
+def _load_admission_source_items(
+    automation_config: BoardAutomationConfig,
+    *,
     project_owner: str,
     project_number: int,
-    *,
-    dispatchable_repo_prefixes: tuple[str, ...] | None = None,
-    active_lease_issue_refs: tuple[str, ...] = (),
-    dry_run: bool = False,
-    board_snapshot: CycleBoardSnapshot | None = None,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> AdmissionDecision:
-    """Autonomously admit governed Backlog items into Ready."""
-    if automation_config is None:
-        return AdmissionDecision(
-            ready_count=0,
-            ready_floor=0,
-            ready_cap=0,
-            needed=0,
-            scanned_backlog=0,
-        )
-
-    target_executor = _protected_queue_executor_target(automation_config)
-    floor, cap = admission_watermarks(
-        automation_config.global_concurrency,
-        floor_multiplier=automation_config.admission.ready_floor_multiplier,
-        cap_multiplier=automation_config.admission.ready_cap_multiplier,
-    )
-    if (
-        not automation_config.admission.enabled
-        or target_executor is None
-    ):
-        return AdmissionDecision(
-            ready_count=0,
-            ready_floor=floor,
-            ready_cap=cap,
-            needed=0,
-            scanned_backlog=0,
-        )
-
+    board_snapshot: CycleBoardSnapshot | None,
+    gh_runner: Callable[..., str] | None,
+) -> list[_ProjectItemSnapshot]:
+    """Load backlog/ready items needed for one admission pass."""
     statuses = set(automation_config.admission.source_statuses)
     statuses.add("Ready")
     if board_snapshot is None:
-        items = _list_project_items(
+        return _list_project_items(
             project_owner,
             project_number,
             statuses=statuses,
             gh_runner=gh_runner,
         )
-    else:
-        items = [
-            item
-            for item in board_snapshot.items
-            if item.status in statuses
-        ]
+    return [item for item in board_snapshot.items if item.status in statuses]
+
+
+def _partition_admission_source_items(
+    items: list[_ProjectItemSnapshot],
+    *,
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    target_executor: str,
+) -> tuple[int, list[_ProjectItemSnapshot]]:
+    """Count governed ready items and collect governed backlog items."""
     ready_count = 0
     backlog_items: list[_ProjectItemSnapshot] = []
-    dispatchable = set(dispatchable_repo_prefixes or automation_config.execution_authority_repos)
-    active_leases = set(active_lease_issue_refs)
-
     for item in items:
         issue_ref = _snapshot_to_issue_ref(item, config)
         if issue_ref is None:
@@ -1940,13 +1910,20 @@ def admit_backlog_items(
             ready_count += 1
         elif item.status in automation_config.admission.source_statuses:
             backlog_items.append(item)
+    return ready_count, backlog_items
 
-    needed = min(
-        max(0, floor - ready_count),
-        max(0, cap - ready_count),
-        automation_config.admission.max_batch_size,
-    )
 
+def _build_provisional_admission_candidates(
+    backlog_items: list[_ProjectItemSnapshot],
+    *,
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    dispatchable_repo_prefixes: tuple[str, ...],
+    active_lease_issue_refs: tuple[str, ...],
+) -> tuple[list[_ProjectItemSnapshot], list[AdmissionSkip]]:
+    """Apply cheap exact admission filters to backlog items."""
+    dispatchable = set(dispatchable_repo_prefixes)
+    active_leases = set(active_lease_issue_refs)
     provisional_candidates: list[_ProjectItemSnapshot] = []
     skipped: list[AdmissionSkip] = []
 
@@ -1992,26 +1969,37 @@ def admit_backlog_items(
             ),
         )
     )
+    return provisional_candidates, skipped
 
-    if needed <= 0:
-        return AdmissionDecision(
-            ready_count=ready_count,
-            ready_floor=floor,
-            ready_cap=cap,
-            needed=needed,
-            scanned_backlog=len(backlog_items),
-            skipped=tuple(skipped),
-            deep_evaluation_performed=False,
-            deep_evaluation_truncated=False,
-        )
 
-    memo = github_memo or CycleGitHubMemo()
+def _evaluate_admission_candidates(
+    provisional_candidates: list[_ProjectItemSnapshot],
+    *,
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    project_owner: str,
+    project_number: int,
+    needed: int,
+    dry_run: bool,
+    memo: CycleGitHubMemo,
+    skipped: list[AdmissionSkip],
+    gh_runner: Callable[..., str] | None,
+) -> tuple[
+    list[AdmissionCandidate],
+    list[str],
+    list[str],
+    bool,
+    str | None,
+    bool,
+]:
+    """Run the expensive admission checks needed to choose candidates."""
     eligible: list[AdmissionCandidate] = []
     resolved: list[str] = []
     blocked: list[str] = []
     partial_failure = False
     error: str | None = None
     deep_evaluation_truncated = False
+
     for item in provisional_candidates:
         if len(eligible) >= needed:
             deep_evaluation_truncated = True
@@ -2105,22 +2093,159 @@ def admit_backlog_items(
             )
         )
 
-    selected = eligible[:needed]
+    return (
+        eligible,
+        resolved,
+        blocked,
+        partial_failure,
+        error,
+        deep_evaluation_truncated,
+    )
+
+
+def _apply_admitted_backlog_candidates(
+    selected: list[AdmissionCandidate],
+    *,
+    executor: str,
+    assignment_owner: str,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[list[str], bool, str | None]:
+    """Apply backlog-to-ready mutations for the selected candidates."""
     admitted: list[str] = []
-    if not dry_run:
-        for candidate in selected:
-            try:
-                _admit_backlog_item(
-                    candidate,
-                    executor=target_executor,
-                    assignment_owner=automation_config.admission.assignment_owner,
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError as exc:
-                partial_failure = True
-                error = str(exc)
-                break
-            admitted.append(candidate.issue_ref)
+    partial_failure = False
+    error: str | None = None
+    if dry_run:
+        return admitted, partial_failure, error
+    for candidate in selected:
+        try:
+            _admit_backlog_item(
+                candidate,
+                executor=executor,
+                assignment_owner=assignment_owner,
+                gh_runner=gh_runner,
+            )
+        except GhQueryError as exc:
+            partial_failure = True
+            error = str(exc)
+            break
+        admitted.append(candidate.issue_ref)
+    return admitted, partial_failure, error
+
+
+def admit_backlog_items(
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
+    project_owner: str,
+    project_number: int,
+    *,
+    dispatchable_repo_prefixes: tuple[str, ...] | None = None,
+    active_lease_issue_refs: tuple[str, ...] = (),
+    dry_run: bool = False,
+    board_snapshot: CycleBoardSnapshot | None = None,
+    github_memo: CycleGitHubMemo | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> AdmissionDecision:
+    """Autonomously admit governed Backlog items into Ready."""
+    if automation_config is None:
+        return AdmissionDecision(
+            ready_count=0,
+            ready_floor=0,
+            ready_cap=0,
+            needed=0,
+            scanned_backlog=0,
+        )
+
+    target_executor = _protected_queue_executor_target(automation_config)
+    floor, cap = admission_watermarks(
+        automation_config.global_concurrency,
+        floor_multiplier=automation_config.admission.ready_floor_multiplier,
+        cap_multiplier=automation_config.admission.ready_cap_multiplier,
+    )
+    if (
+        not automation_config.admission.enabled
+        or target_executor is None
+    ):
+        return AdmissionDecision(
+            ready_count=0,
+            ready_floor=floor,
+            ready_cap=cap,
+            needed=0,
+            scanned_backlog=0,
+        )
+
+    items = _load_admission_source_items(
+        automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        board_snapshot=board_snapshot,
+        gh_runner=gh_runner,
+    )
+    ready_count, backlog_items = _partition_admission_source_items(
+        items,
+        config=config,
+        automation_config=automation_config,
+        target_executor=target_executor,
+    )
+
+    needed = min(
+        max(0, floor - ready_count),
+        max(0, cap - ready_count),
+        automation_config.admission.max_batch_size,
+    )
+
+    provisional_candidates, skipped = _build_provisional_admission_candidates(
+        backlog_items,
+        config=config,
+        automation_config=automation_config,
+        dispatchable_repo_prefixes=dispatchable_repo_prefixes
+        or automation_config.execution_authority_repos,
+        active_lease_issue_refs=active_lease_issue_refs,
+    )
+
+    if needed <= 0:
+        return AdmissionDecision(
+            ready_count=ready_count,
+            ready_floor=floor,
+            ready_cap=cap,
+            needed=needed,
+            scanned_backlog=len(backlog_items),
+            skipped=tuple(skipped),
+            deep_evaluation_performed=False,
+            deep_evaluation_truncated=False,
+        )
+
+    memo = github_memo or CycleGitHubMemo()
+    (
+        eligible,
+        resolved,
+        blocked,
+        partial_failure,
+        error,
+        deep_evaluation_truncated,
+    ) = _evaluate_admission_candidates(
+        provisional_candidates,
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        needed=needed,
+        dry_run=dry_run,
+        memo=memo,
+        skipped=skipped,
+        gh_runner=gh_runner,
+    )
+    selected = eligible[:needed]
+    admitted, mutation_partial_failure, mutation_error = _apply_admitted_backlog_candidates(
+        selected,
+        executor=target_executor,
+        assignment_owner=automation_config.admission.assignment_owner,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+    if mutation_partial_failure:
+        partial_failure = True
+        error = mutation_error
 
     return AdmissionDecision(
         ready_count=ready_count,
