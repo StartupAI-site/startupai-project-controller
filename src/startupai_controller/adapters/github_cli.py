@@ -24,6 +24,7 @@ from startupai_controller.domain.verdict_policy import (
     verdict_marker_text,
 )
 from startupai_controller.domain.repair_policy import MARKER_PREFIX
+from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     GhQueryError,
@@ -247,6 +248,66 @@ def _set_status_if_changed(
         board_mutator(info.project_id, info.item_id)
 
     return True, info.status
+
+
+def _query_issue_board_info(
+    issue_ref: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> BoardInfo:
+    """Query board identity/status through the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        gh_runner=gh_runner,
+    )
+    info = adapter._query_board_info(issue_ref)
+    return BoardInfo(
+        status=info.status,
+        item_id=info.item_id,
+        project_id=info.project_id,
+    )
+
+
+def _query_status_field_option(
+    project_id: str,
+    option_name: str = "Ready",
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[str, str]:
+    """Resolve Status field option IDs through the adapter-owned mechanism."""
+    return _query_single_select_field_option(
+        project_id,
+        "Status",
+        option_name,
+        gh_runner=gh_runner,
+    )
+
+
+def _set_board_status(
+    project_id: str,
+    item_id: str,
+    field_id: str,
+    option_id: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Mutate Status via the adapter-owned project single-select path."""
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        gh_runner=gh_runner,
+    )
+    adapter._set_project_single_select(
+        project_id=project_id,
+        item_id=item_id,
+        field_id=field_id,
+        option_id=option_id,
+    )
 
 
 def _extract_run_id(details_url: str) -> int | None:

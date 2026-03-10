@@ -30,9 +30,6 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 from startupai_controller.promote_ready import (
     BoardInfo,
-    _query_issue_board_info,
-    _query_status_field_option,
-    _set_board_status,
 )
 from startupai_controller.domain.models import (
     CheckObservation,
@@ -688,6 +685,68 @@ def _query_pr_head_sha(
 # ---------------------------------------------------------------------------
 # Project field operations
 # ---------------------------------------------------------------------------
+
+
+def _query_issue_board_info(
+    issue_ref: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> BoardInfo:
+    """Compatibility wrapper for adapter-owned board info resolution."""
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_board_info as _adapter_query_issue_board_info,
+    )
+
+    return _adapter_query_issue_board_info(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        gh_runner=gh_runner or _run_gh,
+    )
+
+
+def _query_status_field_option(
+    project_id: str,
+    option_name: str = "Ready",
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[str, str]:
+    """Compatibility wrapper for adapter-owned Status option resolution."""
+    from startupai_controller.adapters.github_cli import (
+        _query_status_field_option as _adapter_query_status_field_option,
+    )
+
+    return _adapter_query_status_field_option(
+        project_id,
+        option_name,
+        gh_runner=gh_runner or _run_gh,
+    )
+
+
+def _set_board_status(
+    project_id: str,
+    item_id: str,
+    field_id: str,
+    option_id: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility wrapper for adapter-owned Status mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_board_status as _adapter_set_board_status,
+    )
+
+    _adapter_set_board_status(
+        project_id,
+        item_id,
+        field_id,
+        option_id,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_project_item_field(

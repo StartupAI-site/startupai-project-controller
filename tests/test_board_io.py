@@ -18,8 +18,11 @@ from startupai_controller.board_io import (
     _marker_for,
     _comment_exists,
     _repo_to_prefix,
+    _query_issue_board_info,
     _query_project_item_field,
+    _query_status_field_option,
     _query_failed_check_runs,
+    _set_board_status,
     clear_cycle_board_snapshot_cache,
     clear_required_status_checks_cache,
     build_cycle_board_snapshot,
@@ -262,6 +265,93 @@ def test_query_project_item_field_wrapper_respects_board_io_runner(
     )
 
     assert value == "codex"
+
+
+def test_query_issue_board_info_wrapper_respects_board_io_runner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = _load(tmp_path)
+
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "projectItems": {
+                                "nodes": [
+                                    {
+                                        "id": "ITEM1",
+                                        "project": {
+                                            "id": "PROJ1",
+                                            "owner": {"login": "StartupAI-site"},
+                                            "number": 1,
+                                        },
+                                        "statusField": {"name": "Ready"},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    info = _query_issue_board_info(
+        "crew#84",
+        config,
+        "StartupAI-site",
+        1,
+    )
+
+    assert info.status == "Ready"
+    assert info.item_id == "ITEM1"
+    assert info.project_id == "PROJ1"
+
+
+def test_query_status_field_option_wrapper_respects_board_io_runner(
+    monkeypatch,
+) -> None:
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        return json.dumps(
+            {
+                "data": {
+                    "node": {
+                        "field": {
+                            "id": "FIELD1",
+                            "options": [
+                                {"id": "OPT1", "name": "Review"},
+                            ],
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    field_id, option_id = _query_status_field_option("PROJ1", "Review")
+
+    assert field_id == "FIELD1"
+    assert option_id == "OPT1"
+
+
+def test_set_board_status_wrapper_respects_board_io_runner(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        calls.append(list(args))
+        return json.dumps({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM1"}}}})
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    _set_board_status("PROJ1", "ITEM1", "FIELD1", "OPT1")
+
+    assert calls
+    assert "updateProjectV2ItemFieldValue" in " ".join(calls[0])
 
 
 def test_query_pull_request_view_payloads_batches_graphql_aliases() -> None:

@@ -6,10 +6,13 @@ from types import SimpleNamespace
 
 from startupai_controller.adapters.github_cli import (
     GitHubCliAdapter,
+    _query_issue_board_info,
     _query_latest_non_automation_comment_timestamp,
     _query_latest_wip_activity_timestamp,
     _query_issue_assignees,
     _query_project_item_field,
+    _query_status_field_option,
+    _set_board_status,
     _query_single_select_field_option,
     _set_issue_assignees,
     _set_single_select_field,
@@ -206,6 +209,29 @@ def test_query_project_item_field_uses_adapter_owned_query(monkeypatch) -> None:
     assert value == "crew#42:Executor"
 
 
+def test_query_issue_board_info_uses_adapter_owned_board_lookup(monkeypatch) -> None:
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_board_info",
+        lambda self, issue_ref: SimpleNamespace(
+            status="Review",
+            item_id="ITEM1",
+            project_id="PROJ1",
+        ),
+    )
+
+    info = _query_issue_board_info(
+        "crew#42",
+        _config(),
+        "StartupAI-site",
+        1,
+    )
+
+    assert info.status == "Review"
+    assert info.item_id == "ITEM1"
+    assert info.project_id == "PROJ1"
+
+
 def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
     select_calls: list[tuple[str, str, str, str]] = []
 
@@ -257,6 +283,21 @@ def test_query_single_select_field_option_uses_adapter_owned_query(monkeypatch) 
     assert option_id == "opt:Blocked"
 
 
+def test_query_status_field_option_uses_status_field_name(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._query_single_select_field_option",
+        lambda project_id, field_name, option_name, gh_runner=None: (
+            f"{project_id}:{field_name}",
+            f"opt:{option_name}",
+        ),
+    )
+
+    field_id, option_id = _query_status_field_option("PROJ", "Review")
+
+    assert field_id == "PROJ:Status"
+    assert option_id == "opt:Review"
+
+
 def test_set_text_field_uses_adapter_owned_mutation(monkeypatch) -> None:
     recorded: list[tuple[str, str, str, str]] = []
 
@@ -300,6 +341,22 @@ def test_set_single_select_field_uses_adapter_owned_mutation(monkeypatch) -> Non
     _set_single_select_field("PROJ", "ITEM", "Handoff To", "claude")
 
     assert recorded == [("PROJ", "ITEM", "PROJ:Handoff To", "opt:claude")]
+
+
+def test_set_board_status_uses_adapter_owned_status_mutation(monkeypatch) -> None:
+    recorded: list[tuple[str, str, str, str]] = []
+
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_set_project_single_select",
+        lambda self, project_id, item_id, field_id, option_id: recorded.append(
+            (project_id, item_id, field_id, option_id)
+        ),
+    )
+
+    _set_board_status("PROJ", "ITEM", "FIELD", "OPT")
+
+    assert recorded == [("PROJ", "ITEM", "FIELD", "OPT")]
 
 
 def test_set_status_if_changed_uses_adapter_owned_mutation(monkeypatch) -> None:

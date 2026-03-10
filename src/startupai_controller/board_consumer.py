@@ -1195,8 +1195,10 @@ def _set_issue_handoff_target(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    from startupai_controller.adapters.github_cli import _set_single_select_field
-    from startupai_controller.promote_ready import _query_issue_board_info
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_board_info,
+        _set_single_select_field,
+    )
 
     resolve_info = board_info_resolver or _query_issue_board_info
     info = resolve_info(issue_ref, config, project_owner, project_number)
@@ -4572,8 +4574,10 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    from startupai_controller.adapters.github_cli import _set_single_select_field
-    from startupai_controller.promote_ready import _query_issue_board_info
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_board_info,
+        _set_single_select_field,
+    )
 
     marker = _marker_for("consumer-escalation", issue_ref)
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
