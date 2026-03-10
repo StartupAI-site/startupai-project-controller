@@ -341,6 +341,16 @@ class SessionExecutionOutcome:
 
 
 @dataclass(frozen=True)
+class PrCreationOutcome:
+    """PR creation/salvage result for a claimed session."""
+
+    pr_url: str | None
+    has_commits: bool
+    session_status: str
+    failure_reason: str | None
+
+
+@dataclass(frozen=True)
 class PreparedReviewQueueBatch:
     """Prepared review-queue workset for one drain cycle."""
 
@@ -5146,6 +5156,285 @@ def _claim_launch_context(
     ), None
 
 
+def _session_status_from_codex_result(
+    exit_code: int,
+    codex_result: dict[str, Any] | None,
+) -> tuple[str, str | None]:
+    """Map Codex exit/result into session status and failure reason."""
+    if exit_code == 0 and codex_result and codex_result.get("outcome") == "success":
+        return "success", None
+    if exit_code == 124:
+        return "timeout", "timeout"
+    if codex_result and codex_result.get("outcome") in {"failed", "blocked"}:
+        return "failed", "validation_failed"
+    return "failed", "codex_error"
+
+
+def _create_pr_for_execution_result(
+    *,
+    config: ConsumerConfig,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    codex_result: dict[str, Any] | None,
+    session_status: str,
+    failure_reason: str | None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    gh_runner: Callable[..., str] | None,
+) -> PrCreationOutcome:
+    """Reuse or create a PR from claimed-session output."""
+    pr_url = codex_result.get("pr_url") if codex_result else None
+    has_commits = False
+    updated_session_status = session_status
+    updated_failure_reason = failure_reason
+
+    try:
+        has_commits = _has_commits_on_branch(
+            launch_context.worktree_path,
+            launch_context.branch_name,
+            subprocess_runner=subprocess_runner,
+        )
+        if has_commits:
+            pr_url = _create_or_update_pr(
+                launch_context.worktree_path,
+                launch_context.branch_name,
+                launch_context.number,
+                launch_context.owner,
+                launch_context.repo,
+                launch_context.title,
+                config,
+                issue_ref=launch_context.issue_ref,
+                session_id=claimed_context.session_id,
+                gh_runner=gh_runner,
+            )
+    except (GhQueryError, Exception) as err:
+        logger.error("PR creation failed: %s", err)
+        if updated_session_status == "success":
+            updated_session_status = "failed"
+        updated_failure_reason = "pr_error"
+
+    return PrCreationOutcome(
+        pr_url=pr_url,
+        has_commits=has_commits,
+        session_status=updated_session_status,
+        failure_reason=updated_failure_reason,
+    )
+
+
+def _handoff_execution_to_review(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    session_id: str,
+    pr_url: str,
+    session_status: str,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewQueueDrainSummary:
+    """Transition a claimed session into Review and perform immediate rescue."""
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    candidate = launch_context.issue_ref
+
+    try:
+        _transition_issue_to_review(
+            candidate,
+            cp_config,
+            config.project_owner,
+            config.project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        _record_successful_github_mutation(db)
+    except (GhQueryError, Exception) as err:
+        logger.error("Review transition failed: %s", err)
+        _mark_degraded(db, f"review-transition:{err}")
+        _queue_status_transition(
+            db,
+            candidate,
+            to_status="Review",
+            from_statuses={"In Progress"},
+        )
+        db.update_session(session_id, phase="review")
+    _record_metric(db, config, "session_transition_review", issue_ref=candidate)
+
+    immediate_review_summary = ReviewQueueDrainSummary()
+    if session_status != "success":
+        return immediate_review_summary
+
+    handoff_store = SqliteSessionStore(db)
+    try:
+        _post_pr_codex_verdict(
+            pr_url,
+            session_id,
+            gh_runner=gh_runner,
+        )
+        _record_successful_github_mutation(db)
+    except (GhQueryError, Exception) as err:
+        logger.error("PR codex verdict comment failed: %s", err)
+        _mark_degraded(db, f"verdict-marker:{err}")
+        _queue_verdict_marker(db, pr_url, session_id)
+    queue_entry = _queue_review_item(
+        handoff_store,
+        candidate,
+        pr_url,
+        session_id=session_id,
+    )
+    if queue_entry is None or auto_config is None:
+        return immediate_review_summary
+
+    try:
+        review_memo = CycleGitHubMemo()
+        handoff_pr_port = GitHubCliAdapter(
+            project_owner=config.project_owner,
+            project_number=config.project_number,
+            config=cp_config,
+            github_memo=review_memo,
+            gh_runner=gh_runner,
+        )
+        queue_entries = [
+            entry
+            for entry in handoff_store.list_review_queue_items()
+            if entry.pr_repo == queue_entry.pr_repo
+            and entry.pr_number == queue_entry.pr_number
+        ]
+        review_snapshots = _build_review_snapshots_for_queue_entries(
+            queue_entries=queue_entries,
+            review_refs={entry.issue_ref for entry in queue_entries},
+            pr_port=handoff_pr_port,
+            trusted_codex_actors=frozenset(auto_config.trusted_codex_actors),
+        )
+        snapshot = review_snapshots.get((queue_entry.pr_repo, queue_entry.pr_number))
+        result = review_rescue(
+            pr_repo=queue_entry.pr_repo,
+            pr_number=queue_entry.pr_number,
+            config=cp_config,
+            automation_config=auto_config,
+            project_owner=config.project_owner,
+            project_number=config.project_number,
+            dry_run=False,
+            snapshot=snapshot,
+            gh_runner=gh_runner,
+        )
+        state_digest = handoff_pr_port.review_state_digests(
+            [(queue_entry.pr_repo, queue_entry.pr_number)]
+        ).get((queue_entry.pr_repo, queue_entry.pr_number))
+        for entry in queue_entries or [queue_entry]:
+            _apply_review_queue_result(
+                handoff_store,
+                entry,
+                result,
+                last_state_digest=state_digest,
+            )
+        return ReviewQueueDrainSummary(
+            queued_count=len(queue_entries) or 1,
+            due_count=len(queue_entries) or 1,
+            rerun=(
+                (
+                    f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{','.join(result.rerun_checks)}",
+                )
+                if result.rerun_checks
+                else ()
+            ),
+            auto_merge_enabled=(
+                (f"{queue_entry.pr_repo}#{queue_entry.pr_number}",)
+                if result.auto_merge_enabled
+                else ()
+            ),
+            requeued=result.requeued_refs,
+            blocked=(
+                (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.blocked_reason}",)
+                if result.blocked_reason
+                else ()
+            ),
+            skipped=(
+                (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.skipped_reason}",)
+                if result.skipped_reason
+                else ()
+            ),
+        )
+    except GhQueryError as err:
+        logger.warning("Immediate review clearance failed for %s: %s", candidate, err)
+        _mark_degraded(db, f"review-queue:{gh_reason_code(err)}:{err}")
+        return immediate_review_summary
+
+
+def _handle_non_review_execution_outcome(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    session_id: str,
+    session_status: str,
+    codex_result: dict[str, Any] | None,
+    has_commits: bool,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_poster: Callable[..., None] | None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[str, ResolutionEvaluation | None, str | None]:
+    """Handle non-review outcomes for a claimed session."""
+    cp_config = prepared.cp_config
+    candidate = launch_context.issue_ref
+    resolution_evaluation: ResolutionEvaluation | None = None
+    done_reason: str | None = None
+    updated_session_status = session_status
+
+    if session_status == "success" and not has_commits:
+        resolution_evaluation = _verify_resolution_payload(
+            candidate,
+            codex_result.get("resolution") if codex_result else None,
+            config=launch_context.effective_consumer_config,
+            workflows=prepared.main_workflows,
+            subprocess_runner=subprocess_runner,
+            gh_runner=gh_runner,
+        )
+        done_reason = _apply_resolution_action(
+            candidate,
+            resolution_evaluation,
+            session_id=session_id,
+            db=db,
+            config=config,
+            critical_path_config=cp_config,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+        if done_reason == "already_resolved":
+            _record_metric(db, config, "session_transition_done", issue_ref=candidate)
+        return updated_session_status, resolution_evaluation, done_reason
+
+    try:
+        _return_issue_to_ready(
+            candidate,
+            cp_config,
+            config.project_owner,
+            config.project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        _record_successful_github_mutation(db)
+    except (GhQueryError, Exception) as err:
+        logger.error("Ready reset failed after non-PR session: %s", err)
+        _mark_degraded(db, f"ready-reset:{err}")
+        _queue_status_transition(
+            db,
+            candidate,
+            to_status="Ready",
+            from_statuses={"In Progress", "Review"},
+        )
+    if session_status == "failed" and not has_commits and codex_result is None:
+        updated_session_status = "aborted"
+    return updated_session_status, resolution_evaluation, done_reason
+
+
 def _execute_claimed_session(
     *,
     config: ConsumerConfig,
@@ -5162,16 +5451,13 @@ def _execute_claimed_session(
     gh_runner: Callable[..., str] | None,
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
-    cp_config = prepared.cp_config
-    auto_config = prepared.auto_config
     candidate = launch_context.issue_ref
-    candidate_prefix = launch_context.repo_prefix
     session_id = claimed_context.session_id
 
     prompt = _assemble_codex_prompt(
         launch_context.issue_context,
         candidate,
-        cp_config,
+        prepared.cp_config,
         launch_context.effective_consumer_config,
         launch_context.worktree_path,
         launch_context.branch_name,
@@ -5197,234 +5483,69 @@ def _execute_claimed_session(
 
     codex_result = _parse_codex_result(output_path, file_reader=file_reader)
 
-    pr_url = None
-    has_commits = False
-    session_status = "failed"
-    failure_reason: str | None = None
-    resolution_evaluation: ResolutionEvaluation | None = None
-    done_reason: str | None = None
+    session_status, failure_reason = _session_status_from_codex_result(
+        exit_code,
+        codex_result,
+    )
+    pr_outcome = _create_pr_for_execution_result(
+        config=config,
+        launch_context=launch_context,
+        claimed_context=claimed_context,
+        codex_result=codex_result,
+        session_status=session_status,
+        failure_reason=failure_reason,
+        subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+    )
 
-    if exit_code == 0 and codex_result and codex_result.get("outcome") == "success":
-        session_status = "success"
-        failure_reason = None
-    elif exit_code == 124:
-        session_status = "timeout"
-        failure_reason = "timeout"
-    else:
-        session_status = "failed"
-        if codex_result and codex_result.get("outcome") in {"failed", "blocked"}:
-            failure_reason = "validation_failed"
-        else:
-            failure_reason = "codex_error"
-
-    try:
-        if codex_result and codex_result.get("pr_url"):
-            pr_url = codex_result["pr_url"]
-        has_commits = _has_commits_on_branch(
-            launch_context.worktree_path,
-            launch_context.branch_name,
-            subprocess_runner=subprocess_runner,
-        )
-        if has_commits:
-            pr_url = _create_or_update_pr(
-                launch_context.worktree_path,
-                launch_context.branch_name,
-                launch_context.number,
-                launch_context.owner,
-                launch_context.repo,
-                launch_context.title,
-                config,
-                issue_ref=candidate,
-                session_id=session_id,
-                gh_runner=gh_runner,
-            )
-    except (GhQueryError, Exception) as err:
-        logger.error("PR creation failed: %s", err)
-        if session_status == "success":
-            session_status = "failed"
-        failure_reason = "pr_error"
-
-    should_transition_to_review = bool(pr_url) and (
-        launch_context.session_kind != "repair" or session_status == "success"
+    should_transition_to_review = bool(pr_outcome.pr_url) and (
+        launch_context.session_kind != "repair"
+        or pr_outcome.session_status == "success"
     )
 
     immediate_review_summary = ReviewQueueDrainSummary()
+    resolution_evaluation: ResolutionEvaluation | None = None
+    done_reason: str | None = None
+    effective_session_status = pr_outcome.session_status
     if should_transition_to_review:
-        try:
-            _transition_issue_to_review(
-                candidate,
-                cp_config,
-                config.project_owner,
-                config.project_number,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_successful_github_mutation(db)
-        except (GhQueryError, Exception) as err:
-            logger.error("Review transition failed: %s", err)
-            _mark_degraded(db, f"review-transition:{err}")
-            _queue_status_transition(
-                db,
-                candidate,
-                to_status="Review",
-                from_statuses={"In Progress"},
-            )
-            db.update_session(session_id, phase="review")
-        _record_metric(db, config, "session_transition_review", issue_ref=candidate)
-
-        if session_status == "success":
-            handoff_store = SqliteSessionStore(db)
-            try:
-                _post_pr_codex_verdict(
-                    pr_url,
-                    session_id,
-                    gh_runner=gh_runner,
-                )
-                _record_successful_github_mutation(db)
-            except (GhQueryError, Exception) as err:
-                logger.error("PR codex verdict comment failed: %s", err)
-                _mark_degraded(db, f"verdict-marker:{err}")
-                _queue_verdict_marker(db, pr_url, session_id)
-            queue_entry = _queue_review_item(
-                handoff_store,
-                candidate,
-                pr_url,
-                session_id=session_id,
-            )
-            if queue_entry is not None and auto_config is not None:
-                try:
-                    review_memo = CycleGitHubMemo()
-                    handoff_pr_port = GitHubCliAdapter(
-                        project_owner=config.project_owner,
-                        project_number=config.project_number,
-                        config=cp_config,
-                        github_memo=review_memo,
-                        gh_runner=gh_runner,
-                    )
-                    queue_entries = [
-                        entry
-                        for entry in handoff_store.list_review_queue_items()
-                        if entry.pr_repo == queue_entry.pr_repo
-                        and entry.pr_number == queue_entry.pr_number
-                    ]
-                    review_snapshots = _build_review_snapshots_for_queue_entries(
-                        queue_entries=queue_entries,
-                        review_refs={entry.issue_ref for entry in queue_entries},
-                        pr_port=handoff_pr_port,
-                        trusted_codex_actors=frozenset(
-                            auto_config.trusted_codex_actors
-                        ),
-                    )
-                    snapshot = review_snapshots.get(
-                        (queue_entry.pr_repo, queue_entry.pr_number)
-                    )
-                    result = review_rescue(
-                        pr_repo=queue_entry.pr_repo,
-                        pr_number=queue_entry.pr_number,
-                        config=cp_config,
-                        automation_config=auto_config,
-                        project_owner=config.project_owner,
-                        project_number=config.project_number,
-                        dry_run=False,
-                        snapshot=snapshot,
-                        gh_runner=gh_runner,
-                    )
-                    state_digest = handoff_pr_port.review_state_digests(
-                        [(queue_entry.pr_repo, queue_entry.pr_number)]
-                    ).get((queue_entry.pr_repo, queue_entry.pr_number))
-                    for entry in queue_entries or [queue_entry]:
-                        _apply_review_queue_result(
-                            handoff_store,
-                            entry,
-                            result,
-                            last_state_digest=state_digest,
-                        )
-                    immediate_review_summary = ReviewQueueDrainSummary(
-                        queued_count=len(queue_entries) or 1,
-                        due_count=len(queue_entries) or 1,
-                        rerun=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{','.join(result.rerun_checks)}",)
-                            if result.rerun_checks
-                            else ()
-                        ),
-                        auto_merge_enabled=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}",)
-                            if result.auto_merge_enabled
-                            else ()
-                        ),
-                        requeued=result.requeued_refs,
-                        blocked=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.blocked_reason}",)
-                            if result.blocked_reason
-                            else ()
-                        ),
-                        skipped=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.skipped_reason}",)
-                            if result.skipped_reason
-                            else ()
-                        ),
-                    )
-                except GhQueryError as err:
-                    logger.warning(
-                        "Immediate review clearance failed for %s: %s", candidate, err
-                    )
-                    _mark_degraded(db, f"review-queue:{gh_reason_code(err)}:{err}")
+        immediate_review_summary = _handoff_execution_to_review(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id=session_id,
+            pr_url=pr_outcome.pr_url or "",
+            session_status=pr_outcome.session_status,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
     else:
-        if session_status == "success" and not has_commits:
-            resolution_evaluation = _verify_resolution_payload(
-                candidate,
-                codex_result.get("resolution") if codex_result else None,
-                config=launch_context.effective_consumer_config,
-                workflows=prepared.main_workflows,
-                subprocess_runner=subprocess_runner,
-                gh_runner=gh_runner,
-            )
-            done_reason = _apply_resolution_action(
-                candidate,
-                resolution_evaluation,
-                session_id=session_id,
-                db=db,
-                config=config,
-                critical_path_config=cp_config,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-            if done_reason == "already_resolved":
-                _record_metric(
-                    db, config, "session_transition_done", issue_ref=candidate
-                )
-        else:
-            try:
-                _return_issue_to_ready(
-                    candidate,
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-                _record_successful_github_mutation(db)
-            except (GhQueryError, Exception) as err:
-                logger.error("Ready reset failed after non-PR session: %s", err)
-                _mark_degraded(db, f"ready-reset:{err}")
-                _queue_status_transition(
-                    db,
-                    candidate,
-                    to_status="Ready",
-                    from_statuses={"In Progress", "Review"},
-                )
-            if session_status == "failed" and not has_commits and codex_result is None:
-                session_status = "aborted"
+        (
+            effective_session_status,
+            resolution_evaluation,
+            done_reason,
+        ) = _handle_non_review_execution_outcome(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id=session_id,
+            session_status=pr_outcome.session_status,
+            codex_result=codex_result,
+            has_commits=pr_outcome.has_commits,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_poster=comment_poster,
+            subprocess_runner=subprocess_runner,
+            gh_runner=gh_runner,
+        )
 
     return SessionExecutionOutcome(
-        session_status=session_status,
-        failure_reason=failure_reason,
-        pr_url=pr_url,
-        has_commits=has_commits,
+        session_status=effective_session_status,
+        failure_reason=pr_outcome.failure_reason,
+        pr_url=pr_outcome.pr_url,
+        has_commits=pr_outcome.has_commits,
         codex_result=codex_result,
         should_transition_to_review=should_transition_to_review,
         immediate_review_summary=immediate_review_summary,
