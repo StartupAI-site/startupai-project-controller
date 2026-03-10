@@ -976,11 +976,14 @@ def auto_promote_successors(
     *,
     automation_config: BoardAutomationConfig | None = None,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
 ) -> PromotionResult:
     """Promote eligible successors of a Done issue."""
     result = PromotionResult()
@@ -1043,7 +1046,20 @@ def auto_promote_successors(
                     f"Run from the appropriate repo:\n"
                     f"```\nmake promote-ready ISSUE={successor_ref}\n```"
                 )
-                post_comment(succ_owner, succ_repo, succ_number, body)
+                if comment_poster is not None:
+                    post_comment(succ_owner, succ_repo, succ_number, body)
+                else:
+                    board_port = board_port or _default_board_mutation_port(
+                        project_owner,
+                        project_number,
+                        config,
+                        gh_runner=gh_runner,
+                    )
+                    board_port.post_issue_comment(
+                        f"{succ_owner}/{succ_repo}",
+                        succ_number,
+                        body,
+                    )
 
             result.cross_repo_pending.append(successor_ref)
             result.handoff_jobs.append(job_id)
@@ -1066,6 +1082,8 @@ def propagate_blocker(
     sweep_blocked: bool = False,
     all_prefixes: bool = False,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
@@ -1076,29 +1094,56 @@ def propagate_blocker(
     post_comment = comment_poster or _post_comment
     commented: list[str] = []
 
+    use_ports = (board_info_resolver is None) or review_state_port is not None or board_port is not None
+    if use_ports:
+        review_state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        if comment_poster is None:
+            board_port = board_port or _default_board_mutation_port(
+                project_owner,
+                project_number,
+                config,
+                gh_runner=gh_runner,
+            )
+
     if sweep_blocked:
         # Sweep mode: scan all Blocked items
-        blocked_items = _list_project_items_by_status(
-            "Blocked", project_owner, project_number, gh_runner=gh_runner
-        )
+        if use_ports:
+            blocked_items = review_state_port.list_issues_by_status("Blocked")
+        else:
+            blocked_items = _list_project_items_by_status(
+                "Blocked", project_owner, project_number, gh_runner=gh_runner
+            )
         for snapshot in blocked_items:
-            ref = _snapshot_to_issue_ref(snapshot, config)
-            if ref is None:
-                continue
+            if use_ports:
+                ref = snapshot.issue_ref
+            else:
+                ref = _snapshot_to_issue_ref(snapshot, config)
+                if ref is None:
+                    continue
 
             if not all_prefixes and this_repo_prefix:
                 parsed = parse_issue_ref(ref)
                 if parsed.prefix != this_repo_prefix:
                     continue
 
-            blocked_reason = _query_project_item_field(
-                ref,
-                "Blocked Reason",
-                config,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
+            if use_ports:
+                blocked_reason = review_state_port.get_issue_fields(
+                    ref
+                ).blocked_reason
+            else:
+                blocked_reason = _query_project_item_field(
+                    ref,
+                    "Blocked Reason",
+                    config,
+                    project_owner,
+                    project_number,
+                    gh_runner=gh_runner,
+                )
             if not blocked_reason:
                 continue
 
@@ -1108,6 +1153,10 @@ def propagate_blocker(
                 config,
                 check_comment=check_comment,
                 post_comment=post_comment,
+                board_port=board_port,
+                project_owner=project_owner,
+                project_number=project_number,
+                gh_runner=gh_runner,
                 dry_run=dry_run,
             )
             commented.extend(new_comments)
@@ -1116,14 +1165,19 @@ def propagate_blocker(
         if issue_ref is None:
             return commented
 
-        blocked_reason = _query_project_item_field(
-            issue_ref,
-            "Blocked Reason",
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        )
+        if use_ports:
+            blocked_reason = review_state_port.get_issue_fields(
+                issue_ref
+            ).blocked_reason
+        else:
+            blocked_reason = _query_project_item_field(
+                issue_ref,
+                "Blocked Reason",
+                config,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            )
         if not blocked_reason:
             return commented
 
@@ -1133,6 +1187,10 @@ def propagate_blocker(
             config,
             check_comment=check_comment,
             post_comment=post_comment,
+            board_port=board_port,
+            project_owner=project_owner,
+            project_number=project_number,
+            gh_runner=gh_runner,
             dry_run=dry_run,
         )
 
@@ -1146,6 +1204,10 @@ def _propagate_single_blocker(
     *,
     check_comment: Callable[..., bool],
     post_comment: Callable[..., None],
+    board_port: _BoardMutationPort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    gh_runner: Callable[..., str] | None = None,
     dry_run: bool = False,
 ) -> list[str]:
     """Post advisory comments on successors of a single blocked issue."""
@@ -1169,7 +1231,14 @@ def _propagate_single_blocker(
                 f"This may affect `{successor_ref}`."
             )
             try:
-                post_comment(succ_owner, succ_repo, succ_number, body)
+                if board_port is not None:
+                    board_port.post_issue_comment(
+                        f"{succ_owner}/{succ_repo}",
+                        succ_number,
+                        body,
+                    )
+                else:
+                    post_comment(succ_owner, succ_repo, succ_number, body)
             except Exception:
                 # Cross-repo comment failure is non-fatal — log and continue
                 import sys
@@ -1199,6 +1268,8 @@ def reconcile_handoffs(
     ack_timeout_minutes: int = 30,
     max_retries: int = 1,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, int]:
     """Reconcile handoff jobs. Returns {completed, retried, escalated, pending}."""
@@ -1210,6 +1281,20 @@ def reconcile_handoffs(
         "escalated": 0,
         "pending": 0,
     }
+    use_ports = review_state_port is not None or board_port is not None
+    if use_ports:
+        review_state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
 
     # Scan all issue prefixes for handoff markers
     for prefix, repo_slug in config.issue_prefixes.items():
@@ -1250,14 +1335,17 @@ def reconcile_handoffs(
             issue_ref = f"{prefix}#{issue_number}"
 
             # Check if this issue has been acknowledged (moved past Backlog)
-            current_status = _query_project_item_field(
-                issue_ref,
-                "Status",
-                config,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
+            if use_ports:
+                current_status = review_state_port.get_issue_status(issue_ref)
+            else:
+                current_status = _query_project_item_field(
+                    issue_ref,
+                    "Status",
+                    config,
+                    project_owner,
+                    project_number,
+                    gh_runner=gh_runner,
+                )
 
             ack_statuses = {"Ready", "In Progress", "Review", "Done"}
             if current_status in ack_statuses:
@@ -1302,9 +1390,16 @@ def reconcile_handoffs(
                         f"handoff. Retry #{retry_count + 1} of {max_retries}.\n\n"
                         f"Run:\n```\nmake promote-ready ISSUE={issue_ref}\n```"
                     )
-                    _post_comment(
-                        owner, repo, issue_number, body, gh_runner=gh_runner
-                    )
+                    if use_ports:
+                        board_port.post_issue_comment(
+                            f"{owner}/{repo}",
+                            issue_number,
+                            body,
+                        )
+                    else:
+                        _post_comment(
+                            owner, repo, issue_number, body, gh_runner=gh_runner
+                        )
                 counters["retried"] += 1
             else:
                 if not dry_run:
@@ -1315,6 +1410,8 @@ def reconcile_handoffs(
                             config,
                             project_owner,
                             project_number,
+                            review_state_port=review_state_port,
+                            board_port=board_port,
                             gh_runner=gh_runner,
                         )
                     except GhQueryError:

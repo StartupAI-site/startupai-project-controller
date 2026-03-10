@@ -439,6 +439,30 @@ def test_bridge_comment_for_cross_repo(tmp_path: Path) -> None:
     poster.assert_called_once()
 
 
+def test_auto_promote_cross_repo_uses_board_port(tmp_path: Path) -> None:
+    """Cross-repo successor comment can route through BoardMutationPort."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+
+    result = auto_promote_successors(
+        "crew#88",
+        config,
+        "crew",
+        "StartupAI-site",
+        1,
+        status_resolver=lambda *_: "Done",
+        board_info_resolver=lambda *_: _make_info("Backlog"),
+        board_mutator=MagicMock(),
+        comment_checker=lambda *_, **__: False,
+        board_port=_fake_board_port(board_calls),
+    )
+
+    assert "app#153" in result.cross_repo_pending
+    assert board_calls
+    assert board_calls[0][0] == "StartupAI-site/app.startupai-site#153"
+    assert "Auto-promote candidate" in board_calls[0][1]
+
+
 def test_bridge_comment_deduped(tmp_path: Path) -> None:
     """Marker exists -> no duplicate comment."""
     config = _load(tmp_path)
@@ -542,6 +566,35 @@ def test_posts_advisory_on_successors(tmp_path: Path) -> None:
     )
     assert len(result) > 0
     poster.assert_called()
+
+
+def test_propagate_blocker_uses_ports_for_reason_and_comment(
+    tmp_path: Path,
+) -> None:
+    """Single-issue blocker propagation can route through ReviewStatePort + BoardMutationPort."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        fields_by_issue={
+            "crew#87": SimpleNamespace(blocked_reason="some reason"),
+        }
+    )
+
+    result = propagate_blocker(
+        "crew#87",
+        config,
+        "crew",
+        "StartupAI-site",
+        1,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+        comment_checker=lambda *_, **__: False,
+    )
+
+    assert result
+    assert board_calls
+    assert board_calls[0][0].startswith("StartupAI-site/startupai-crew#")
+    assert "Upstream blocker" in board_calls[0][1]
 
 
 def test_blocker_comment_deduped(tmp_path: Path) -> None:
@@ -734,6 +787,50 @@ def test_reconcile_retries_once(tmp_path: Path) -> None:
     assert counts["retried"] == 1
     assert not counts["escalated"]
     assert posted
+
+
+def test_reconcile_handoffs_uses_ports_for_retry_comment(tmp_path: Path) -> None:
+    """Retry comments can route through ReviewStatePort + BoardMutationPort."""
+    config = _load(tmp_path)
+    now = datetime.now(timezone.utc)
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(status_by_issue={"crew#84": "Backlog"})
+
+    def fake_gh(args):
+        if args[:2] == ["api", "search/issues"]:
+            query = next((arg for arg in args if arg.startswith("q=")), "")
+            return (
+                _search_response(84)
+                if "repo:StartupAI-site/startupai-crew" in query
+                else _empty_search_response()
+            )
+        if args[:2] == ["api", "repos/StartupAI-site/startupai-crew/issues/84/comments"]:
+            return _slurped_comments_response(
+                [
+                    {
+                        "body": f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
+                        "created_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
+                        "updated_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
+                        "user": {"login": "chris00walker"},
+                    }
+                ]
+            )
+        raise AssertionError(f"Unexpected gh call: {args}")
+
+    counts = reconcile_handoffs(
+        config,
+        "StartupAI-site",
+        1,
+        ack_timeout_minutes=30,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+        gh_runner=fake_gh,
+    )
+
+    assert counts["retried"] == 1
+    assert board_calls
+    assert board_calls[0][0] == "StartupAI-site/startupai-crew#84"
+    assert "Handoff retry" in board_calls[0][1]
 
 
 def test_reconcile_escalates_after_retry(tmp_path: Path) -> None:
