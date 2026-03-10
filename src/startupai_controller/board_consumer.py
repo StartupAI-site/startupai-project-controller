@@ -316,6 +316,30 @@ class PreparedLaunchContext:
     branch_reconcile_error: str | None = None
 
 
+@dataclass(frozen=True)
+class ClaimedSessionContext:
+    """Claimed and started local session ready for Codex execution."""
+
+    session_id: str
+    effective_max_retries: int
+    slot_id: int
+
+
+@dataclass(frozen=True)
+class SessionExecutionOutcome:
+    """Outcome of executing a claimed local session."""
+
+    session_status: str
+    failure_reason: str | None
+    pr_url: str | None
+    has_commits: bool
+    codex_result: dict[str, Any] | None
+    should_transition_to_review: bool
+    immediate_review_summary: ReviewQueueDrainSummary
+    resolution_evaluation: ResolutionEvaluation | None = None
+    done_reason: str | None = None
+
+
 # RepairBranchReconcileOutcome: re-exported from domain.models
 # ResolutionEvaluation: re-exported from domain.models
 
@@ -4476,263 +4500,217 @@ def _prepare_launch_candidate(
     )
 
 
-# ---------------------------------------------------------------------------
-# Core: run_one_cycle
-# ---------------------------------------------------------------------------
-
-
-def run_one_cycle(
+def _resolve_launch_context_for_cycle(
+    *,
     config: ConsumerConfig,
     db: ConsumerDB,
-    *,
-    dry_run: bool = False,
-    target_issue: str | None = None,
-    prepared: PreparedCycleContext | None = None,
-    launch_context: PreparedLaunchContext | None = None,
-    slot_id_override: int | None = None,
-    skip_control_plane: bool = False,
-    # DI points
-    gh_runner: Callable[..., str] | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    file_reader: Callable[[Path], str] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-) -> CycleResult:
-    """Execute one poll-claim-execute cycle.
-
-    Returns a CycleResult describing what happened.
-    """
-    try:
-        if skip_control_plane:
-            if prepared is None:
-                raise ValueError("prepared cycle context is required when skip_control_plane=True")
-        else:
-            prepared = _prepare_cycle(
-                config,
-                db,
-                dry_run=dry_run,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-    except ConfigError as err:
-        logger.error("Config error: %s", err)
-        return CycleResult(action="error", reason=f"config-error:{err}")
-    except WorkflowConfigError as err:
-        logger.error("Workflow config error: %s", err)
-        return CycleResult(action="error", reason=f"workflow-config:{err}")
-    except GhQueryError as err:
-        logger.error("Control-plane preflight failed: %s", err)
-        _mark_degraded(db, f"control-plane:{gh_reason_code(err)}:{err}")
-        return CycleResult(action="error", reason=f"control-plane:{err}")
-
-    assert prepared is not None
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext | None,
+    target_issue: str | None,
+    dry_run: bool,
+    status_resolver: Callable[..., str] | None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
+    """Resolve or prepare launch-ready work for this cycle."""
     cp_config = prepared.cp_config
-    auto_config = prepared.auto_config
     main_workflows = prepared.main_workflows
     workflow_statuses = prepared.workflow_statuses
-    config.poll_interval_seconds = prepared.effective_interval
 
-    suppression_state = _claim_suppression_state(db)
-    if suppression_state is not None and launch_context is None:
-        return CycleResult(
-            action="idle",
-            reason=f"claim-suppressed:{suppression_state['scope']}",
+    if launch_context is not None:
+        return launch_context, None
+
+    try:
+        candidate = _select_candidate_for_cycle(
+            config,
+            db,
+            prepared,
+            target_issue=target_issue,
+            status_resolver=status_resolver,
+            gh_runner=gh_runner,
+        )
+    except GhQueryError as err:
+        logger.error("Ready-item selection failed: %s", err)
+        if not _maybe_activate_claim_suppression(
+            db,
+            config,
+            scope="preflight",
+            error=err,
+        ):
+            _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
+        return None, CycleResult(action="error", reason=f"selection-error:{err}")
+    except Exception as err:
+        logger.exception("Unexpected selection failure")
+        return None, CycleResult(
+            action="error", reason=f"selection-unexpected-error:{err}"
         )
 
-    if slot_id_override is None:
-        if db.active_lease_count() >= prepared.global_limit:
-            return CycleResult(action="idle", reason="lease-cap")
-        slot_id = _next_available_slot(db, prepared.global_limit)
-        if slot_id is None:
-            return CycleResult(action="idle", reason="lease-cap")
-    else:
-        slot_id = slot_id_override
+    if not candidate:
+        idle_reason = (
+            "no-dispatchable-repos"
+            if not prepared.dispatchable_repo_prefixes
+            else "no-ready-for-executor"
+        )
+        return None, CycleResult(action="idle", reason=idle_reason)
 
-    candidate = launch_context.issue_ref if launch_context is not None else None
-    if launch_context is None:
-        try:
-            candidate = _select_candidate_for_cycle(
-                config,
-                db,
-                prepared,
-                target_issue=target_issue,
-                status_resolver=status_resolver,
-                gh_runner=gh_runner,
-            )
-        except GhQueryError as err:
-            logger.error("Ready-item selection failed: %s", err)
-            if not _maybe_activate_claim_suppression(
-                db,
-                config,
-                scope="preflight",
-                error=err,
-            ):
-                _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
-            return CycleResult(action="error", reason=f"selection-error:{err}")
-        except Exception as err:
-            logger.exception("Unexpected selection failure")
-            return CycleResult(
-                action="error", reason=f"selection-unexpected-error:{err}"
-            )
-
-        if not candidate:
-            idle_reason = (
-                "no-dispatchable-repos"
-                if not prepared.dispatchable_repo_prefixes
-                else "no-ready-for-executor"
-            )
-            return CycleResult(action="idle", reason=idle_reason)
-
-        candidate_prefix = parse_issue_ref(candidate).prefix
-        main_workflow = main_workflows.get(candidate_prefix)
-        if main_workflow is None:
-            status = workflow_statuses.get(candidate_prefix)
-            reason = status.disabled_reason if status is not None else "workflow-missing"
-            return CycleResult(
-                action="idle",
-                issue_ref=candidate,
-                reason=f"repo-dispatch-disabled:{reason}",
-            )
-        base_seconds, max_seconds = _effective_retry_backoff(config, main_workflow)
-        if _retry_backoff_active(
-            db,
-            candidate,
-            base_seconds=base_seconds,
-            max_seconds=max_seconds,
-        ):
-            return CycleResult(
-                action="idle",
-                issue_ref=candidate,
-                reason=f"retry-backoff:{base_seconds}:{max_seconds}",
-            )
-
-        if dry_run:
-            logger.info("[dry-run] Would prepare, claim, and execute: %s", candidate)
-            return CycleResult(
-                action="claimed",
-                issue_ref=candidate,
-                reason="dry-run",
-            )
-
-        _record_metric(db, config, "candidate_selected", issue_ref=candidate)
-        try:
-            launch_context = _prepare_launch_candidate(
-                candidate,
-                config=config,
-                prepared=prepared,
-                db=db,
-                subprocess_runner=subprocess_runner,
-                status_resolver=status_resolver,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-        except GhQueryError as err:
-            _record_metric(
-                db,
-                config,
-                "context_hydration_failed",
-                issue_ref=candidate,
-                payload={"reason": gh_reason_code(err), "detail": str(err)},
-            )
-            if _maybe_activate_claim_suppression(
-                db,
-                config,
-                scope="hydration",
-                error=err,
-            ):
-                return CycleResult(
-                    action="idle",
-                    issue_ref=candidate,
-                    reason="claim-suppressed:hydration",
-                )
-            _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=f"launch-prep:{err}",
-            )
-        except WorkflowConfigError as err:
-            _block_prelaunch_issue(
-                candidate,
-                f"workflow-config:{err}",
-                config=config,
-                cp_config=cp_config,
-                db=db,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_metric(
-                db,
-                config,
-                "worker_start_failed",
-                issue_ref=candidate,
-                payload={"reason": "workflow_config_error", "detail": str(err)},
-            )
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=f"workflow-config:{err}",
-            )
-        except WorktreePrepareError as err:
-            _record_metric(
-                db,
-                config,
-                "worker_start_failed",
-                issue_ref=candidate,
-                payload={"reason": err.reason_code, "detail": err.detail},
-            )
-            reason = (
-                err.detail
-                if err.reason_code == "repair_reconcile_error"
-                else f"{err.reason_code}:{err.detail}"
-            )
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=reason,
-            )
-        except RuntimeError as err:
-            _block_prelaunch_issue(
-                candidate,
-                f"workflow-hook:{err}",
-                config=config,
-                cp_config=cp_config,
-                db=db,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_metric(
-                db,
-                config,
-                "worker_start_failed",
-                issue_ref=candidate,
-                payload={"reason": "workflow_hook_error", "detail": str(err)},
-            )
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=f"workflow-hook:{err}",
-            )
-
-    assert launch_context is not None
-    candidate = launch_context.issue_ref
-    candidate_prefix = launch_context.repo_prefix
+    candidate_prefix = parse_issue_ref(candidate).prefix
     main_workflow = main_workflows.get(candidate_prefix)
     if main_workflow is None:
-        return CycleResult(
+        status = workflow_statuses.get(candidate_prefix)
+        reason = status.disabled_reason if status is not None else "workflow-missing"
+        return None, CycleResult(
             action="idle",
             issue_ref=candidate,
-            reason="workflow-missing",
+            reason=f"repo-dispatch-disabled:{reason}",
         )
+    base_seconds, max_seconds = _effective_retry_backoff(config, main_workflow)
+    if _retry_backoff_active(
+        db,
+        candidate,
+        base_seconds=base_seconds,
+        max_seconds=max_seconds,
+    ):
+        return None, CycleResult(
+            action="idle",
+            issue_ref=candidate,
+            reason=f"retry-backoff:{base_seconds}:{max_seconds}",
+        )
+
+    if dry_run:
+        logger.info("[dry-run] Would prepare, claim, and execute: %s", candidate)
+        return None, CycleResult(
+            action="claimed",
+            issue_ref=candidate,
+            reason="dry-run",
+        )
+
+    _record_metric(db, config, "candidate_selected", issue_ref=candidate)
+    try:
+        resolved_launch_context = _prepare_launch_candidate(
+            candidate,
+            config=config,
+            prepared=prepared,
+            db=db,
+            subprocess_runner=subprocess_runner,
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+    except GhQueryError as err:
+        _record_metric(
+            db,
+            config,
+            "context_hydration_failed",
+            issue_ref=candidate,
+            payload={"reason": gh_reason_code(err), "detail": str(err)},
+        )
+        if _maybe_activate_claim_suppression(
+            db,
+            config,
+            scope="hydration",
+            error=err,
+        ):
+            return None, CycleResult(
+                action="idle",
+                issue_ref=candidate,
+                reason="claim-suppressed:hydration",
+            )
+        _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
+        return None, CycleResult(
+            action="error",
+            issue_ref=candidate,
+            reason=f"launch-prep:{err}",
+        )
+    except WorkflowConfigError as err:
+        _block_prelaunch_issue(
+            candidate,
+            f"workflow-config:{err}",
+            config=config,
+            cp_config=cp_config,
+            db=db,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": "workflow_config_error", "detail": str(err)},
+        )
+        return None, CycleResult(
+            action="error",
+            issue_ref=candidate,
+            reason=f"workflow-config:{err}",
+        )
+    except WorktreePrepareError as err:
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": err.reason_code, "detail": err.detail},
+        )
+        reason = (
+            err.detail
+            if err.reason_code == "repair_reconcile_error"
+            else f"{err.reason_code}:{err.detail}"
+        )
+        return None, CycleResult(
+            action="error",
+            issue_ref=candidate,
+            reason=reason,
+        )
+    except RuntimeError as err:
+        _block_prelaunch_issue(
+            candidate,
+            f"workflow-hook:{err}",
+            config=config,
+            cp_config=cp_config,
+            db=db,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": "workflow_hook_error", "detail": str(err)},
+        )
+        return None, CycleResult(
+            action="error",
+            issue_ref=candidate,
+            reason=f"workflow-hook:{err}",
+        )
+
+    return resolved_launch_context, None
+
+
+def _claim_launch_context(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    slot_id: int,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
+    """Claim board ownership and start a durable running session."""
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    candidate = launch_context.issue_ref
+    candidate_prefix = launch_context.repo_prefix
     effective_max_retries = launch_context.effective_consumer_config.max_retries
 
     session_id = db.create_session(
@@ -4759,7 +4737,7 @@ def run_one_cycle(
             status="aborted",
             failure_reason="lease_conflict",
         )
-        return CycleResult(
+        return None, CycleResult(
             action="idle",
             issue_ref=candidate,
             session_id=session_id,
@@ -4790,7 +4768,7 @@ def run_one_cycle(
             )
         except (GhQueryError, Exception) as err:
             logger.error("Escalation failed: %s", err)
-        return CycleResult(
+        return None, CycleResult(
             action="error",
             issue_ref=candidate,
             session_id=session_id,
@@ -4844,7 +4822,7 @@ def run_one_cycle(
             issue_ref=candidate,
             payload={"reason": "claim_error", "detail": str(err)},
         )
-        return CycleResult(
+        return None, CycleResult(
             action="error",
             issue_ref=candidate,
             session_id=session_id,
@@ -4867,7 +4845,7 @@ def run_one_cycle(
             issue_ref=candidate,
             payload={"reason": "claim_unexpected_error", "detail": str(err)},
         )
-        return CycleResult(
+        return None, CycleResult(
             action="error",
             issue_ref=candidate,
             session_id=session_id,
@@ -4899,7 +4877,7 @@ def run_one_cycle(
             issue_ref=candidate,
             payload={"reason": failure_reason},
         )
-        return CycleResult(
+        return None, CycleResult(
             action="idle",
             issue_ref=candidate,
             session_id=session_id,
@@ -4942,6 +4920,35 @@ def run_one_cycle(
         )
     except (GhQueryError, Exception) as err:
         logger.error("Consumer claim marker failed: %s", err)
+
+    return ClaimedSessionContext(
+        session_id=session_id,
+        effective_max_retries=effective_max_retries,
+        slot_id=slot_id,
+    ), None
+
+
+def _execute_claimed_session(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    file_reader: Callable[[Path], str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> SessionExecutionOutcome:
+    """Execute Codex for a claimed session and apply immediate board handoff."""
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    candidate = launch_context.issue_ref
+    candidate_prefix = launch_context.repo_prefix
+    session_id = claimed_context.session_id
 
     prompt = _assemble_codex_prompt(
         launch_context.issue_context,
@@ -4992,11 +4999,9 @@ def run_one_cycle(
         else:
             failure_reason = "codex_error"
 
-    # 19. PR creation (consumer-owned)
     try:
         if codex_result and codex_result.get("pr_url"):
             pr_url = codex_result["pr_url"]
-        # Check if there are commits to salvage
         has_commits = _has_commits_on_branch(
             launch_context.worktree_path,
             launch_context.branch_name,
@@ -5143,7 +5148,9 @@ def run_one_cycle(
                         ),
                     )
                 except GhQueryError as err:
-                    logger.warning("Immediate review clearance failed for %s: %s", candidate, err)
+                    logger.warning(
+                        "Immediate review clearance failed for %s: %s", candidate, err
+                    )
                     _mark_degraded(db, f"review-queue:{gh_reason_code(err)}:{err}")
     else:
         if session_status == "success" and not has_commits:
@@ -5168,7 +5175,9 @@ def run_one_cycle(
                 gh_runner=gh_runner,
             )
             if done_reason == "already_resolved":
-                _record_metric(db, config, "session_transition_done", issue_ref=candidate)
+                _record_metric(
+                    db, config, "session_transition_done", issue_ref=candidate
+                )
         else:
             try:
                 _return_issue_to_ready(
@@ -5193,17 +5202,53 @@ def run_one_cycle(
             if session_status == "failed" and not has_commits and codex_result is None:
                 session_status = "aborted"
 
-    # 20. Release lease + update session
+    return SessionExecutionOutcome(
+        session_status=session_status,
+        failure_reason=failure_reason,
+        pr_url=pr_url,
+        has_commits=has_commits,
+        codex_result=codex_result,
+        should_transition_to_review=should_transition_to_review,
+        immediate_review_summary=immediate_review_summary,
+        resolution_evaluation=resolution_evaluation,
+        done_reason=done_reason,
+    )
+
+
+def _finalize_claimed_session(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    execution_outcome: SessionExecutionOutcome,
+    board_info_resolver: Callable | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> CycleResult:
+    """Persist final session state and return the cycle result."""
+    cp_config = prepared.cp_config
+    candidate = launch_context.issue_ref
+    session_id = claimed_context.session_id
+    effective_max_retries = claimed_context.effective_max_retries
+    session_status = execution_outcome.session_status
+    pr_url = execution_outcome.pr_url
+    codex_result = execution_outcome.codex_result
+    failure_reason = execution_outcome.failure_reason
+    resolution_evaluation = execution_outcome.resolution_evaluation
+    done_reason = execution_outcome.done_reason
+
     db.release_lease(candidate)
     review_requeued = (
-        should_transition_to_review
-        and "immediate_review_summary" in locals()
-        and candidate in immediate_review_summary.requeued
+        execution_outcome.should_transition_to_review
+        and candidate in execution_outcome.immediate_review_summary.requeued
     )
     final_phase = (
         "completed"
         if review_requeued
-        else ("review" if should_transition_to_review else "completed")
+        else ("review" if execution_outcome.should_transition_to_review else "completed")
     )
     if session_status in {"failed", "timeout"} and not pr_url:
         final_phase = "blocked"
@@ -5269,7 +5314,8 @@ def run_one_cycle(
                     cp_config,
                     config.project_owner,
                     config.project_number,
-                    reason=escalation_reason or f"max retries ({effective_max_retries}) exceeded",
+                    reason=escalation_reason
+                    or f"max retries ({effective_max_retries}) exceeded",
                     board_info_resolver=board_info_resolver,
                     comment_checker=comment_checker,
                     comment_poster=comment_poster,
@@ -5284,6 +5330,151 @@ def run_one_cycle(
         session_id=session_id,
         reason=session_status,
         pr_url=pr_url,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Core: run_one_cycle
+# ---------------------------------------------------------------------------
+
+
+def run_one_cycle(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    *,
+    dry_run: bool = False,
+    target_issue: str | None = None,
+    prepared: PreparedCycleContext | None = None,
+    launch_context: PreparedLaunchContext | None = None,
+    slot_id_override: int | None = None,
+    skip_control_plane: bool = False,
+    # DI points
+    gh_runner: Callable[..., str] | None = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    file_reader: Callable[[Path], str] | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+) -> CycleResult:
+    """Execute one poll-claim-execute cycle.
+
+    Returns a CycleResult describing what happened.
+    """
+    try:
+        if skip_control_plane:
+            if prepared is None:
+                raise ValueError("prepared cycle context is required when skip_control_plane=True")
+        else:
+            prepared = _prepare_cycle(
+                config,
+                db,
+                dry_run=dry_run,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                comment_checker=comment_checker,
+                comment_poster=comment_poster,
+                gh_runner=gh_runner,
+            )
+    except ConfigError as err:
+        logger.error("Config error: %s", err)
+        return CycleResult(action="error", reason=f"config-error:{err}")
+    except WorkflowConfigError as err:
+        logger.error("Workflow config error: %s", err)
+        return CycleResult(action="error", reason=f"workflow-config:{err}")
+    except GhQueryError as err:
+        logger.error("Control-plane preflight failed: %s", err)
+        _mark_degraded(db, f"control-plane:{gh_reason_code(err)}:{err}")
+        return CycleResult(action="error", reason=f"control-plane:{err}")
+
+    assert prepared is not None
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    config.poll_interval_seconds = prepared.effective_interval
+
+    suppression_state = _claim_suppression_state(db)
+    if suppression_state is not None and launch_context is None:
+        return CycleResult(
+            action="idle",
+            reason=f"claim-suppressed:{suppression_state['scope']}",
+        )
+
+    if slot_id_override is None:
+        if db.active_lease_count() >= prepared.global_limit:
+            return CycleResult(action="idle", reason="lease-cap")
+        slot_id = _next_available_slot(db, prepared.global_limit)
+        if slot_id is None:
+            return CycleResult(action="idle", reason="lease-cap")
+    else:
+        slot_id = slot_id_override
+
+    launch_context, cycle_result = _resolve_launch_context_for_cycle(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        target_issue=target_issue,
+        dry_run=dry_run,
+        status_resolver=status_resolver,
+        subprocess_runner=subprocess_runner,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    if cycle_result is not None:
+        return cycle_result
+
+    assert launch_context is not None
+    candidate = launch_context.issue_ref
+    candidate_prefix = launch_context.repo_prefix
+
+    claimed_context, cycle_result = _claim_launch_context(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        slot_id=slot_id,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+    if cycle_result is not None:
+        return cycle_result
+
+    assert claimed_context is not None
+    session_id = claimed_context.session_id
+    effective_max_retries = claimed_context.effective_max_retries
+
+    execution_outcome = _execute_claimed_session(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        claimed_context=claimed_context,
+        subprocess_runner=subprocess_runner,
+        file_reader=file_reader,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+
+    return _finalize_claimed_session(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        claimed_context=claimed_context,
+        execution_outcome=execution_outcome,
+        board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
 
 
