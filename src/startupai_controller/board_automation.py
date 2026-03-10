@@ -58,8 +58,6 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     _is_copilot_coding_agent_actor,
     _repo_to_prefix,
     _issue_ref_to_repo_parts,
-    _snapshot_to_issue_ref,
-    _marker_for,
     _post_comment,
     _query_latest_marker_timestamp,
     _query_project_item_field,
@@ -136,6 +134,7 @@ from startupai_controller.domain.automerge_policy import automerge_gate_decision
 from startupai_controller.domain.rescue_policy import rescue_decision
 from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
+    marker_for as _marker_for,
 )
 from startupai_controller.domain.resolution_policy import (
     parse_resolution_comment,
@@ -148,6 +147,7 @@ from startupai_controller.domain.scheduling_policy import (
     admission_watermarks,
     has_structured_acceptance_criteria,
     priority_rank as _priority_rank,
+    snapshot_to_issue_ref as _snapshot_to_issue_ref,
     wip_limit_for_lane as _domain_wip_limit_for_lane,
     protected_queue_executor_target as _domain_protected_queue_executor_target,
 )
@@ -752,7 +752,7 @@ def propagate_blocker(
             if use_ports:
                 ref = snapshot.issue_ref
             else:
-                ref = _snapshot_to_issue_ref(snapshot, config)
+                ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
                 if ref is None:
                     continue
 
@@ -1057,7 +1057,7 @@ def route_protected_queue_executors(
             )
         )
         for snapshot in items:
-            issue_ref = _snapshot_to_issue_ref(snapshot, config)
+            issue_ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
             if issue_ref is None:
                 decision.skipped.append((snapshot.issue_ref, "unknown-repo-prefix"))
                 continue
@@ -1485,7 +1485,7 @@ def _partition_admission_source_items(
     ready_count = 0
     backlog_items: list[_ProjectItemSnapshot] = []
     for item in items:
-        issue_ref = _snapshot_to_issue_ref(item, config)
+        issue_ref = _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
         if issue_ref is None:
             continue
         repo_prefix = parse_issue_ref(issue_ref).prefix
@@ -1513,7 +1513,7 @@ def _build_provisional_admission_candidates(
     skipped: list[AdmissionSkip] = []
 
     for item in backlog_items:
-        issue_ref = _snapshot_to_issue_ref(item, config)
+        issue_ref = _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
         if issue_ref is None:
             skipped.append(AdmissionSkip(item.issue_ref, "unknown_repo_prefix"))
             continue
@@ -1546,11 +1546,12 @@ def _build_provisional_admission_candidates(
 
     provisional_candidates.sort(
         key=lambda item: _admission_candidate_rank(
-            _snapshot_to_issue_ref(item, config) or item.issue_ref,
+            _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes) or item.issue_ref,
             priority=item.priority,
             is_graph_member=in_any_critical_path(
                 config,
-                _snapshot_to_issue_ref(item, config) or item.issue_ref,
+                _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
+                or item.issue_ref,
             ),
         )
     )
@@ -1589,7 +1590,7 @@ def _evaluate_admission_candidates(
         if len(eligible) >= needed:
             deep_evaluation_truncated = True
             break
-        issue_ref = _snapshot_to_issue_ref(item, config)
+        issue_ref = _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
         assert issue_ref is not None
         repo_prefix = parse_issue_ref(issue_ref).prefix
         owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
@@ -1990,7 +1991,7 @@ def _process_schedule_ready_snapshot(
     """Apply scheduling policy to one Ready snapshot."""
     ref = getattr(snapshot, "issue_ref", None)
     if ref is None:
-        ref = _snapshot_to_issue_ref(snapshot, config)
+        ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
         if ref is None:
             return
 
@@ -2545,7 +2546,7 @@ def audit_in_progress(
         if use_ports:
             ref = snapshot.issue_ref
         else:
-            ref = _snapshot_to_issue_ref(snapshot, config)
+            ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
             if ref is None:
                 continue
         if not all_prefixes and this_repo_prefix:
@@ -2980,7 +2981,7 @@ def _evaluate_rebalance_snapshot(
     if use_ports:
         ref = snapshot.issue_ref
     else:
-        ref = _snapshot_to_issue_ref(snapshot, config)
+        ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
         if ref is None:
             return None, board_port
     parsed = parse_issue_ref(ref)

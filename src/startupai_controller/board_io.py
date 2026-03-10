@@ -33,6 +33,10 @@ from startupai_controller.domain.models import (
     OpenPullRequest,
     PrGateStatus,
 )
+from startupai_controller.domain.repair_policy import marker_for
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _canonical_snapshot_to_issue_ref,
+)
 from startupai_controller.adapters.github_transport import (
     GhCommandError,
     _run_gh,
@@ -201,7 +205,7 @@ def _parse_github_timestamp(raw: str) -> datetime | None:
 
 def _marker_for(kind: str, ref: str) -> str:
     """Generate an HTML comment marker for idempotency."""
-    return f"<!-- {MARKER_PREFIX}:{kind}:{ref} -->"
+    return marker_for(kind, ref)
 
 
 def _comment_exists(
@@ -428,20 +432,8 @@ def _snapshot_to_issue_ref(
     snapshot: _ProjectItemSnapshot,
     config: CriticalPathConfig,
 ) -> str | None:
-    """Convert a _ProjectItemSnapshot repo#number to a config-prefix ref.
-
-    e.g. 'StartupAI-site/startupai-crew#88' -> 'crew#88'
-    """
-    # snapshot.issue_ref is "owner/repo#number"
-    parts = snapshot.issue_ref.split("#", maxsplit=1)
-    if len(parts) != 2:
-        return None
-    full_repo = parts[0]
-    number = parts[1]
-    prefix = _repo_to_prefix(full_repo, config)
-    if prefix is None:
-        return None
-    return f"{prefix}#{number}"
+    """Compatibility wrapper for canonical domain issue-ref normalization."""
+    return _canonical_snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
 
 
 # ---------------------------------------------------------------------------

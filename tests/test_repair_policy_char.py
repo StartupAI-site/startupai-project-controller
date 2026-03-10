@@ -17,6 +17,7 @@ from startupai_controller.domain.repair_policy import (
     consumer_provenance_marker as _consumer_provenance_marker,
     deterministic_branch_pattern as _deterministic_branch_pattern,
     extract_acceptance_criteria as _extract_acceptance_criteria,
+    marker_for as _marker_for,
     parse_consumer_provenance as _parse_consumer_provenance,
     parse_pr_url,
 )
@@ -158,6 +159,16 @@ class TestConsumerProvenanceRoundtrip:
         parsed = _parse_consumer_provenance(text)
         assert parsed is not None
         assert parsed["session_id"] == "s1"
+
+
+class TestMarkerFor:
+    """Characterize marker_for."""
+
+    def test_builds_deterministic_marker(self) -> None:
+        assert (
+            _marker_for("consumer-result", "app#46")
+            == f"<!-- {MARKER_PREFIX}:consumer-result:app#46 -->"
+        )
 
 
 # ---------------------------------------------------------------------------

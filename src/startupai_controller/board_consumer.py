@@ -74,10 +74,8 @@ from startupai_controller.adapters.github_types import (
     ProjectItemSnapshot as _ProjectItemSnapshot,
 )
 from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
-    _marker_for,
     _post_comment,
     _set_status_if_changed,
-    _snapshot_to_issue_ref,
     close_issue,
     enable_pull_request_automerge,
     rerun_actions_run,
@@ -127,7 +125,11 @@ from startupai_controller.domain.models import (
 )
 from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
+    marker_for as _marker_for,
     parse_pr_url as _parse_pr_url,
+)
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _snapshot_to_issue_ref,
 )
 from startupai_controller.domain.review_queue_policy import (
     DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
@@ -1433,7 +1435,7 @@ def _select_best_candidate(
         try:
             parsed_ref = parse_issue_ref(ref)
         except ConfigError:
-            ref = _snapshot_to_issue_ref(snapshot, config)
+            ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
             if ref is None:
                 continue
             parsed_ref = parse_issue_ref(ref)
@@ -1465,7 +1467,7 @@ def _select_best_candidate(
         return None
 
     eligible.sort(key=lambda s: _ready_snapshot_rank(s, config))
-    best_ref = _snapshot_to_issue_ref(eligible[0], config)
+    best_ref = _snapshot_to_issue_ref(eligible[0].issue_ref, config.issue_prefixes)
     return best_ref
 
 
@@ -1523,7 +1525,7 @@ def _snapshot_for_issue(
 ) -> _ProjectItemSnapshot | None:
     """Return the thin board snapshot row for an issue ref."""
     for snapshot in board_snapshot.items:
-        if _snapshot_to_issue_ref(snapshot, config) == issue_ref:
+        if _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes) == issue_ref:
             return snapshot
     return None
 
@@ -2788,7 +2790,9 @@ def _review_scope_issue_refs(
     """Return governed review issue refs for the consumer executor."""
     refs: list[str] = []
     for snapshot in board_snapshot.items_with_status("Review"):
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
+        issue_ref = _snapshot_to_issue_ref(
+            snapshot.issue_ref, critical_path_config.issue_prefixes
+        )
         if issue_ref is None:
             continue
         if parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
@@ -3004,7 +3008,9 @@ def _update_board_snapshot_statuses(
         return board_snapshot
     items: list[_ProjectItemSnapshot] = []
     for snapshot in board_snapshot.items:
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
+        issue_ref = _snapshot_to_issue_ref(
+            snapshot.issue_ref, critical_path_config.issue_prefixes
+        )
         if issue_ref is None or issue_ref not in status_updates:
             items.append(snapshot)
             continue
@@ -4816,7 +4822,9 @@ def _prepare_cycle(
         for snapshot in board_snapshot.items_with_status("Ready"):
             if snapshot.executor.strip().lower() != config.executor:
                 continue
-            issue_ref = _snapshot_to_issue_ref(snapshot, runtime.cp_config)
+            issue_ref = _snapshot_to_issue_ref(
+                snapshot.issue_ref, runtime.cp_config.issue_prefixes
+            )
             if issue_ref is None:
                 continue
             if (
@@ -5093,7 +5101,9 @@ def _reconcile_board_truth(
     ) -> str | None:
         if isinstance(snapshot, IssueSnapshot):
             return snapshot.issue_ref
-        return _snapshot_to_issue_ref(snapshot, critical_path_config)
+        return _snapshot_to_issue_ref(
+            snapshot.issue_ref, critical_path_config.issue_prefixes
+        )
 
     moved_in_progress.extend(
         _reconcile_active_repair_review_items(

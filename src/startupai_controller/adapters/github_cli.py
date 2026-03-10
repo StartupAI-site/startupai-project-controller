@@ -22,7 +22,10 @@ from startupai_controller.domain.verdict_policy import (
     verdict_comment_body,
     verdict_marker_text,
 )
-from startupai_controller.domain.repair_policy import MARKER_PREFIX
+from startupai_controller.domain.repair_policy import MARKER_PREFIX, marker_for
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _canonical_snapshot_to_issue_ref,
+)
 from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
@@ -82,8 +85,8 @@ def _is_copilot_coding_agent_actor(login: str) -> bool:
 
 
 def _marker_for(kind: str, ref: str) -> str:
-    """Generate the canonical HTML marker for one comment type/ref pair."""
-    return f"<!-- {MARKER_PREFIX}:{kind}:{ref} -->"
+    """Compatibility wrapper for the canonical domain marker helper."""
+    return marker_for(kind, ref)
 
 
 def _query_project_item_field(
@@ -770,22 +773,8 @@ def _snapshot_to_issue_ref(
     snapshot: _ProjectItemSnapshot,
     config: CriticalPathConfig,
 ) -> str | None:
-    """Return a canonical issue ref for either canonical or repo-scoped snapshots."""
-    issue_ref = snapshot.issue_ref
-    try:
-        parse_issue_ref(issue_ref)
-        return issue_ref
-    except ConfigError:
-        pass
-
-    parts = issue_ref.split("#", maxsplit=1)
-    if len(parts) != 2:
-        return None
-    full_repo, number = parts
-    prefix = _repo_to_prefix(full_repo, config)
-    if prefix is None:
-        return None
-    return f"{prefix}#{number}"
+    """Compatibility wrapper for the canonical domain issue-ref normalizer."""
+    return _canonical_snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
 
 
 def latest_codex_verdict_from_payload(

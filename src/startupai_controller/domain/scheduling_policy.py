@@ -75,6 +75,34 @@ def priority_rank(priority: str) -> tuple[int, str]:
     return 99, normalized.lower()
 
 
+def repo_prefix_for_slug(
+    repo_slug: str,
+    issue_prefixes: dict[str, str],
+) -> str | None:
+    """Return the canonical issue prefix for a repo slug, if configured."""
+    for prefix, configured_repo in issue_prefixes.items():
+        if configured_repo == repo_slug:
+            return prefix
+    return None
+
+
+def snapshot_to_issue_ref(
+    issue_ref: str,
+    issue_prefixes: dict[str, str],
+) -> str | None:
+    """Normalize a snapshot issue ref to canonical `<prefix>#<number>` form."""
+    normalized = issue_ref.strip()
+    left, sep, right = normalized.partition("#")
+    if not sep or not right.isdigit():
+        return None
+    if left in issue_prefixes:
+        return f"{left}#{right}"
+    prefix = repo_prefix_for_slug(left, issue_prefixes)
+    if prefix is None:
+        return None
+    return f"{prefix}#{right}"
+
+
 # ---------------------------------------------------------------------------
 # Admission watermarks
 # ---------------------------------------------------------------------------
