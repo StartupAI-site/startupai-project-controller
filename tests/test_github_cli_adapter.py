@@ -217,6 +217,79 @@ def test_required_status_checks_delegates_to_query(monkeypatch) -> None:
     assert required == {"StartupAI-site/startupai-crew:main"}
 
 
+def test_review_snapshots_batches_queries_by_repo(monkeypatch) -> None:
+    payload_calls: list[tuple[str, tuple[int, ...]]] = []
+    required_calls: list[tuple[str, str]] = []
+
+    def fake_payloads(memo, pr_repo, pr_numbers, *, gh_runner=None):
+        normalized = tuple(pr_numbers)
+        payload_calls.append((pr_repo, normalized))
+        return {
+            number: SimpleNamespace(
+                author="codex-bot",
+                body=f"Closes #{number}",
+                comments=(),
+                base_ref_name="main",
+            )
+            for number in normalized
+        }
+
+    def fake_required(memo, pr_repo, base_ref_name, *, gh_runner=None):
+        required_calls.append((pr_repo, base_ref_name))
+        return {"ci"}
+
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.memoized_query_pull_request_view_payloads",
+        fake_payloads,
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.memoized_query_required_status_checks",
+        fake_required,
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.has_copilot_review_signal_from_payload",
+        lambda payload: False,
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.latest_codex_verdict_from_payload",
+        lambda payload, trusted_actors: SimpleNamespace(
+            decision="pass",
+            source="comment",
+            actor="codex",
+        ),
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.build_pr_gate_status_from_payload",
+        lambda payload, required: SimpleNamespace(
+            required=set(required),
+            checks={name: SimpleNamespace(result="pass") for name in required},
+        ),
+    )
+
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    snapshots = adapter.review_snapshots(
+        {
+            ("StartupAI-site/startupai-crew", 210): ("crew#84",),
+            ("StartupAI-site/startupai-crew", 211): ("crew#85",),
+            ("StartupAI-site/app.startupai-site", 300): ("app#17",),
+        },
+        trusted_codex_actors=frozenset({"codex"}),
+    )
+
+    assert payload_calls == [
+        ("StartupAI-site/app.startupai-site", (300,)),
+        ("StartupAI-site/startupai-crew", (210, 211)),
+    ]
+    assert required_calls == [
+        ("StartupAI-site/app.startupai-site", "main"),
+        ("StartupAI-site/startupai-crew", "main"),
+        ("StartupAI-site/startupai-crew", "main"),
+    ]
+    assert snapshots[("StartupAI-site/startupai-crew", 210)].review_refs == ("crew#84",)
+    assert snapshots[("StartupAI-site/startupai-crew", 211)].review_refs == ("crew#85",)
+
+
 def test_get_issue_fields_passes_config_to_field_queries(monkeypatch) -> None:
     calls: list[tuple[str, str, object, str, int]] = []
     values = {

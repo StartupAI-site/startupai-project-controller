@@ -38,7 +38,6 @@ from typing import Any, Callable
 
 from startupai_controller.board_automation import (
     BoardAutomationConfig,
-    _build_review_snapshot_from_payload,
     admission_summary_payload,
     admit_backlog_items,
     mark_issues_done,
@@ -76,8 +75,6 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     _ProjectItemSnapshot,
     _comment_exists,
     build_cycle_board_snapshot,
-    memoized_query_pull_request_view_payloads,
-    memoized_query_required_status_checks,
     _list_project_items_by_status,
     _marker_for,
     _post_comment,
@@ -2400,12 +2397,10 @@ def _build_review_snapshots_for_queue_entries(
     *,
     queue_entries: list[ReviewQueueEntry],
     review_refs: set[str],
-    automation_config: BoardAutomationConfig,
-    gh_runner: Callable[..., str] | None = None,
-    github_memo: CycleGitHubMemo | None = None,
+    pr_port: PullRequestPort,
+    trusted_codex_actors: frozenset[str],
 ) -> dict[tuple[str, int], ReviewSnapshot]:
     """Build one review snapshot per unique PR for queued review entries."""
-    memo = github_memo or CycleGitHubMemo()
     review_refs_by_pr: dict[tuple[str, int], list[str]] = {}
     for entry in queue_entries:
         if entry.issue_ref not in review_refs:
@@ -2413,41 +2408,13 @@ def _build_review_snapshots_for_queue_entries(
         review_refs_by_pr.setdefault((entry.pr_repo, entry.pr_number), []).append(
             entry.issue_ref
         )
-
-    snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
-    numbers_by_repo: dict[str, list[int]] = {}
-    for pr_repo, pr_number in review_refs_by_pr:
-        numbers_by_repo.setdefault(pr_repo, []).append(pr_number)
-
-    for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
-        payloads = memoized_query_pull_request_view_payloads(
-            memo,
-            pr_repo,
-            tuple(sorted(set(pr_numbers))),
-            gh_runner=gh_runner,
-        )
-        for pr_number in sorted(set(pr_numbers)):
-            refs = review_refs_by_pr[(pr_repo, pr_number)]
-            payload = payloads.get(pr_number)
-            if payload is None:
-                raise GhQueryError(
-                    f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
-                )
-            required_checks = memoized_query_required_status_checks(
-                memo,
-                pr_repo,
-                payload.base_ref_name or "main",
-                gh_runner=gh_runner,
-            )
-            snapshots[(pr_repo, pr_number)] = _build_review_snapshot_from_payload(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                review_refs=tuple(sorted(set(refs))),
-                pr_payload=payload,
-                automation_config=automation_config,
-                required_checks=required_checks,
-            )
-    return snapshots
+    return pr_port.review_snapshots(
+        {
+            pr_key: tuple(sorted(set(refs)))
+            for pr_key, refs in review_refs_by_pr.items()
+        },
+        trusted_codex_actors=trusted_codex_actors,
+    )
 
 
 def _backfill_review_verdicts_from_snapshots(
@@ -2915,6 +2882,7 @@ def _drain_review_queue(
     critical_path_config: CriticalPathConfig,
     automation_config: BoardAutomationConfig | None,
     *,
+    pr_port: PullRequestPort | None = None,
     session_store: SessionStorePort | None = None,
     board_snapshot: CycleBoardSnapshot,
     dry_run: bool = False,
@@ -2957,9 +2925,7 @@ def _drain_review_queue(
             board_snapshot,
         )
     memo = github_memo or CycleGitHubMemo()
-    from startupai_controller.adapters.github_cli import GitHubCliAdapter as _GhCliAdapter
-
-    _drain_pr_port = _GhCliAdapter(
+    effective_pr_port = pr_port or GitHubCliAdapter(
         project_owner=config.project_owner,
         project_number=config.project_number,
         config=critical_path_config,
@@ -2971,7 +2937,7 @@ def _drain_review_queue(
             store,
             queue_items,
             now=now,
-            pr_port=_drain_pr_port,
+            pr_port=effective_pr_port,
             dry_run=dry_run,
         )
     except GhQueryError as err:
@@ -3003,7 +2969,7 @@ def _drain_review_queue(
         pre_backfilled = _pre_backfill_verdicts_for_due_prs(
             store,
             due_items,
-            pr_port=_drain_pr_port,
+            pr_port=effective_pr_port,
             gh_runner=gh_runner,
         )
 
@@ -3022,7 +2988,7 @@ def _drain_review_queue(
         try:
             changed_due_items, unchanged_due_items = _partition_review_queue_entries_by_probe_change(
                 due_items,
-                pr_port=_drain_pr_port,
+                pr_port=effective_pr_port,
             )
             if unchanged_due_items and not dry_run:
                 _repark_unchanged_review_queue_entries(
@@ -3048,9 +3014,10 @@ def _drain_review_queue(
                 snapshots = _build_review_snapshots_for_queue_entries(
                     queue_entries=selected_snapshot_entries,
                     review_refs=review_refs,
-                    automation_config=automation_config,
-                    gh_runner=gh_runner,
-                    github_memo=memo,
+                    pr_port=effective_pr_port,
+                    trusted_codex_actors=frozenset(
+                        automation_config.trusted_codex_actors
+                    ),
                 )
         except GhQueryError as err:
             partial_failure = True
@@ -3060,7 +3027,7 @@ def _drain_review_queue(
                 store,
                 due_items,
                 snapshots,
-                pr_port=_drain_pr_port,
+                pr_port=effective_pr_port,
                 gh_runner=gh_runner,
             )
             verdict_backfilled = tuple(
@@ -3086,7 +3053,7 @@ def _drain_review_queue(
                 dry_run=dry_run,
                 snapshot=snapshot,
                 gh_runner=gh_runner,
-                pr_port=_drain_pr_port,
+                pr_port=effective_pr_port,
             )
         except GhQueryError as err:
             partial_failure = True
@@ -3094,7 +3061,7 @@ def _drain_review_queue(
             break
 
         if not dry_run:
-            state_digest = _drain_pr_port.review_state_digests(
+            state_digest = effective_pr_port.review_state_digests(
                 [(pr_repo, pr_number)]
             ).get((pr_repo, pr_number))
             for entry in entries:
@@ -3529,6 +3496,13 @@ def _prepare_cycle(
     )
     config.poll_interval_seconds = effective_interval
     github_memo = CycleGitHubMemo()
+    pr_port = GitHubCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=cp_config,
+        github_memo=github_memo,
+        gh_runner=gh_runner,
+    )
 
     if config.deferred_replay_enabled and not dry_run:
         phase_started = time.monotonic()
@@ -3602,6 +3576,7 @@ def _prepare_cycle(
         db,
         cp_config,
         auto_config,
+        pr_port=pr_port,
         session_store=session_store,
         board_snapshot=board_snapshot,
         dry_run=dry_run,
@@ -4997,10 +4972,8 @@ def run_one_cycle(
             )
             if queue_entry is not None and auto_config is not None:
                 try:
-                    from startupai_controller.adapters.github_cli import GitHubCliAdapter as _GhCliAdapter
-
                     review_memo = CycleGitHubMemo()
-                    handoff_pr_port = _GhCliAdapter(
+                    handoff_pr_port = GitHubCliAdapter(
                         project_owner=config.project_owner,
                         project_number=config.project_number,
                         config=cp_config,
@@ -5016,9 +4989,10 @@ def run_one_cycle(
                     review_snapshots = _build_review_snapshots_for_queue_entries(
                         queue_entries=queue_entries,
                         review_refs={entry.issue_ref for entry in queue_entries},
-                        automation_config=auto_config,
-                        gh_runner=gh_runner,
-                        github_memo=review_memo,
+                        pr_port=handoff_pr_port,
+                        trusted_codex_actors=frozenset(
+                            auto_config.trusted_codex_actors
+                        ),
                     )
                     snapshot = review_snapshots.get(
                         (queue_entry.pr_repo, queue_entry.pr_number)

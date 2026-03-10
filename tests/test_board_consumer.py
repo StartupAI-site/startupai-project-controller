@@ -2406,84 +2406,42 @@ class TestRunOneCycle:
             now=now,
         )
 
-        payload_calls: list[tuple[str, tuple[int, ...]]] = []
-        required_calls: list[tuple[str, str]] = []
+        captured: dict[tuple[str, int], tuple[str, ...]] = {}
 
-        def fake_payloads(memo, pr_repo, pr_numbers, *, gh_runner=None):
-            normalized = tuple(pr_numbers)
-            payload_calls.append((pr_repo, normalized))
-            return {
-                number: SimpleNamespace(
-                    pr_repo=pr_repo,
-                    pr_number=number,
-                    author="codex-bot",
-                    body=f"Closes #{number}",
-                    state="OPEN",
-                    is_draft=False,
-                    merge_state_status="CLEAN",
-                    mergeable="MERGEABLE",
-                    base_ref_name="main",
-                    auto_merge_enabled=False,
-                    comments=(),
-                    reviews=(),
-                    status_check_rollup=(),
+        class FakePrPort:
+            def review_snapshots(
+                self,
+                review_refs_by_pr: dict[tuple[str, int], tuple[str, ...]],
+                *,
+                trusted_codex_actors: frozenset[str],
+            ) -> dict[tuple[str, int], SimpleNamespace]:
+                assert trusted_codex_actors == frozenset(
+                    auto_config.trusted_codex_actors
                 )
-                for number in normalized
-            }
-
-        def fake_required(memo, pr_repo, base_ref_name, *, gh_runner=None):
-            key = (pr_repo, base_ref_name)
-            if key not in memo.required_status_checks:
-                required_calls.append(key)
-                memo.required_status_checks[key] = set()
-            return memo.required_status_checks[key]
-
-        def fake_snapshot_builder(
-            *,
-            pr_repo,
-            pr_number,
-            review_refs,
-            pr_payload,
-            automation_config,
-            required_checks,
-        ):
-            return SimpleNamespace(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                review_refs=review_refs,
-                pr_payload=pr_payload,
-                required_checks=required_checks,
-                pr_comment_bodies=(),
-            )
-
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_view_payloads",
-            fake_payloads,
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_required_status_checks",
-            fake_required,
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer._build_review_snapshot_from_payload",
-            fake_snapshot_builder,
-        )
+                captured.update(review_refs_by_pr)
+                return {
+                    pr_key: SimpleNamespace(
+                        pr_repo=pr_key[0],
+                        pr_number=pr_key[1],
+                        review_refs=review_refs,
+                        pr_comment_bodies=(),
+                    )
+                    for pr_key, review_refs in review_refs_by_pr.items()
+                }
 
         queue_entries = db.list_review_queue_items()
         snapshots = _build_review_snapshots_for_queue_entries(
             queue_entries=queue_entries,
             review_refs={"crew#84", "crew#85", "app#17"},
-            automation_config=auto_config,
+            pr_port=FakePrPort(),
+            trusted_codex_actors=frozenset(auto_config.trusted_codex_actors),
         )
 
-        assert payload_calls == [
-            ("StartupAI-site/app.startupai-site", (300,)),
-            ("StartupAI-site/startupai-crew", (210, 211)),
-        ]
-        assert required_calls == [
-            ("StartupAI-site/app.startupai-site", "main"),
-            ("StartupAI-site/startupai-crew", "main"),
-        ]
+        assert captured == {
+            ("StartupAI-site/startupai-crew", 210): ("crew#84",),
+            ("StartupAI-site/startupai-crew", 211): ("crew#85",),
+            ("StartupAI-site/app.startupai-site", 300): ("app#17",),
+        }
         assert snapshots[("StartupAI-site/startupai-crew", 210)].review_refs == (
             "crew#84",
         )

@@ -11,6 +11,7 @@ from startupai_controller.domain.models import (
     IssueSnapshot,
     OpenPullRequest,
     PrGateStatus,
+    ReviewSnapshot,
 )
 from startupai_controller.domain.verdict_policy import (
     verdict_comment_body,
@@ -269,6 +270,50 @@ class GitHubCliAdapter:
                 digests[(pr_repo, pr_number)] = review_state_digest_from_probe(probe)
         return digests
 
+    def review_snapshots(
+        self,
+        review_refs_by_pr: dict[tuple[str, int], tuple[str, ...]],
+        *,
+        trusted_codex_actors: frozenset[str],
+    ) -> dict[tuple[str, int], ReviewSnapshot]:
+        snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
+        numbers_by_repo: dict[str, list[int]] = {}
+        for pr_repo, pr_number in review_refs_by_pr:
+            numbers_by_repo.setdefault(pr_repo, []).append(pr_number)
+
+        for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
+            payloads = memoized_query_pull_request_view_payloads(
+                self._github_memo,
+                pr_repo,
+                tuple(sorted(set(pr_numbers))),
+                gh_runner=self._gh_runner,
+            )
+            for pr_number in sorted(set(pr_numbers)):
+                payload = payloads.get(pr_number)
+                if payload is None:
+                    from startupai_controller.validate_critical_path_promotion import (
+                        GhQueryError,
+                    )
+
+                    raise GhQueryError(
+                        f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
+                    )
+                required_checks = memoized_query_required_status_checks(
+                    self._github_memo,
+                    pr_repo,
+                    payload.base_ref_name or "main",
+                    gh_runner=self._gh_runner,
+                )
+                snapshots[(pr_repo, pr_number)] = _build_review_snapshot_from_payload(
+                    pr_repo=pr_repo,
+                    pr_number=pr_number,
+                    review_refs=review_refs_by_pr[(pr_repo, pr_number)],
+                    pr_payload=payload,
+                    trusted_codex_actors=trusted_codex_actors,
+                    required_checks=required_checks,
+                )
+        return snapshots
+
     def post_codex_verdict_if_missing(self, pr_url: str, session_id: str) -> bool:
         parsed = _parse_pr_url(pr_url)
         if parsed is None:
@@ -423,3 +468,99 @@ class GitHubCliAdapter:
             handoff_to=field("Handoff To"),
             blocked_reason=field("Blocked Reason"),
         )
+
+
+def _codex_gate_from_payload(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    review_refs: tuple[str, ...],
+    verdict: CodexReviewVerdict | None,
+) -> tuple[int, str]:
+    if not review_refs:
+        return 0, (
+            f"{pr_repo}#{pr_number}: codex gate not applicable "
+            "(linked issues not in Review)"
+        )
+    if verdict is None:
+        return 2, (
+            f"{pr_repo}#{pr_number}: missing codex verdict marker "
+            "(codex-review: pass|fail from trusted actor)"
+        )
+    if verdict.decision == "pass":
+        return 0, (
+            f"{pr_repo}#{pr_number}: codex-review=pass "
+            f"(source={verdict.source}, actor={verdict.actor})"
+        )
+    return 2, (
+        f"{pr_repo}#{pr_number}: codex-review=fail "
+        f"(route={verdict.route}, source={verdict.source}, actor={verdict.actor})"
+    )
+
+
+def _build_review_snapshot_from_payload(
+    *,
+    pr_repo: str,
+    pr_number: int,
+    review_refs: tuple[str, ...],
+    pr_payload: PullRequestViewPayload,
+    trusted_codex_actors: frozenset[str],
+    required_checks: set[str],
+) -> ReviewSnapshot:
+    copilot_review_present = has_copilot_review_signal_from_payload(pr_payload)
+    verdict = latest_codex_verdict_from_payload(
+        pr_payload,
+        trusted_actors=trusted_codex_actors,
+    )
+    codex_gate_code, codex_gate_message = _codex_gate_from_payload(
+        pr_repo,
+        pr_number,
+        review_refs=review_refs,
+        verdict=verdict,
+    )
+    gate_status = build_pr_gate_status_from_payload(
+        pr_payload,
+        required=required_checks,
+    )
+
+    rescue_checks = tuple(sorted(gate_status.required))
+    rescue_passed: set[str] = set()
+    rescue_pending: set[str] = set()
+    rescue_failed: set[str] = set()
+    rescue_cancelled: set[str] = set()
+    rescue_missing: set[str] = set()
+    for name in rescue_checks:
+        observation = gate_status.checks.get(name)
+        if observation is None:
+            rescue_missing.add(name)
+            continue
+        if observation.result == "pass":
+            rescue_passed.add(name)
+        elif observation.result == "cancelled":
+            rescue_cancelled.add(name)
+        elif observation.result == "fail":
+            rescue_failed.add(name)
+        else:
+            rescue_pending.add(name)
+
+    return ReviewSnapshot(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        review_refs=review_refs,
+        pr_author=pr_payload.author,
+        pr_body=pr_payload.body,
+        pr_comment_bodies=tuple(
+            str(comment.get("body") or "") for comment in pr_payload.comments
+        ),
+        copilot_review_present=copilot_review_present,
+        codex_verdict=verdict,
+        codex_gate_code=codex_gate_code,
+        codex_gate_message=codex_gate_message,
+        gate_status=gate_status,
+        rescue_checks=rescue_checks,
+        rescue_passed=rescue_passed,
+        rescue_pending=rescue_pending,
+        rescue_failed=rescue_failed,
+        rescue_cancelled=rescue_cancelled,
+        rescue_missing=rescue_missing,
+    )

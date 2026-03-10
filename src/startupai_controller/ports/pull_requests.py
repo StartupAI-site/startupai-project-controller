@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from startupai_controller.domain.models import OpenPullRequest, PrGateStatus
+from startupai_controller.domain.models import (
+    OpenPullRequest,
+    PrGateStatus,
+    ReviewSnapshot,
+)
 
 
 class PullRequestPort(Protocol):
@@ -66,6 +70,15 @@ class PullRequestPort(Protocol):
         self, pr_refs: list[tuple[str, int]]
     ) -> dict[tuple[str, int], str]:
         """Return lightweight review-state digests keyed by (repo, pr_number)."""
+        ...
+
+    def review_snapshots(
+        self,
+        review_refs_by_pr: dict[tuple[str, int], tuple[str, ...]],
+        *,
+        trusted_codex_actors: frozenset[str],
+    ) -> dict[tuple[str, int], ReviewSnapshot]:
+        """Return typed review snapshots keyed by (repo, pr_number)."""
         ...
 
     def post_codex_verdict_if_missing(self, pr_url: str, session_id: str) -> bool:
