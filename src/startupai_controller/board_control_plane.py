@@ -17,13 +17,15 @@ from pathlib import Path
 
 
 from startupai_controller.board_automation import (
+    admission_summary_payload,
+    admit_backlog_items,
+    route_protected_queue_executors,
+)
+from startupai_controller.board_automation_config import (
     DEFAULT_AUTOMATION_CONFIG_PATH,
     DEFAULT_PROJECT_NUMBER,
     DEFAULT_PROJECT_OWNER,
-    admission_summary_payload,
-    admit_backlog_items,
     load_automation_config,
-    route_protected_queue_executors,
 )
 from startupai_controller.board_consumer import (
     ConsumerConfig,

@@ -35,16 +35,18 @@ from typing import Any, Callable
 
 
 from startupai_controller.board_automation import (
-    BoardAutomationConfig,
     admission_summary_payload,
     admit_backlog_items,
     mark_issues_done,
     _set_blocked_with_reason,
     claim_ready_issue,
-    load_automation_config,
     review_rescue,
     route_protected_queue_executors,
     sync_review_state,
+)
+from startupai_controller.board_automation_config import (
+    BoardAutomationConfig,
+    load_automation_config,
 )
 from startupai_controller.board_graph import (
     _ready_snapshot_rank,
