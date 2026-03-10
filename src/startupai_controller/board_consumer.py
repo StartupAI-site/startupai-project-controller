@@ -114,6 +114,7 @@ from startupai_controller.domain.resolution_policy import (
 from startupai_controller.domain.models import (
     ClaimReadyResult,
     CycleResult,
+    IssueSnapshot,
     OpenPullRequestMatch,
     IssueContext,
     RepairBranchReconcileOutcome,
@@ -3431,6 +3432,9 @@ def _recover_interrupted_sessions(
     db: ConsumerDB,
     *,
     automation_config: BoardAutomationConfig | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -3445,6 +3449,14 @@ def _recover_interrupted_sessions(
     except ConfigError as err:
         logger.error("Interrupted-session recovery skipped: %s", err)
         return recovered
+    effective_pr_port = pr_port or GitHubCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=cp_config,
+        gh_runner=gh_runner,
+    )
+    effective_review_state_port = review_state_port or effective_pr_port
+    effective_board_port = board_port or effective_pr_port
 
     for lease in recovered:
         try:
@@ -3457,6 +3469,7 @@ def _recover_interrupted_sessions(
                     number,
                     automation_config or load_automation_config(config.automation_config_path),
                     expected_branch=lease.branch_name,
+                    pr_port=effective_pr_port,
                     gh_runner=gh_runner,
                 )
             except GhQueryError:
@@ -3469,6 +3482,8 @@ def _recover_interrupted_sessions(
                     config.project_owner,
                     config.project_number,
                     from_statuses={"In Progress", "Review"},
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -3479,6 +3494,8 @@ def _recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -3489,6 +3506,8 @@ def _recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -3500,6 +3519,8 @@ def _recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     gh_runner=gh_runner,
                 )
         except (GhQueryError, Exception) as err:
@@ -3612,6 +3633,9 @@ def _prepare_cycle(
         auto_config,
         db,
         session_store=session_store,
+        pr_port=pr_port,
+        review_state_port=pr_port,
+        board_port=pr_port,
         board_snapshot=board_snapshot,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
@@ -3941,6 +3965,9 @@ def _reconcile_board_truth(
     db: ConsumerDB,
     *,
     session_store: SqliteSessionStore | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     dry_run: bool = False,
     board_snapshot: CycleBoardSnapshot | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
@@ -3963,19 +3990,29 @@ def _reconcile_board_truth(
     moved_in_progress: list[str] = []
     moved_review: list[str] = []
     moved_blocked: list[str] = []
+    effective_pr_port = pr_port or GitHubCliAdapter(
+        project_owner=consumer_config.project_owner,
+        project_number=consumer_config.project_number,
+        config=critical_path_config,
+        gh_runner=gh_runner,
+    )
+    effective_review_state_port = review_state_port or effective_pr_port
+    effective_board_port = board_port or effective_pr_port
+
+    def _issue_ref_for_snapshot(
+        snapshot: _ProjectItemSnapshot | IssueSnapshot,
+    ) -> str | None:
+        if isinstance(snapshot, IssueSnapshot):
+            return snapshot.issue_ref
+        return _snapshot_to_issue_ref(snapshot, critical_path_config)
 
     review_items = (
         board_snapshot.items_with_status("Review")
         if board_snapshot is not None
-        else _list_project_items_by_status(
-            "Review",
-            consumer_config.project_owner,
-            consumer_config.project_number,
-            gh_runner=gh_runner,
-        )
+        else effective_review_state_port.list_issues_by_status("Review")
     )
     for snapshot in review_items:
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
+        issue_ref = _issue_ref_for_snapshot(snapshot)
         if issue_ref is None:
             continue
         parsed = parse_issue_ref(issue_ref)
@@ -3992,6 +4029,8 @@ def _reconcile_board_truth(
                 critical_path_config,
                 consumer_config.project_owner,
                 consumer_config.project_number,
+                review_state_port=effective_review_state_port,
+                board_port=effective_board_port,
                 board_info_resolver=board_info_resolver,
                 board_mutator=board_mutator,
                 gh_runner=gh_runner,
@@ -4001,15 +4040,10 @@ def _reconcile_board_truth(
     in_progress = (
         board_snapshot.items_with_status("In Progress")
         if board_snapshot is not None
-        else _list_project_items_by_status(
-            "In Progress",
-            consumer_config.project_owner,
-            consumer_config.project_number,
-            gh_runner=gh_runner,
-        )
+        else effective_review_state_port.list_issues_by_status("In Progress")
     )
     for snapshot in in_progress:
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
+        issue_ref = _issue_ref_for_snapshot(snapshot)
         if issue_ref is None:
             continue
         parsed = parse_issue_ref(issue_ref)
@@ -4030,6 +4064,7 @@ def _reconcile_board_truth(
             number,
             automation_config,
             expected_branch=expected_branch,
+            pr_port=effective_pr_port,
             gh_runner=gh_runner,
         )
         # Domain policy: decide target status based on classification + session
@@ -4051,6 +4086,8 @@ def _reconcile_board_truth(
                     consumer_config.project_owner,
                     consumer_config.project_number,
                     from_statuses={"In Progress"},
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -4071,6 +4108,8 @@ def _reconcile_board_truth(
                     critical_path_config,
                     consumer_config.project_owner,
                     consumer_config.project_number,
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -4086,6 +4125,8 @@ def _reconcile_board_truth(
                 critical_path_config,
                 consumer_config.project_owner,
                 consumer_config.project_number,
+                review_state_port=effective_review_state_port,
+                board_port=effective_board_port,
                 gh_runner=gh_runner,
             )
         moved_blocked.append(issue_ref)

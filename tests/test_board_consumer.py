@@ -85,6 +85,7 @@ from startupai_controller.board_automation import (
     load_automation_config,
 )
 from startupai_controller.consumer_workflow import load_workflow_definition
+from startupai_controller.domain.models import IssueSnapshot
 from startupai_controller.board_io import CycleBoardSnapshot, GhCommandError, _ProjectItemSnapshot
 from startupai_controller.board_consumer import OpenPullRequestMatch
 from startupai_controller.consumer_db import ConsumerDB
@@ -3513,6 +3514,48 @@ class TestRunDaemonLoop:
         assert session is not None
         assert session.status == "aborted"
 
+    def test_recover_interrupted_sessions_uses_ports_for_ready_transition(
+        self, tmp_path: Path
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        session_id = db.create_session("crew#84", "codex")
+        db.acquire_lease("crew#84", session_id, now=datetime.now(timezone.utc))
+        db.update_session(
+            session_id,
+            status="running",
+            worktree_path="/tmp/wt",
+            branch_name="feat/84-test",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        auto_config = load_automation_config(config.automation_config_path)
+        statuses = {"crew#84": "In Progress"}
+        transitions: list[tuple[str, str]] = []
+
+        pr_port = SimpleNamespace(list_open_prs_for_issue=lambda *args, **kwargs: [])
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        recovered = _recover_interrupted_sessions(
+            config,
+            db,
+            automation_config=auto_config,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert [lease.issue_ref for lease in recovered] == ["crew#84"]
+        assert transitions == [("crew#84", "Ready")]
+        assert statuses["crew#84"] == "Ready"
+
     def test_recover_interrupted_repair_session_returns_ready_not_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3569,16 +3612,19 @@ class TestRunDaemonLoop:
         moved: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._list_project_items_by_status",
-            lambda status, *args, **kwargs: (
-                [_ProjectItemSnapshot("StartupAI-site/startupai-crew#84", "Review", "codex", "none", "P0")]
-                if status == "Review"
-                else []
-            ),
-        )
-        monkeypatch.setattr(
             "startupai_controller.board_consumer._transition_issue_to_in_progress",
             lambda issue_ref, *args, **kwargs: moved.append(issue_ref),
+        )
+        review_item = _ProjectItemSnapshot(
+            "StartupAI-site/startupai-crew#84",
+            "Review",
+            "codex",
+            "none",
+            "P0",
+        )
+        board_snapshot = CycleBoardSnapshot(
+            items=(review_item,),
+            by_status={"Review": (review_item,)},
         )
 
         result = _reconcile_board_truth(
@@ -3586,10 +3632,68 @@ class TestRunDaemonLoop:
             cp_config,
             auto_config,
             db,
+            board_snapshot=board_snapshot,
         )
 
         assert result.moved_in_progress == ("crew#84",)
         assert moved == ["crew#84"]
+
+    def test_reconcile_board_truth_uses_ports_for_active_repair(
+        self, tmp_path: Path
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        session_id = db.create_session(
+            "crew#84",
+            "crew",
+            slot_id=1,
+            session_kind="repair",
+            repair_pr_url="https://github.com/O/R/pull/10",
+        )
+        db.acquire_lease("crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc))
+        db.update_session(session_id, status="running", slot_id=1, phase="running")
+        cp_config = load_config(config.critical_paths_path)
+        auto_config = load_automation_config(config.automation_config_path)
+        statuses = {"crew#84": "Review"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            list_issues_by_status=lambda status: (
+                [
+                    IssueSnapshot(
+                        issue_ref="crew#84",
+                        status="Review",
+                        executor="codex",
+                        priority="P0",
+                        title="Test issue",
+                        item_id="ITEM",
+                        project_id="PROJ",
+                    )
+                ]
+                if status == "Review"
+                else []
+            ),
+            get_issue_status=lambda issue_ref: statuses[issue_ref],
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        result = _reconcile_board_truth(
+            config,
+            cp_config,
+            auto_config,
+            db,
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert result.moved_in_progress == ("crew#84",)
+        assert transitions == [("crew#84", "In Progress")]
+        assert statuses["crew#84"] == "In Progress"
 
     def test_loop_calls_sleep_and_can_be_stopped(self, tmp_path: Path) -> None:
         config = _make_consumer_config(tmp_path)
