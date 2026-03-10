@@ -5584,94 +5584,174 @@ def _prepare_selected_launch_candidate(
             None,
         )
     except GhQueryError as err:
-        _record_metric(
-            db,
-            config,
-            "context_hydration_failed",
-            issue_ref=candidate,
-            payload={"reason": gh_reason_code(err), "detail": str(err)},
-        )
-        if _maybe_activate_claim_suppression(
-            db,
-            config,
-            scope="hydration",
-            error=err,
-        ):
-            return None, CycleResult(
-                action="idle",
-                issue_ref=candidate,
-                reason="claim-suppressed:hydration",
-            )
-        _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
-        return None, CycleResult(
-            action="error",
-            issue_ref=candidate,
-            reason=f"launch-prep:{err}",
+        return _handle_selected_launch_query_error(
+            candidate=candidate,
+            err=err,
+            config=config,
+            db=db,
         )
     except WorkflowConfigError as err:
-        _block_prelaunch_issue(
-            candidate,
-            f"workflow-config:{err}",
+        return _handle_selected_launch_workflow_config_error(
+            candidate=candidate,
+            err=err,
             config=config,
-            cp_config=prepared.cp_config,
             db=db,
+            cp_config=prepared.cp_config,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             gh_runner=gh_runner,
-        )
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": "workflow_config_error", "detail": str(err)},
-        )
-        return None, CycleResult(
-            action="error",
-            issue_ref=candidate,
-            reason=f"workflow-config:{err}",
         )
     except WorktreePrepareError as err:
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": err.reason_code, "detail": err.detail},
-        )
-        reason = (
-            err.detail
-            if err.reason_code == "repair_reconcile_error"
-            else f"{err.reason_code}:{err.detail}"
-        )
-        return None, CycleResult(
-            action="error",
-            issue_ref=candidate,
-            reason=reason,
+        return _handle_selected_launch_worktree_error(
+            candidate=candidate,
+            err=err,
+            config=config,
+            db=db,
         )
     except RuntimeError as err:
-        _block_prelaunch_issue(
-            candidate,
-            f"workflow-hook:{err}",
+        return _handle_selected_launch_runtime_error(
+            candidate=candidate,
+            err=err,
             config=config,
-            cp_config=prepared.cp_config,
             db=db,
+            cp_config=prepared.cp_config,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": "workflow_hook_error", "detail": str(err)},
-        )
+
+
+def _handle_selected_launch_query_error(
+    *,
+    candidate: str,
+    err: GhQueryError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+) -> tuple[None, CycleResult]:
+    """Handle GitHub/query failures during selected launch preparation."""
+    _record_metric(
+        db,
+        config,
+        "context_hydration_failed",
+        issue_ref=candidate,
+        payload={"reason": gh_reason_code(err), "detail": str(err)},
+    )
+    if _maybe_activate_claim_suppression(
+        db,
+        config,
+        scope="hydration",
+        error=err,
+    ):
         return None, CycleResult(
-            action="error",
+            action="idle",
             issue_ref=candidate,
-            reason=f"workflow-hook:{err}",
+            reason="claim-suppressed:hydration",
         )
+    _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=f"launch-prep:{err}",
+    )
+
+
+def _handle_selected_launch_workflow_config_error(
+    *,
+    candidate: str,
+    err: WorkflowConfigError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[None, CycleResult]:
+    """Handle invalid workflow configuration during launch preparation."""
+    _block_prelaunch_issue(
+        candidate,
+        f"workflow-config:{err}",
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "workflow_config_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=f"workflow-config:{err}",
+    )
+
+
+def _handle_selected_launch_worktree_error(
+    *,
+    candidate: str,
+    err: WorktreePrepareError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+) -> tuple[None, CycleResult]:
+    """Handle worktree preparation failures for a selected launch candidate."""
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": err.reason_code, "detail": err.detail},
+    )
+    reason = (
+        err.detail
+        if err.reason_code == "repair_reconcile_error"
+        else f"{err.reason_code}:{err.detail}"
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=reason,
+    )
+
+
+def _handle_selected_launch_runtime_error(
+    *,
+    candidate: str,
+    err: RuntimeError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[None, CycleResult]:
+    """Handle workflow-hook runtime failures during launch preparation."""
+    _block_prelaunch_issue(
+        candidate,
+        f"workflow-hook:{err}",
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "workflow_hook_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=f"workflow-hook:{err}",
+    )
 
 
 def _resolve_launch_context_for_cycle(
