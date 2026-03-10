@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from startupai_controller.adapters.github_cli import GitHubCliAdapter
+from startupai_controller.adapters.github_cli import (
+    GitHubCliAdapter,
+    _query_latest_non_automation_comment_timestamp,
+    _query_latest_wip_activity_timestamp,
+    _query_issue_assignees,
+    _set_issue_assignees,
+    build_cycle_board_snapshot,
+    clear_cycle_board_snapshot_cache,
+)
 from startupai_controller.domain.models import IssueContext, IssueSnapshot
 
 
@@ -470,3 +479,143 @@ def test_post_codex_verdict_if_missing_checks_marker_first(monkeypatch) -> None:
     assert poster_calls[0][0:3] == ("StartupAI-site", "startupai-crew", 42)
     assert "<!-- startupai-board-bot:codex-verdict:session=session-123 -->" in poster_calls[0][3]
     assert "codex-review: pass" in poster_calls[0][3]
+
+
+def test_build_cycle_board_snapshot_uses_adapter_owned_cache(monkeypatch) -> None:
+    clear_cycle_board_snapshot_cache()
+    calls = {"count": 0}
+
+    payload = {
+        "data": {
+            "organization": {
+                "projectV2": {
+                    "id": "PVT_x",
+                    "items": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": ""},
+                        "nodes": [
+                            {
+                                "id": "PVTI_x",
+                                "statusField": {"name": "Ready"},
+                                "executorField": {"name": "codex"},
+                                "handoffField": {"name": "none"},
+                                "priorityField": {"name": "P1"},
+                                "sprintField": {"name": "S1"},
+                                "agentField": {"name": "frontend-dev"},
+                                "ownerField": {"text": "codex:local-consumer"},
+                                "content": {
+                                    "number": 84,
+                                    "title": "Test issue",
+                                    "updatedAt": "2026-03-09T10:00:00Z",
+                                    "repository": {
+                                        "name": "startupai-crew",
+                                        "nameWithOwner": "StartupAI-site/startupai-crew",
+                                        "owner": {"login": "StartupAI-site"},
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                }
+            }
+        }
+    }
+
+    def fake_run_gh(args, *, gh_runner=None, operation_type="query"):
+        calls["count"] += 1
+        return json.dumps(payload)
+
+    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+
+    first = build_cycle_board_snapshot("StartupAI-site", 1)
+    second = build_cycle_board_snapshot("StartupAI-site", 1)
+
+    assert len(first.items) == 1
+    assert len(second.items) == 1
+    assert calls["count"] == 1
+
+    clear_cycle_board_snapshot_cache()
+    third = build_cycle_board_snapshot("StartupAI-site", 1)
+    assert len(third.items) == 1
+    assert calls["count"] == 2
+
+
+def test_query_latest_non_automation_comment_timestamp_filters_markers_and_bots(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._query_issue_comments",
+        lambda owner, repo, number, gh_runner=None: [
+            {
+                "body": "<!-- startupai-board-bot:marker -->",
+                "updated_at": "2026-03-10T10:00:00Z",
+                "user": {"login": "codex-bot"},
+            },
+            {
+                "body": "Human note",
+                "updated_at": "2026-03-10T11:00:00Z",
+                "user": {"login": "chris"},
+            },
+        ],
+    )
+
+    latest = _query_latest_non_automation_comment_timestamp(
+        "StartupAI-site",
+        "startupai-crew",
+        42,
+    )
+
+    assert latest == datetime(2026, 3, 10, 11, 0, tzinfo=timezone.utc)
+
+
+def test_query_latest_wip_activity_timestamp_uses_latest_signal(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._query_open_pr_updated_at",
+        lambda *args, **kwargs: datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._query_latest_non_automation_comment_timestamp",
+        lambda *args, **kwargs: datetime(2026, 3, 10, 11, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._query_latest_matching_comment_timestamp",
+        lambda *args, **kwargs: datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc),
+    )
+
+    latest = _query_latest_wip_activity_timestamp(
+        "crew#42",
+        "StartupAI-site",
+        "startupai-crew",
+        42,
+        "https://github.com/StartupAI-site/startupai-crew/pull/7",
+    )
+
+    assert latest == datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+
+
+def test_issue_assignee_helpers_use_adapter_owned_mechanism(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args, *, gh_runner=None, operation_type="query"):
+        calls.append(args)
+        if "-X" in args:
+            return ""
+        return "alice\nbob\n"
+
+    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+
+    assignees = _query_issue_assignees("StartupAI-site", "startupai-crew", 42)
+    _set_issue_assignees(
+        "StartupAI-site",
+        "startupai-crew",
+        42,
+        ["alice", "bob"],
+    )
+
+    assert assignees == ["alice", "bob"]
+    assert calls[0][0:3] == ["api", "repos/StartupAI-site/startupai-crew/issues/42", "-q"]
+    assert calls[1][0:4] == [
+        "api",
+        "repos/StartupAI-site/startupai-crew/issues/42",
+        "-X",
+        "PATCH",
+    ]

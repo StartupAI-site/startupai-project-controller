@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 import hashlib
 import json
 import re
@@ -22,6 +23,7 @@ from startupai_controller.domain.verdict_policy import (
     verdict_comment_body,
     verdict_marker_text,
 )
+from startupai_controller.domain.repair_policy import MARKER_PREFIX
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     GhQueryError,
@@ -34,38 +36,24 @@ from startupai_controller.board_io import (  # noqa: F401
     LinkedIssue,
     PullRequestViewPayload,
     _ProjectItemSnapshot,
-    _comment_activity_timestamp,
     _is_automation_login,
     _is_copilot_coding_agent_actor,
     _is_pr_open,
     _issue_ref_to_repo_parts,
-    _list_project_items,
-    _list_project_items_by_status,
     _marker_for,
     _parse_github_timestamp,
     _parse_pr_url,
     _query_failed_check_runs,
-    _query_issue_assignees,
-    _query_issue_comments,
-    _query_issue_updated_at,
-    _query_latest_marker_timestamp,
-    _query_latest_matching_comment_timestamp,
-    _query_latest_non_automation_comment_timestamp,
-    _query_latest_wip_activity_timestamp,
-    _query_open_pr_updated_at,
     _query_pr_head_sha,
     _query_project_item_field,
     _query_single_select_field_option,
     _repo_to_prefix,
     _run_gh,
-    _set_issue_assignees,
     _set_text_field,
     _set_single_select_field,
     _set_status_if_changed,
     _snapshot_to_issue_ref,
-    build_cycle_board_snapshot,
     build_pr_gate_status_from_payload,
-    clear_cycle_board_snapshot_cache,
     close_issue,
     close_pull_request,
     gh_reason_code,
@@ -125,6 +113,13 @@ class _PullRequestStateProbe:
     status_check_rollup: tuple[dict[str, Any], ...] = ()
 
 
+_BOARD_SNAPSHOT_CACHE_TTL_SECONDS = 15
+_cycle_board_snapshot_cache: dict[
+    tuple[str, int, int],
+    tuple[float, CycleBoardSnapshot],
+] = {}
+
+
 def _extract_run_id(details_url: str) -> int | None:
     """Extract a GitHub Actions run ID from a details URL when present."""
     match = re.search(r"/actions/runs/(\d+)", details_url)
@@ -171,6 +166,284 @@ def _latest_node_timestamp(nodes: Sequence[dict[str, Any]], *keys: str) -> str:
             if value:
                 timestamps.append(value)
     return max(timestamps) if timestamps else ""
+
+
+def _query_issue_comments(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[dict]:
+    """Fetch issue comments as parsed JSON objects."""
+    output = _run_gh(
+        [
+            "api",
+            f"repos/{owner}/{repo}/issues/{number}/comments",
+            "--paginate",
+            "--slurp",
+        ],
+        gh_runner=gh_runner,
+    )
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise GhQueryError(
+            f"Invalid comments payload for {owner}/{repo}#{number}."
+        ) from error
+
+    comments: list[dict] = []
+    if isinstance(payload, list):
+        for entry in payload:
+            if isinstance(entry, list):
+                comments.extend(
+                    comment for comment in entry if isinstance(comment, dict)
+                )
+            elif isinstance(entry, dict):
+                comments.append(entry)
+    return comments
+
+
+def _comment_activity_timestamp(comment: dict) -> datetime | None:
+    """Return the best activity timestamp from a GitHub issue comment payload."""
+    return _parse_github_timestamp(
+        str(comment.get("updated_at") or comment.get("created_at") or "")
+    )
+
+
+def _query_latest_matching_comment_timestamp(
+    owner: str,
+    repo: str,
+    number: int,
+    markers: Sequence[str],
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> datetime | None:
+    """Return the latest timestamp for comments containing any marker fragment."""
+    try:
+        comments = _query_issue_comments(owner, repo, number, gh_runner=gh_runner)
+    except GhQueryError:
+        return None
+
+    latest: datetime | None = None
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if not any(marker in body for marker in markers):
+            continue
+        ts = _comment_activity_timestamp(comment)
+        if ts is None:
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
+
+def _query_latest_non_automation_comment_timestamp(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> datetime | None:
+    """Return latest issue-comment timestamp from a non-automation actor."""
+    try:
+        comments = _query_issue_comments(owner, repo, number, gh_runner=gh_runner)
+    except GhQueryError:
+        return None
+
+    latest: datetime | None = None
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if MARKER_PREFIX in body:
+            continue
+        user = comment.get("user") or {}
+        login = str(user.get("login") or "")
+        if _is_automation_login(login):
+            continue
+        ts = _comment_activity_timestamp(comment)
+        if ts is None:
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
+
+def _query_latest_marker_timestamp(
+    owner: str,
+    repo: str,
+    number: int,
+    marker_prefix: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> datetime | None:
+    """Return most recent marker timestamp encoded in issue comments."""
+    try:
+        comments = _run_gh(
+            [
+                "api",
+                f"repos/{owner}/{repo}/issues/{number}/comments",
+                "--paginate",
+                "-q",
+                ".[].body",
+            ],
+            gh_runner=gh_runner,
+        )
+    except GhQueryError:
+        return None
+
+    pattern = re.compile(
+        rf"{re.escape(marker_prefix)}:([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T"
+        rf"[0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}}Z)"
+    )
+    latest: datetime | None = None
+    for match in pattern.finditer(comments):
+        raw = match.group(1)
+        try:
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
+
+def _query_issue_updated_at(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> datetime:
+    """Get issue updated_at timestamp (UTC)."""
+    output = _run_gh(
+        [
+            "api",
+            f"repos/{owner}/{repo}/issues/{number}",
+            "-q",
+            ".updated_at",
+        ],
+        gh_runner=gh_runner,
+    ).strip()
+    try:
+        return datetime.fromisoformat(output.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise GhQueryError(
+            f"Invalid updated_at for {owner}/{repo}#{number}: {output}"
+        ) from error
+
+
+def _query_open_pr_updated_at(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> datetime | None:
+    """Return updated_at for an open PR, or None when closed/unavailable."""
+    try:
+        output = _run_gh(
+            [
+                "api",
+                f"repos/{owner}/{repo}/pulls/{pr_number}",
+                "--jq",
+                "{state: .state, updated_at: .updated_at}",
+            ],
+            gh_runner=gh_runner,
+        )
+    except GhQueryError:
+        return None
+
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+
+    if str(payload.get("state") or "").upper() != "OPEN":
+        return None
+    return _parse_github_timestamp(str(payload.get("updated_at") or ""))
+
+
+def _query_latest_wip_activity_timestamp(
+    issue_ref: str,
+    owner: str,
+    repo: str,
+    number: int,
+    pr_field: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> datetime | None:
+    """Return latest execution-relevant activity for a WIP issue."""
+    candidates: list[datetime] = []
+
+    parsed_pr = _parse_pr_url(pr_field)
+    if parsed_pr is not None:
+        pr_owner, pr_repo, pr_number = parsed_pr
+        pr_ts = _query_open_pr_updated_at(
+            pr_owner, pr_repo, pr_number, gh_runner=gh_runner
+        )
+        if pr_ts is not None:
+            candidates.append(pr_ts)
+
+    comment_ts = _query_latest_non_automation_comment_timestamp(
+        owner, repo, number, gh_runner=gh_runner
+    )
+    if comment_ts is not None:
+        candidates.append(comment_ts)
+
+    baseline_ts = _query_latest_matching_comment_timestamp(
+        owner,
+        repo,
+        number,
+        (
+            f"{MARKER_PREFIX}:claim-ready:{issue_ref}",
+            f"{MARKER_PREFIX}:dispatch-agent:{issue_ref}",
+        ),
+        gh_runner=gh_runner,
+    )
+    if baseline_ts is not None:
+        candidates.append(baseline_ts)
+
+    return max(candidates) if candidates else None
+
+
+def _query_issue_assignees(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[str]:
+    """Fetch current assignee logins for an issue."""
+    output = _run_gh(
+        [
+            "api",
+            f"repos/{owner}/{repo}/issues/{number}",
+            "-q",
+            ".assignees[].login",
+        ],
+        gh_runner=gh_runner,
+    )
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _set_issue_assignees(
+    owner: str,
+    repo: str,
+    number: int,
+    assignees: list[str],
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Set issue assignees explicitly."""
+    args = [
+        "api",
+        f"repos/{owner}/{repo}/issues/{number}",
+        "-X",
+        "PATCH",
+    ]
+    for login in assignees:
+        args.extend(["-f", f"assignees[]={login}"])
+    _run_gh(args, gh_runner=gh_runner)
 
 
 def _pull_request_state_probe_from_payload(
@@ -1656,6 +1929,397 @@ query($owner: String!, $number: Int!, $cursor: String) {
             handoff_to=field("Handoff To"),
             blocked_reason=field("Blocked Reason"),
         )
+
+
+def _list_project_items_by_status(
+    status: str,
+    project_owner: str,
+    project_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[_ProjectItemSnapshot]:
+    """List board items in a target status."""
+    query = """
+query($owner: String!, $number: Int!, $cursor: String) {
+  organization(login: $owner) {
+    projectV2(number: $number) {
+      id
+      items(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          executorField: fieldValueByName(name: "Executor") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          handoffField: fieldValueByName(name: "Handoff To") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          priorityField: fieldValueByName(name: "Priority") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          content {
+            ... on Issue {
+              number
+              repository { nameWithOwner }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+    items: list[_ProjectItemSnapshot] = []
+    cursor = ""
+    has_next = True
+
+    while has_next:
+        gh_args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={project_owner}",
+            "-F",
+            f"number={project_number}",
+        ]
+        gh_args.extend(["-f", f"cursor={cursor}" if cursor else "cursor="])
+        output = _run_gh(gh_args, gh_runner=gh_runner)
+
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise GhQueryError("Failed listing project items: invalid JSON.") from error
+
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            messages = [
+                err.get("message", "unknown GraphQL error")
+                for err in errors
+                if isinstance(err, dict)
+            ]
+            joined = "; ".join(messages) if messages else "unknown GraphQL error"
+            raise GhQueryError(f"Failed listing project items: {joined}")
+
+        project_data = payload.get("data", {}).get("organization", {}).get("projectV2", {})
+        project_id = str(project_data.get("id") or "")
+        items_data = project_data.get("items", {})
+        page_info = items_data.get("pageInfo", {})
+        has_next = bool(page_info.get("hasNextPage", False))
+        cursor = str(page_info.get("endCursor") or "")
+
+        for node in items_data.get("nodes", []):
+            node_status = ((node.get("fieldValueByName") or {}).get("name") or "")
+            if node_status != status:
+                continue
+            content = node.get("content") or {}
+            issue_number = content.get("number")
+            repo_with_owner = (content.get("repository") or {}).get("nameWithOwner", "")
+            if not issue_number or not repo_with_owner:
+                continue
+            items.append(
+                _ProjectItemSnapshot(
+                    issue_ref=f"{repo_with_owner}#{issue_number}",
+                    status=node_status,
+                    executor=str((node.get("executorField") or {}).get("name") or ""),
+                    handoff_to=str((node.get("handoffField") or {}).get("name") or ""),
+                    priority=str((node.get("priorityField") or {}).get("name") or ""),
+                    item_id=str(node.get("id") or ""),
+                    project_id=project_id,
+                    repo_slug=repo_with_owner,
+                    issue_number=int(issue_number),
+                )
+            )
+    return items
+
+
+def build_cycle_board_snapshot(
+    project_owner: str,
+    project_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> CycleBoardSnapshot:
+    """Build one thin board snapshot for a consumer/control-plane cycle."""
+    cache_key = (project_owner, project_number, id(gh_runner) if gh_runner is not None else 0)
+    now_monotonic = time.monotonic()
+    cached = _cycle_board_snapshot_cache.get(cache_key)
+    if cached is not None:
+        expires_at, snapshot = cached
+        if expires_at > now_monotonic:
+            return snapshot
+    query = """
+query($owner: String!, $number: Int!, $cursor: String) {
+  organization(login: $owner) {
+    projectV2(number: $number) {
+      id
+      items(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          statusField: fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          executorField: fieldValueByName(name: "Executor") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          handoffField: fieldValueByName(name: "Handoff To") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          priorityField: fieldValueByName(name: "Priority") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          sprintField: fieldValueByName(name: "Sprint") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          agentField: fieldValueByName(name: "Agent") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          ownerField: fieldValueByName(name: "Owner") {
+            ... on ProjectV2ItemFieldTextValue { text }
+          }
+          content {
+            ... on Issue {
+              number
+              title
+              updatedAt
+              repository {
+                name
+                nameWithOwner
+                owner { login }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+    items: list[_ProjectItemSnapshot] = []
+    cursor = ""
+    has_next = True
+
+    while has_next:
+        gh_args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={project_owner}",
+            "-F",
+            f"number={project_number}",
+        ]
+        gh_args.extend(["-f", f"cursor={cursor}" if cursor else "cursor="])
+        output = _run_gh(gh_args, gh_runner=gh_runner)
+
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise GhQueryError("Failed listing project items: invalid JSON.") from error
+
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            messages = [
+                err.get("message", "unknown GraphQL error")
+                for err in errors
+                if isinstance(err, dict)
+            ]
+            joined = "; ".join(messages) if messages else "unknown GraphQL error"
+            raise GhQueryError(f"Failed listing project items: {joined}")
+
+        project_data = payload.get("data", {}).get("organization", {}).get("projectV2", {})
+        project_id = str(project_data.get("id") or "")
+        items_data = project_data.get("items", {})
+        page_info = items_data.get("pageInfo", {})
+        has_next = bool(page_info.get("hasNextPage", False))
+        cursor = str(page_info.get("endCursor") or "")
+
+        for node in items_data.get("nodes", []):
+            content = node.get("content") or {}
+            issue_number = content.get("number")
+            repo = content.get("repository") or {}
+            repo_with_owner = str(repo.get("nameWithOwner") or "")
+            repo_name = str(repo.get("name") or "")
+            repo_owner = str((repo.get("owner") or {}).get("login") or "")
+            if not issue_number or not repo_with_owner:
+                continue
+            items.append(
+                _ProjectItemSnapshot(
+                    issue_ref=f"{repo_with_owner}#{issue_number}",
+                    status=str((node.get("statusField") or {}).get("name") or ""),
+                    executor=str((node.get("executorField") or {}).get("name") or ""),
+                    handoff_to=str((node.get("handoffField") or {}).get("name") or ""),
+                    priority=str((node.get("priorityField") or {}).get("name") or ""),
+                    item_id=str(node.get("id") or ""),
+                    project_id=project_id,
+                    sprint=str((node.get("sprintField") or {}).get("name") or ""),
+                    agent=str((node.get("agentField") or {}).get("name") or ""),
+                    owner_field=str((node.get("ownerField") or {}).get("text") or ""),
+                    title=str(content.get("title") or ""),
+                    repo_slug=repo_with_owner,
+                    repo_name=repo_name,
+                    repo_owner=repo_owner,
+                    issue_number=int(issue_number),
+                    issue_updated_at=str(content.get("updatedAt") or ""),
+                )
+            )
+
+    by_status: dict[str, list[_ProjectItemSnapshot]] = {}
+    for item in items:
+        by_status.setdefault(item.status, []).append(item)
+
+    snapshot = CycleBoardSnapshot(
+        items=tuple(items),
+        by_status={status: tuple(group) for status, group in by_status.items()},
+    )
+    _cycle_board_snapshot_cache[cache_key] = (
+        now_monotonic + _BOARD_SNAPSHOT_CACHE_TTL_SECONDS,
+        snapshot,
+    )
+    return snapshot
+
+
+def clear_cycle_board_snapshot_cache() -> None:
+    """Clear the process-local thin board snapshot cache."""
+    _cycle_board_snapshot_cache.clear()
+
+
+def _list_project_items(
+    project_owner: str,
+    project_number: int,
+    *,
+    statuses: set[str] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[_ProjectItemSnapshot]:
+    """List issue-backed project items with richer field snapshots."""
+    query = """
+query($owner: String!, $number: Int!, $cursor: String) {
+  organization(login: $owner) {
+    projectV2(number: $number) {
+      id
+      items(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          statusField: fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          executorField: fieldValueByName(name: "Executor") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          handoffField: fieldValueByName(name: "Handoff To") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          priorityField: fieldValueByName(name: "Priority") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          sprintField: fieldValueByName(name: "Sprint") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          agentField: fieldValueByName(name: "Agent") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          ownerField: fieldValueByName(name: "Owner") {
+            ... on ProjectV2ItemFieldTextValue { text }
+          }
+          content {
+            ... on Issue {
+              number
+              title
+              body
+              repository {
+                name
+                nameWithOwner
+                owner { login }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+    items: list[_ProjectItemSnapshot] = []
+    cursor = ""
+    has_next = True
+
+    while has_next:
+        gh_args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={project_owner}",
+            "-F",
+            f"number={project_number}",
+        ]
+        gh_args.extend(["-f", f"cursor={cursor}" if cursor else "cursor="])
+        output = _run_gh(gh_args, gh_runner=gh_runner)
+
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise GhQueryError("Failed listing project items: invalid JSON.") from error
+
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            messages = [
+                err.get("message", "unknown GraphQL error")
+                for err in errors
+                if isinstance(err, dict)
+            ]
+            joined = "; ".join(messages) if messages else "unknown GraphQL error"
+            raise GhQueryError(f"Failed listing project items: {joined}")
+
+        project_data = payload.get("data", {}).get("organization", {}).get("projectV2", {})
+        project_id = str(project_data.get("id") or "")
+        items_data = project_data.get("items", {})
+        page_info = items_data.get("pageInfo", {})
+        has_next = bool(page_info.get("hasNextPage", False))
+        cursor = str(page_info.get("endCursor") or "")
+
+        for node in items_data.get("nodes", []):
+            status = str((node.get("statusField") or {}).get("name") or "")
+            if statuses is not None and status not in statuses:
+                continue
+            content = node.get("content") or {}
+            issue_number = content.get("number")
+            repo = content.get("repository") or {}
+            repo_with_owner = str(repo.get("nameWithOwner") or "")
+            repo_name = str(repo.get("name") or "")
+            repo_owner = str((repo.get("owner") or {}).get("login") or "")
+            if not issue_number or not repo_with_owner:
+                continue
+            items.append(
+                _ProjectItemSnapshot(
+                    issue_ref=f"{repo_with_owner}#{issue_number}",
+                    status=status,
+                    executor=str((node.get("executorField") or {}).get("name") or ""),
+                    handoff_to=str((node.get("handoffField") or {}).get("name") or ""),
+                    priority=str((node.get("priorityField") or {}).get("name") or ""),
+                    item_id=str(node.get("id") or ""),
+                    project_id=project_id,
+                    sprint=str((node.get("sprintField") or {}).get("name") or ""),
+                    agent=str((node.get("agentField") or {}).get("name") or ""),
+                    owner_field=str((node.get("ownerField") or {}).get("text") or ""),
+                    title=str(content.get("title") or ""),
+                    body=str(content.get("body") or ""),
+                    repo_slug=repo_with_owner,
+                    repo_name=repo_name,
+                    repo_owner=repo_owner,
+                    issue_number=int(issue_number),
+                )
+            )
+    return items
 
 
 def query_open_pull_requests(
