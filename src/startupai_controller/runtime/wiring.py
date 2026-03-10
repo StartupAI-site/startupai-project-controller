@@ -13,6 +13,10 @@ import subprocess
 
 from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.github_cli import CycleGitHubMemo, GitHubCliAdapter
+from startupai_controller.adapters.review_state import (
+    GitHubReviewStateAdapter,
+    clear_cycle_board_snapshot_cache,
+)
 from startupai_controller.adapters.local_process import LocalProcessAdapter
 from startupai_controller.adapters.sqlite_store import ConsumerDB, SqliteSessionStore
 from startupai_controller.ports.board_mutations import BoardMutationPort
@@ -52,6 +56,13 @@ def build_github_port_bundle(
         github_memo=memo,
         gh_runner=gh_runner,
     )
+    review_state_adapter = GitHubReviewStateAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        github_memo=memo,
+        gh_runner=gh_runner,
+    )
     board_mutation_adapter = GitHubBoardMutationAdapter(
         project_owner=project_owner,
         project_number=project_number,
@@ -61,7 +72,7 @@ def build_github_port_bundle(
     )
     return GitHubPortBundle(
         pull_requests=pr_adapter,
-        review_state=pr_adapter,
+        review_state=review_state_adapter,
         board_mutations=board_mutation_adapter,
         issue_context=pr_adapter,
         github_memo=memo,
@@ -83,3 +94,8 @@ def build_worktree_port(
         gh_runner=gh_runner,
         subprocess_runner=subprocess_runner,
     )
+
+
+def clear_github_runtime_caches() -> None:
+    """Clear short-lived GitHub adapter caches owned by the runtime boundary."""
+    clear_cycle_board_snapshot_cache()

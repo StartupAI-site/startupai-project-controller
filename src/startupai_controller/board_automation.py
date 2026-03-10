@@ -45,25 +45,22 @@ else:
     _ReviewStatePort = None  # runtime: structural typing, no import needed
 
 
-from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
+from startupai_controller.adapters.github_types import (
     COPILOT_CODING_AGENT_LOGINS,
     CycleBoardSnapshot,
     CycleGitHubMemo,
-    _ProjectItemSnapshot,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
     LinkedIssue,
     CodexReviewVerdict,
     PullRequestViewPayload,
-    _parse_github_timestamp,
-    _is_automation_login,
+)
+from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     _is_copilot_coding_agent_actor,
     _repo_to_prefix,
     _issue_ref_to_repo_parts,
     _snapshot_to_issue_ref,
     _marker_for,
-    _comment_exists,
     _post_comment,
-    _comment_activity_timestamp,
-    _query_latest_non_automation_comment_timestamp,
     _query_latest_marker_timestamp,
     _query_project_item_field,
     _set_text_field,
@@ -71,7 +68,6 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     _set_single_select_field,
     _set_status_if_changed,
     _list_project_items,
-    _list_project_items_by_status,
     _query_issue_updated_at,
     _query_open_pr_updated_at,
     _query_latest_wip_activity_timestamp,
@@ -92,7 +88,6 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     _query_pr_head_sha,
     close_issue,
     close_pull_request,
-    list_issue_comment_bodies,
     memoized_query_issue_body,
     rerun_actions_run,
 )
@@ -223,6 +218,67 @@ def _default_board_mutation_port(
         config=config,
         gh_runner=gh_runner,
     ).board_mutations
+
+
+def _comment_exists(
+    owner: str,
+    repo: str,
+    number: int,
+    marker: str,
+    *,
+    review_state_port: _ReviewStatePort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> bool:
+    """Compatibility helper that checks marker presence through ReviewStatePort."""
+    port = review_state_port or build_github_port_bundle(
+        project_owner,
+        project_number,
+        config=config,
+        gh_runner=gh_runner,
+    ).review_state
+    return port.comment_exists(f"{owner}/{repo}", number, marker)
+
+
+def list_issue_comment_bodies(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    review_state_port: _ReviewStatePort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[str, ...]:
+    """Compatibility helper that loads issue comment bodies through ReviewStatePort."""
+    port = review_state_port or build_github_port_bundle(
+        project_owner,
+        project_number,
+        config=config,
+        gh_runner=gh_runner,
+    ).review_state
+    return port.list_issue_comment_bodies(f"{owner}/{repo}", number)
+
+
+def _list_project_items_by_status(
+    status: str,
+    project_owner: str,
+    project_number: int,
+    *,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[_ProjectItemSnapshot]:
+    """Compatibility helper that reads board status groups through ReviewStatePort."""
+    port = build_github_port_bundle(
+        project_owner,
+        project_number,
+        config=config,
+        gh_runner=gh_runner,
+    ).review_state
+    return list(port.build_board_snapshot().items_with_status(status))
 
 
 # ---------------------------------------------------------------------------

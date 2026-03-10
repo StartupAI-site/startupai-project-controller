@@ -9,7 +9,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from startupai_controller.domain.models import IssueFields, IssueSnapshot
+from startupai_controller.domain.models import (
+    CycleBoardSnapshot,
+    IssueFields,
+    IssueSnapshot,
+)
 
 
 class ReviewStatePort(Protocol):
@@ -46,4 +50,12 @@ class ReviewStatePort(Protocol):
         markers: tuple[str, ...],
     ) -> datetime | None:
         """Return the latest timestamp for comments containing any marker."""
+        ...
+
+    def comment_exists(self, repo: str, issue_number: int, marker: str) -> bool:
+        """Return True when a marker comment already exists for the issue or PR."""
+        ...
+
+    def build_board_snapshot(self) -> CycleBoardSnapshot:
+        """Return the thin board snapshot for the current project."""
         ...

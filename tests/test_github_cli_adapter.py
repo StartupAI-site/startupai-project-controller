@@ -12,7 +12,6 @@ from startupai_controller.adapters.github_cli import (
     _query_failed_check_runs,
     _query_pr_head_sha,
     _query_issue_board_info,
-    _query_latest_non_automation_comment_timestamp,
     _query_latest_wip_activity_timestamp,
     _query_issue_assignees,
     _query_project_item_field,
@@ -24,9 +23,13 @@ from startupai_controller.adapters.github_cli import (
     _set_single_select_field,
     _set_status_if_changed,
     _set_text_field,
+    memoized_query_issue_body,
+)
+from startupai_controller.adapters.review_state import (
+    GitHubReviewStateAdapter,
+    _query_latest_non_automation_comment_timestamp,
     build_cycle_board_snapshot,
     clear_cycle_board_snapshot_cache,
-    memoized_query_issue_body,
 )
 from startupai_controller.domain.models import IssueContext, IssueSnapshot
 
@@ -205,7 +208,7 @@ def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
         calls.append(args)
         return json.dumps({"items": [{"number": 84}, {"number": 85}]})
 
-    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
     numbers = adapter.search_open_issue_numbers_with_comment_marker(
@@ -223,12 +226,14 @@ def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
 
 def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(monkeypatch) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._query_issue_comments",
-        lambda owner, repo, number, gh_runner=None: [
-            {"body": "first"},
-            {"body": "second"},
-            {"body": ""},
-        ],
+        "startupai_controller.adapters.github_base._run_gh",
+        lambda args, gh_runner=None, operation_type="query": json.dumps(
+            [
+                {"body": "first"},
+                {"body": "second"},
+                {"body": ""},
+            ]
+        ),
     )
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
@@ -249,7 +254,7 @@ def test_latest_matching_comment_timestamp_delegates_to_query_helper(monkeypatch
         return expected
 
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._query_latest_matching_comment_timestamp",
+        "startupai_controller.adapters.review_state._query_latest_matching_comment_timestamp",
         fake_latest_matching,
     )
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
@@ -855,7 +860,7 @@ def test_build_cycle_board_snapshot_uses_adapter_owned_cache(monkeypatch) -> Non
         calls["count"] += 1
         return json.dumps(payload)
 
-    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
 
     first = build_cycle_board_snapshot("StartupAI-site", 1)
     second = build_cycle_board_snapshot("StartupAI-site", 1)
@@ -874,7 +879,7 @@ def test_query_latest_non_automation_comment_timestamp_filters_markers_and_bots(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._query_issue_comments",
+        "startupai_controller.adapters.review_state._query_issue_comments",
         lambda owner, repo, number, gh_runner=None: [
             {
                 "body": "<!-- startupai-board-bot:marker -->",

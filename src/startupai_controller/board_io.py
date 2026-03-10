@@ -312,7 +312,7 @@ def _query_issue_comments(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[dict]:
     """Compatibility wrapper for adapter-owned issue comment queries."""
-    from startupai_controller.adapters.github_cli import _query_issue_comments as _adapter_query_issue_comments
+    from startupai_controller.adapters.review_state import _query_issue_comments as _adapter_query_issue_comments
 
     return _adapter_query_issue_comments(
         owner,
@@ -324,7 +324,7 @@ def _query_issue_comments(
 
 def _comment_activity_timestamp(comment: dict) -> datetime | None:
     """Compatibility wrapper for adapter-owned comment activity timestamps."""
-    from startupai_controller.adapters.github_cli import _comment_activity_timestamp as _adapter_comment_activity_timestamp
+    from startupai_controller.adapters.review_state import _comment_activity_timestamp as _adapter_comment_activity_timestamp
 
     return _adapter_comment_activity_timestamp(comment)
 
@@ -338,7 +338,7 @@ def _query_latest_matching_comment_timestamp(
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
     """Compatibility wrapper for adapter-owned marker timestamp queries."""
-    from startupai_controller.adapters.github_cli import (
+    from startupai_controller.adapters.review_state import (
         _query_latest_matching_comment_timestamp as _adapter_query_latest_matching_comment_timestamp,
     )
 
@@ -359,7 +359,7 @@ def _query_latest_non_automation_comment_timestamp(
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
     """Compatibility wrapper for adapter-owned activity timestamp queries."""
-    from startupai_controller.adapters.github_cli import (
+    from startupai_controller.adapters.review_state import (
         _query_latest_non_automation_comment_timestamp as _adapter_query_latest_non_automation_comment_timestamp,
     )
 
@@ -1256,7 +1256,7 @@ def _list_project_items_by_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
     """Compatibility wrapper for adapter-owned project status queries."""
-    from startupai_controller.adapters.github_cli import _list_project_items_by_status as _adapter_list_project_items_by_status
+    from startupai_controller.adapters.review_state import _list_project_items_by_status as _adapter_list_project_items_by_status
 
     return _adapter_list_project_items_by_status(
         status,
@@ -1273,7 +1273,7 @@ def build_cycle_board_snapshot(
     gh_runner: Callable[..., str] | None = None,
 ) -> CycleBoardSnapshot:
     """Compatibility wrapper for adapter-owned cycle board snapshots."""
-    from startupai_controller.adapters.github_cli import build_cycle_board_snapshot as _adapter_build_cycle_board_snapshot
+    from startupai_controller.adapters.review_state import build_cycle_board_snapshot as _adapter_build_cycle_board_snapshot
 
     return _adapter_build_cycle_board_snapshot(
         project_owner,
@@ -1284,7 +1284,7 @@ def build_cycle_board_snapshot(
 
 def clear_cycle_board_snapshot_cache() -> None:
     """Compatibility wrapper for adapter-owned snapshot cache clearing."""
-    from startupai_controller.adapters.github_cli import clear_cycle_board_snapshot_cache as _adapter_clear_cycle_board_snapshot_cache
+    from startupai_controller.adapters.review_state import clear_cycle_board_snapshot_cache as _adapter_clear_cycle_board_snapshot_cache
 
     _adapter_clear_cycle_board_snapshot_cache()
 

@@ -67,19 +67,17 @@ from startupai_controller.consumer_workflow import (
     workflow_status_payload,
     write_workflow_snapshot,
 )
-from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
+from startupai_controller.adapters.github_types import (
     CycleBoardSnapshot,
     CycleGitHubMemo,
     LinkedIssue,
-    _ProjectItemSnapshot,
-    _comment_exists,
-    build_cycle_board_snapshot,
-    _list_project_items_by_status,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
+)
+from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     _marker_for,
     _post_comment,
     _set_status_if_changed,
     _snapshot_to_issue_ref,
-    clear_cycle_board_snapshot_cache,
     close_issue,
     enable_pull_request_automerge,
     rerun_actions_run,
@@ -104,6 +102,7 @@ from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
     build_session_store,
     build_worktree_port,
+    clear_github_runtime_caches,
 )
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
@@ -422,6 +421,7 @@ class CycleRuntimeContext:
     global_limit: int
     github_memo: CycleGitHubMemo
     pr_port: PullRequestPort
+    review_state_port: ReviewStatePort
 
 
 @dataclass(frozen=True)
@@ -471,7 +471,7 @@ def _record_successful_github_mutation(
     now: datetime | None = None,
 ) -> None:
     """Persist the latest successful GitHub mutation timestamp."""
-    clear_cycle_board_snapshot_cache()
+    clear_github_runtime_caches()
     _record_control_timestamp(
         db, CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT, now=now
     )
@@ -1417,18 +1417,27 @@ def _select_best_candidate(
     if this_repo_prefix is not None:
         repo_prefixes = (this_repo_prefix,)
     ready_items = ready_items or tuple(
-        _list_project_items_by_status(
-            "Ready", project_owner, project_number, gh_runner=gh_runner
-        )
+        build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            github_memo=github_memo,
+            gh_runner=gh_runner,
+        ).review_state.list_issues_by_status("Ready")
     )
     eligible: list[_ProjectItemSnapshot] = []
     for snapshot in ready_items:
         if snapshot.executor.strip().lower() != executor:
             continue
-        ref = _snapshot_to_issue_ref(snapshot, config)
-        if ref is None:
-            continue
-        if parse_issue_ref(ref).prefix not in repo_prefixes:
+        ref = snapshot.issue_ref
+        try:
+            parsed_ref = parse_issue_ref(ref)
+        except ConfigError:
+            ref = _snapshot_to_issue_ref(snapshot, config)
+            if ref is None:
+                continue
+            parsed_ref = parse_issue_ref(ref)
+        if parsed_ref.prefix not in repo_prefixes:
             continue
         if issue_filter is not None and not issue_filter(ref):
             continue
@@ -1458,6 +1467,25 @@ def _select_best_candidate(
     eligible.sort(key=lambda s: _ready_snapshot_rank(s, config))
     best_ref = _snapshot_to_issue_ref(eligible[0], config)
     return best_ref
+
+
+def _list_project_items_by_status(
+    status: str,
+    project_owner: str,
+    project_number: int,
+    *,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[_ProjectItemSnapshot]:
+    """Compatibility helper that reads board snapshots through ReviewStatePort."""
+    return list(
+        build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        ).review_state.build_board_snapshot().items_with_status(status)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2210,6 +2238,23 @@ def _build_pr_body(
     )
 
 
+def _default_review_comment_checker(
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> Callable[[str, str, int, str], bool]:
+    """Build the default marker-check helper through ReviewStatePort."""
+    review_state_port = build_github_port_bundle(
+        "",
+        0,
+        gh_runner=gh_runner,
+    ).review_state
+
+    def checker(owner: str, repo: str, number: int, marker: str, *, gh_runner=None) -> bool:
+        return review_state_port.comment_exists(f"{owner}/{repo}", number, marker)
+
+    return checker
+
+
 def _post_consumer_claim_comment(
     issue_ref: str,
     session_id: str,
@@ -2231,7 +2276,7 @@ def _post_consumer_claim_comment(
         branch_name=branch_name,
         executor=executor,
     )
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     if checker(owner, repo, number, marker, gh_runner=gh_runner):
         return
     body = "\n".join(
@@ -2327,7 +2372,7 @@ def _post_result_comment(
     marker = _marker_for("consumer-result", issue_ref)
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
 
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     # Don't check for duplicates — each cycle posts a new result
 
     outcome = result.get("outcome", "unknown")
@@ -2384,7 +2429,7 @@ def _post_pr_codex_verdict(
 
     owner, repo, pr_number = parsed
     marker = _verdict_marker_text(session_id)
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     if checker(owner, repo, pr_number, marker, gh_runner=gh_runner):
         return False
 
@@ -3613,26 +3658,30 @@ def _drain_review_queue(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
     """Process a bounded batch of queued Review items."""
+    memo = github_memo or CycleGitHubMemo()
     if automation_config is None:
         return ReviewQueueDrainSummary(), (
             board_snapshot
             if board_snapshot is not None
-            else build_cycle_board_snapshot(
+            else build_github_port_bundle(
                 config.project_owner,
                 config.project_number,
+                config=critical_path_config,
+                github_memo=memo,
                 gh_runner=gh_runner,
-            )
+            ).review_state.build_board_snapshot()
         )
 
-    effective_board_snapshot = board_snapshot or build_cycle_board_snapshot(
+    effective_board_snapshot = board_snapshot or build_github_port_bundle(
         config.project_owner,
         config.project_number,
+        config=critical_path_config,
+        github_memo=memo,
         gh_runner=gh_runner,
-    )
+    ).review_state.build_board_snapshot()
 
     store = session_store or build_session_store(db)
     now = datetime.now(timezone.utc)
-    memo = github_memo or CycleGitHubMemo()
     effective_pr_port = pr_port or build_github_port_bundle(
         config.project_owner,
         config.project_number,
@@ -4402,13 +4451,13 @@ def _initialize_cycle_runtime(
     )
     config.poll_interval_seconds = effective_interval
     github_memo = CycleGitHubMemo()
-    pr_port = build_github_port_bundle(
+    github_ports = build_github_port_bundle(
         config.project_owner,
         config.project_number,
         config=cp_config,
         github_memo=github_memo,
         gh_runner=gh_runner,
-    ).pull_requests
+    )
     global_limit = (
         auto_config.global_concurrency
         if auto_config is not None
@@ -4425,7 +4474,8 @@ def _initialize_cycle_runtime(
         effective_interval=effective_interval,
         global_limit=global_limit,
         github_memo=github_memo,
-        pr_port=pr_port,
+        pr_port=github_ports.pull_requests,
+        review_state_port=github_ports.review_state,
     )
 
 
@@ -4466,17 +4516,14 @@ def _run_deferred_replay_phase(
 
 def _load_board_snapshot_phase(
     config: ConsumerConfig,
+    runtime: CycleRuntimeContext,
     *,
     timings_ms: dict[str, int],
     gh_runner: Callable[..., str] | None,
 ) -> CycleBoardSnapshot:
     """Load the cycle board snapshot."""
     phase_started = time.monotonic()
-    board_snapshot = build_cycle_board_snapshot(
-        config.project_owner,
-        config.project_number,
-        gh_runner=gh_runner,
-    )
+    board_snapshot = runtime.review_state_port.build_board_snapshot()
     timings_ms["board_snapshot"] = int((time.monotonic() - phase_started) * 1000)
     return board_snapshot
 
@@ -4668,6 +4715,7 @@ def _execute_prepare_cycle_phases(
     )
     board_snapshot = _load_board_snapshot_phase(
         config,
+        runtime,
         timings_ms=timings_ms,
         gh_runner=gh_runner,
     )
@@ -4913,7 +4961,7 @@ def _escalate_to_claude(
         except (GhQueryError, Exception):
             logger.warning("Failed to set Handoff To field for %s", issue_ref)
 
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     if checker(owner, repo, number, marker, gh_runner=gh_runner):
         return
 
@@ -7645,10 +7693,9 @@ def _github_review_summary(
             "Review",
             config.project_owner,
             config.project_number,
+            config=cp_config,
         ):
-            issue_ref = _snapshot_to_issue_ref(snapshot, cp_config)
-            if issue_ref is None:
-                continue
+            issue_ref = snapshot.issue_ref
             if parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
                 continue
             if snapshot.executor.strip().lower() != config.executor:

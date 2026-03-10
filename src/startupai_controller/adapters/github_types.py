@@ -5,47 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from startupai_controller.domain.models import (
+    CycleBoardSnapshot,
+    ProjectItemSnapshot,
+)
+
 
 COPILOT_CODING_AGENT_LOGINS = {
     "app/copilot-swe-agent",
     "copilot-swe-agent[bot]",
     "copilot",
 }
-
-
-@dataclass
-class ProjectItemSnapshot:
-    """A single project board item with key field values."""
-
-    issue_ref: str
-    status: str
-    executor: str
-    handoff_to: str
-    priority: str = ""
-    item_id: str = ""
-    project_id: str = ""
-    sprint: str = ""
-    agent: str = ""
-    owner_field: str = ""
-    title: str = ""
-    body: str = ""
-    repo_slug: str = ""
-    repo_name: str = ""
-    repo_owner: str = ""
-    issue_number: int = 0
-    issue_updated_at: str = ""
-
-
-@dataclass(frozen=True)
-class CycleBoardSnapshot:
-    """Thin per-cycle view of board items reused across hot-path phases."""
-
-    items: tuple[ProjectItemSnapshot, ...]
-    by_status: dict[str, tuple[ProjectItemSnapshot, ...]] = field(default_factory=dict)
-
-    def items_with_status(self, status: str) -> tuple[ProjectItemSnapshot, ...]:
-        """Return cached items in the given status."""
-        return self.by_status.get(status, ())
 
 
 @dataclass
