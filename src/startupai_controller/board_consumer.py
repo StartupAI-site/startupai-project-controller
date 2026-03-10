@@ -5742,78 +5742,157 @@ def _attempt_launch_context_claim(
         payload={"slot_id": slot_id},
     )
     try:
-        claim_result = claim_ready_issue(
-            prepared.cp_config,
-            config.project_owner,
-            config.project_number,
-            executor=config.executor,
-            issue_ref=candidate,
-            all_prefixes=True,
-            automation_config=prepared.auto_config,
+        claim_result = _claim_launch_ready_issue(
+            candidate,
+            config=config,
+            prepared=prepared,
+            status_resolver=status_resolver,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_checker=comment_checker,
             comment_poster=comment_poster,
             gh_runner=gh_runner,
-            status_resolver=status_resolver,
         )
     except GhQueryError as err:
-        logger.error("Claim failed after launch prep for %s: %s", candidate, err)
-        if not _maybe_activate_claim_suppression(
-            db,
-            config,
-            scope="claim",
-            error=err,
-        ):
-            _mark_degraded(db, f"claim-error:{gh_reason_code(err)}:{err}")
-        db.release_lease(candidate)
-        _complete_session(
-            db,
-            pending_claim.session_id,
+        return _handle_launch_claim_api_failure(
             candidate,
-            status="failed",
-            failure_reason="api_error",
-        )
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": "claim_error", "detail": str(err)},
-        )
-        return None, CycleResult(
-            action="error",
-            issue_ref=candidate,
-            session_id=pending_claim.session_id,
-            reason=f"claim-error:{err}",
+            err,
+            config=config,
+            db=db,
+            pending_claim=pending_claim,
         )
     except Exception as err:
-        logger.exception("Unexpected claim failure after launch prep for %s", candidate)
-        db.release_lease(candidate)
-        _complete_session(
-            db,
-            pending_claim.session_id,
+        return _handle_launch_claim_unexpected_failure(
             candidate,
-            status="failed",
-            failure_reason="consumer_error",
-        )
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": "claim_unexpected_error", "detail": str(err)},
-        )
-        return None, CycleResult(
-            action="error",
-            issue_ref=candidate,
-            session_id=pending_claim.session_id,
-            reason=f"claim-unexpected-error:{err}",
+            err,
+            config=config,
+            db=db,
+            pending_claim=pending_claim,
         )
 
     if claim_result.claimed:
         return claim_result, None
+    return _handle_launch_claim_rejection(
+        candidate,
+        claim_result,
+        config=config,
+        db=db,
+        pending_claim=pending_claim,
+    )
 
+
+def _claim_launch_ready_issue(
+    candidate: str,
+    *,
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> ClaimReadyResult:
+    """Execute the actual board claim for a launch-ready issue."""
+    return claim_ready_issue(
+        prepared.cp_config,
+        config.project_owner,
+        config.project_number,
+        executor=config.executor,
+        issue_ref=candidate,
+        all_prefixes=True,
+        automation_config=prepared.auto_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        status_resolver=status_resolver,
+    )
+
+
+def _handle_launch_claim_api_failure(
+    candidate: str,
+    err: GhQueryError,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
+    """Handle a GitHub/API failure while claiming a launch-ready issue."""
+    logger.error("Claim failed after launch prep for %s: %s", candidate, err)
+    if not _maybe_activate_claim_suppression(
+        db,
+        config,
+        scope="claim",
+        error=err,
+    ):
+        _mark_degraded(db, f"claim-error:{gh_reason_code(err)}:{err}")
+    db.release_lease(candidate)
+    _complete_session(
+        db,
+        pending_claim.session_id,
+        candidate,
+        status="failed",
+        failure_reason="api_error",
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "claim_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        session_id=pending_claim.session_id,
+        reason=f"claim-error:{err}",
+    )
+
+
+def _handle_launch_claim_unexpected_failure(
+    candidate: str,
+    err: Exception,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
+    """Handle an unexpected local failure while claiming a launch-ready issue."""
+    logger.exception("Unexpected claim failure after launch prep for %s", candidate)
+    db.release_lease(candidate)
+    _complete_session(
+        db,
+        pending_claim.session_id,
+        candidate,
+        status="failed",
+        failure_reason="consumer_error",
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "claim_unexpected_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        session_id=pending_claim.session_id,
+        reason=f"claim-unexpected-error:{err}",
+    )
+
+
+def _handle_launch_claim_rejection(
+    candidate: str,
+    claim_result: ClaimReadyResult,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
+    """Handle a non-exception claim rejection for a launch-ready issue."""
     db.release_lease(candidate)
     terminal_status = (
         "aborted"
