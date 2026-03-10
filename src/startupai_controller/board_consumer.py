@@ -5925,10 +5925,65 @@ def _handoff_execution_to_review(
     auto_config = prepared.auto_config
     candidate = launch_context.issue_ref
 
+    _transition_claimed_session_to_review(
+        db=db,
+        issue_ref=candidate,
+        session_id=session_id,
+        config=config,
+        critical_path_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    _record_metric(db, config, "session_transition_review", issue_ref=candidate)
+
+    immediate_review_summary = ReviewQueueDrainSummary()
+    if session_status != "success":
+        return immediate_review_summary
+
+    handoff_store = SqliteSessionStore(db)
+    _post_claimed_session_verdict_marker(
+        db=db,
+        pr_url=pr_url,
+        session_id=session_id,
+        gh_runner=gh_runner,
+    )
+    queue_entry = _queue_claimed_session_for_review(
+        store=handoff_store,
+        issue_ref=candidate,
+        pr_url=pr_url,
+        session_id=session_id,
+    )
+    if queue_entry is None or auto_config is None:
+        return immediate_review_summary
+
+    return _run_immediate_review_handoff(
+        config=config,
+        critical_path_config=cp_config,
+        automation_config=auto_config,
+        store=handoff_store,
+        queue_entry=queue_entry,
+        gh_runner=gh_runner,
+        db=db,
+    )
+
+
+def _transition_claimed_session_to_review(
+    *,
+    db: ConsumerDB,
+    issue_ref: str,
+    session_id: str,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Move one claimed issue into Review or queue the transition on failure."""
     try:
         _transition_issue_to_review(
-            candidate,
-            cp_config,
+            issue_ref,
+            critical_path_config,
             config.project_owner,
             config.project_number,
             board_info_resolver=board_info_resolver,
@@ -5941,18 +5996,21 @@ def _handoff_execution_to_review(
         _mark_degraded(db, f"review-transition:{err}")
         _queue_status_transition(
             db,
-            candidate,
+            issue_ref,
             to_status="Review",
             from_statuses={"In Progress"},
         )
         db.update_session(session_id, phase="review")
-    _record_metric(db, config, "session_transition_review", issue_ref=candidate)
 
-    immediate_review_summary = ReviewQueueDrainSummary()
-    if session_status != "success":
-        return immediate_review_summary
 
-    handoff_store = SqliteSessionStore(db)
+def _post_claimed_session_verdict_marker(
+    *,
+    db: ConsumerDB,
+    pr_url: str,
+    session_id: str,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Post the codex verdict marker for a newly handed-off review PR."""
     try:
         _post_pr_codex_verdict(
             pr_url,
@@ -5964,27 +6022,47 @@ def _handoff_execution_to_review(
         logger.error("PR codex verdict comment failed: %s", err)
         _mark_degraded(db, f"verdict-marker:{err}")
         _queue_verdict_marker(db, pr_url, session_id)
-    queue_entry = _queue_review_item(
-        handoff_store,
-        candidate,
+
+
+def _queue_claimed_session_for_review(
+    *,
+    store: SessionStorePort,
+    issue_ref: str,
+    pr_url: str,
+    session_id: str,
+) -> ReviewQueueEntry | None:
+    """Queue one claimed session for immediate review handling."""
+    return _queue_review_item(
+        store,
+        issue_ref,
         pr_url,
         session_id=session_id,
     )
-    if queue_entry is None or auto_config is None:
-        return immediate_review_summary
 
+
+def _run_immediate_review_handoff(
+    *,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    store: SessionStorePort,
+    queue_entry: ReviewQueueEntry,
+    gh_runner: Callable[..., str] | None,
+    db: ConsumerDB,
+) -> ReviewQueueDrainSummary:
+    """Run immediate rescue for the just-opened review PR."""
     try:
         review_memo = CycleGitHubMemo()
         handoff_pr_port = GitHubCliAdapter(
             project_owner=config.project_owner,
             project_number=config.project_number,
-            config=cp_config,
+            config=critical_path_config,
             github_memo=review_memo,
             gh_runner=gh_runner,
         )
         queue_entries = [
             entry
-            for entry in handoff_store.list_review_queue_items()
+            for entry in store.list_review_queue_items()
             if entry.pr_repo == queue_entry.pr_repo
             and entry.pr_number == queue_entry.pr_number
         ]
@@ -5992,14 +6070,14 @@ def _handoff_execution_to_review(
             queue_entries=queue_entries,
             review_refs={entry.issue_ref for entry in queue_entries},
             pr_port=handoff_pr_port,
-            trusted_codex_actors=frozenset(auto_config.trusted_codex_actors),
+            trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
         )
         snapshot = review_snapshots.get((queue_entry.pr_repo, queue_entry.pr_number))
         result = review_rescue(
             pr_repo=queue_entry.pr_repo,
             pr_number=queue_entry.pr_number,
-            config=cp_config,
-            automation_config=auto_config,
+            config=critical_path_config,
+            automation_config=automation_config,
             project_owner=config.project_owner,
             project_number=config.project_number,
             dry_run=False,
@@ -6011,42 +6089,33 @@ def _handoff_execution_to_review(
         ).get((queue_entry.pr_repo, queue_entry.pr_number))
         for entry in queue_entries or [queue_entry]:
             _apply_review_queue_result(
-                handoff_store,
+                store,
                 entry,
                 result,
                 last_state_digest=state_digest,
             )
+        pr_ref = f"{queue_entry.pr_repo}#{queue_entry.pr_number}"
         return ReviewQueueDrainSummary(
             queued_count=len(queue_entries) or 1,
             due_count=len(queue_entries) or 1,
             rerun=(
-                (
-                    f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{','.join(result.rerun_checks)}",
-                )
+                (f"{pr_ref}:{','.join(result.rerun_checks)}",)
                 if result.rerun_checks
                 else ()
             ),
-            auto_merge_enabled=(
-                (f"{queue_entry.pr_repo}#{queue_entry.pr_number}",)
-                if result.auto_merge_enabled
-                else ()
-            ),
+            auto_merge_enabled=((pr_ref,) if result.auto_merge_enabled else ()),
             requeued=result.requeued_refs,
-            blocked=(
-                (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.blocked_reason}",)
-                if result.blocked_reason
-                else ()
-            ),
-            skipped=(
-                (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.skipped_reason}",)
-                if result.skipped_reason
-                else ()
-            ),
+            blocked=((f"{pr_ref}:{result.blocked_reason}",) if result.blocked_reason else ()),
+            skipped=((f"{pr_ref}:{result.skipped_reason}",) if result.skipped_reason else ()),
         )
     except GhQueryError as err:
-        logger.warning("Immediate review clearance failed for %s: %s", candidate, err)
+        logger.warning(
+            "Immediate review clearance failed for %s: %s",
+            queue_entry.issue_ref,
+            err,
+        )
         _mark_degraded(db, f"review-queue:{gh_reason_code(err)}:{err}")
-        return immediate_review_summary
+        return ReviewQueueDrainSummary()
 
 
 def _handle_non_review_execution_outcome(
