@@ -5093,6 +5093,158 @@ def _resolve_launch_runtime(
     return workflow_definition, effective_consumer_config
 
 
+def _resolve_launch_candidate_metadata(
+    issue_ref: str,
+    *,
+    cp_config: CriticalPathConfig,
+    auto_config: BoardAutomationConfig | None,
+    board_snapshot: CycleBoardSnapshot,
+    pr_port: PullRequestPort,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[
+    str,
+    str,
+    str,
+    int,
+    _ProjectItemSnapshot | None,
+    str,
+    str | None,
+    str | None,
+]:
+    """Resolve launch candidate identity and repair-session metadata."""
+    candidate_prefix = parse_issue_ref(issue_ref).prefix
+    owner, repo, number = _resolve_issue_coordinates(issue_ref, cp_config)
+    snapshot = _snapshot_for_issue(board_snapshot, issue_ref, cp_config)
+    session_kind = "new_work"
+    repair_pr_url: str | None = None
+    repair_branch_name: str | None = None
+    if auto_config is not None:
+        classification, pr_match, _reason = _classify_open_pr_candidates(
+            issue_ref,
+            owner,
+            repo,
+            number,
+            auto_config,
+            pr_port=pr_port,
+            gh_runner=gh_runner,
+        )
+        session_kind = _launch_session_kind(classification, pr_match)
+        if session_kind == "repair" and pr_match is not None:
+            repair_pr_url = pr_match.url
+            repair_branch_name = pr_match.branch_name
+    return (
+        candidate_prefix,
+        owner,
+        repo,
+        number,
+        snapshot,
+        session_kind,
+        repair_pr_url,
+        repair_branch_name,
+    )
+
+
+def _resolve_launch_issue_context(
+    issue_ref: str,
+    *,
+    owner: str,
+    repo: str,
+    number: int,
+    snapshot: _ProjectItemSnapshot | None,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    issue_context_port: IssueContextPort,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[IssueContext, str]:
+    """Hydrate launch issue context and compute the launch title."""
+    context = _hydrate_issue_context(
+        issue_ref,
+        owner=owner,
+        repo=repo,
+        number=number,
+        snapshot=snapshot,
+        config=config,
+        db=db,
+        issue_context_port=issue_context_port,
+        gh_runner=gh_runner,
+    )
+    title = str(
+        context.get("title")
+        or (snapshot.title if snapshot is not None else f"issue-{number}")
+    )
+    return context, title
+
+
+def _run_launch_workspace_hooks(
+    workflow_definition: WorkflowDefinition,
+    *,
+    worktree_path: str,
+    issue_ref: str,
+    branch_name: str,
+    worktree_port: WorktreePort,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+) -> None:
+    """Run launch workspace hooks around the prepared worktree."""
+    _run_workspace_hooks(
+        workflow_definition.runtime.workspace_hooks.get("after_create", ()),
+        worktree_path=worktree_path,
+        issue_ref=issue_ref,
+        branch_name=branch_name,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
+    )
+    _run_workspace_hooks(
+        workflow_definition.runtime.workspace_hooks.get("before_run", ()),
+        worktree_path=worktree_path,
+        issue_ref=issue_ref,
+        branch_name=branch_name,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
+    )
+
+
+def _assemble_prepared_launch_context(
+    issue_ref: str,
+    *,
+    candidate_prefix: str,
+    owner: str,
+    repo: str,
+    number: int,
+    title: str,
+    context: IssueContext,
+    session_kind: str,
+    repair_pr_url: str | None,
+    repair_branch_name: str | None,
+    worktree_path: str,
+    branch_name: str,
+    workflow_definition: WorkflowDefinition,
+    effective_consumer_config: ConsumerConfig,
+    dependency_summary: str | None,
+    branch_reconcile_state: str | None,
+    branch_reconcile_error: str | None,
+) -> PreparedLaunchContext:
+    """Create the final launch context for a prepared candidate."""
+    return PreparedLaunchContext(
+        issue_ref=issue_ref,
+        repo_prefix=candidate_prefix,
+        owner=owner,
+        repo=repo,
+        number=number,
+        title=title,
+        issue_context=context,
+        session_kind=session_kind,
+        repair_pr_url=repair_pr_url,
+        repair_branch_name=repair_branch_name,
+        worktree_path=worktree_path,
+        branch_name=branch_name,
+        workflow_definition=workflow_definition,
+        effective_consumer_config=effective_consumer_config,
+        dependency_summary=dependency_summary,
+        branch_reconcile_state=branch_reconcile_state,
+        branch_reconcile_error=branch_reconcile_error,
+    )
+
+
 def _prepare_launch_candidate(
     issue_ref: str,
     *,
@@ -5125,31 +5277,24 @@ def _prepare_launch_candidate(
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
     )
-    candidate_prefix = parse_issue_ref(issue_ref).prefix
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, cp_config)
-    snapshot = _snapshot_for_issue(prepared.board_snapshot, issue_ref, cp_config)
-
-    repair_pr_url: str | None = None
-    repair_branch_name: str | None = None
-    classification: str | None = None
-    pr_match: OpenPullRequestMatch | None = None
-    session_kind = "new_work"
-    if auto_config is not None:
-        classification, pr_match, _reason = _classify_open_pr_candidates(
-            issue_ref,
-            owner,
-            repo,
-            number,
-            auto_config,
-            pr_port=effective_pr_port,
-            gh_runner=gh_runner,
-        )
-        session_kind = _launch_session_kind(classification, pr_match)
-        if session_kind == "repair" and pr_match is not None:
-            repair_pr_url = pr_match.url
-            repair_branch_name = pr_match.branch_name
-
-    context = _hydrate_issue_context(
+    (
+        candidate_prefix,
+        owner,
+        repo,
+        number,
+        snapshot,
+        session_kind,
+        repair_pr_url,
+        repair_branch_name,
+    ) = _resolve_launch_candidate_metadata(
+        issue_ref,
+        cp_config=cp_config,
+        auto_config=auto_config,
+        board_snapshot=prepared.board_snapshot,
+        pr_port=effective_pr_port,
+        gh_runner=gh_runner,
+    )
+    context, title = _resolve_launch_issue_context(
         issue_ref,
         owner=owner,
         repo=repo,
@@ -5160,45 +5305,33 @@ def _prepare_launch_candidate(
         issue_context_port=effective_issue_context_port,
         gh_runner=gh_runner,
     )
-    title = str(context.get("title") or (snapshot.title if snapshot is not None else f"issue-{number}"))
 
-    # Phase 2: Set up worktree and reconcile repair branch
     worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error = (
         _setup_launch_worktree(
             issue_ref,
             title,
             session_kind,
             repair_branch_name,
-        config=config,
-        cp_config=cp_config,
-        db=db,
-        session_store=store,
-        worktree_port=effective_worktree_port,
-        subprocess_runner=subprocess_runner,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
+            config=config,
+            cp_config=cp_config,
+            db=db,
+            session_store=store,
+            worktree_port=effective_worktree_port,
+            subprocess_runner=subprocess_runner,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
     )
 
-    # Phase 3: Resolve workflow and effective config
     workflow_definition, effective_consumer_config = _resolve_launch_runtime(
         candidate_prefix,
         worktree_path,
         config=config,
         prepared=prepared,
     )
-
-    _run_workspace_hooks(
-        workflow_definition.runtime.workspace_hooks.get("after_create", ()),
-        worktree_path=worktree_path,
-        issue_ref=issue_ref,
-        branch_name=branch_name,
-        worktree_port=effective_worktree_port,
-        subprocess_runner=subprocess_runner,
-    )
-    _run_workspace_hooks(
-        workflow_definition.runtime.workspace_hooks.get("before_run", ()),
+    _run_launch_workspace_hooks(
+        workflow_definition,
         worktree_path=worktree_path,
         issue_ref=issue_ref,
         branch_name=branch_name,
@@ -5213,14 +5346,14 @@ def _prepare_launch_candidate(
         config.project_number,
         status_resolver=status_resolver,
     )
-    return PreparedLaunchContext(
-        issue_ref=issue_ref,
-        repo_prefix=candidate_prefix,
+    return _assemble_prepared_launch_context(
+        issue_ref,
+        candidate_prefix=candidate_prefix,
         owner=owner,
         repo=repo,
         number=number,
         title=title,
-        issue_context=context,
+        context=context,
         session_kind=session_kind,
         repair_pr_url=repair_pr_url,
         repair_branch_name=repair_branch_name,
