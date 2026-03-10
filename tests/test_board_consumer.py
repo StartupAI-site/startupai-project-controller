@@ -62,10 +62,13 @@ from startupai_controller.board_consumer import (
     _post_result_comment,
     _reconcile_repair_branch,
     _reconcile_board_truth,
+    _replay_deferred_actions,
     _recover_interrupted_sessions,
     _request_drain,
     _review_queue_retry_seconds_for_blocked_reason,
     _review_queue_retry_seconds_for_result,
+    _return_issue_to_ready,
+    _transition_issue_to_in_progress,
     _transition_issue_to_review,
     _resolve_cli_command,
     _run_codex_session,
@@ -3317,6 +3320,170 @@ class TestDrainControls:
 
 
 class TestRunDaemonLoop:
+    def test_transition_issue_to_in_progress_uses_ports(
+        self, tmp_path: Path
+    ) -> None:
+        cp_config = _load(tmp_path)
+        statuses = {"crew#84": "Review"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        _transition_issue_to_in_progress(
+            "crew#84",
+            cp_config,
+            "StartupAI-site",
+            1,
+            from_statuses={"Review"},
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert transitions == [("crew#84", "In Progress")]
+        assert statuses["crew#84"] == "In Progress"
+
+    def test_return_issue_to_ready_uses_ports(self, tmp_path: Path) -> None:
+        cp_config = _load(tmp_path)
+        statuses = {"crew#84": "In Progress"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        _return_issue_to_ready(
+            "crew#84",
+            cp_config,
+            "StartupAI-site",
+            1,
+            from_statuses={"In Progress"},
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert transitions == [("crew#84", "Ready")]
+        assert statuses["crew#84"] == "Ready"
+
+    def test_replay_deferred_actions_uses_ports(self, tmp_path: Path) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        cp_config = load_config(config.critical_paths_path)
+        statuses = {
+            "crew#84": "Review",
+            "app#149": "In Progress",
+        }
+        comments: list[tuple[str, int, str]] = []
+        closed: list[tuple[str, int]] = []
+        transitions: list[tuple[str, str]] = []
+        reruns: list[tuple[str, str, int]] = []
+        automerge: list[tuple[str, int]] = []
+
+        db.queue_deferred_action(
+            "crew#84",
+            "post_issue_comment",
+            {"issue_ref": "crew#84", "body": "controller comment"},
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "close_issue",
+            {"issue_ref": "crew#84"},
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "rerun_check",
+            {
+                "pr_repo": "StartupAI-site/startupai-crew",
+                "check_name": "ci",
+                "run_id": 42,
+            },
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "enable_automerge",
+            {
+                "pr_repo": "StartupAI-site/startupai-crew",
+                "pr_number": 77,
+            },
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "set_status",
+            {
+                "issue_ref": "crew#84",
+                "to_status": "In Progress",
+                "from_statuses": ["Review"],
+            },
+        )
+        db.queue_deferred_action(
+            "app#149",
+            "set_status",
+            {
+                "issue_ref": "app#149",
+                "to_status": "Ready",
+                "from_statuses": ["In Progress"],
+            },
+        )
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(
+            post_issue_comment=lambda repo, number, body: comments.append(
+                (repo, number, body)
+            ),
+            close_issue=lambda repo, number: closed.append((repo, number)),
+            set_issue_status=set_issue_status,
+        )
+        pr_port = SimpleNamespace(
+            rerun_failed_check=lambda repo, check_name, run_id: (
+                reruns.append((repo, check_name, run_id)) or True
+            ),
+            enable_automerge=lambda repo, pr_number: automerge.append(
+                (repo, pr_number)
+            ),
+        )
+
+        replayed = _replay_deferred_actions(
+            db,
+            config,
+            cp_config,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert len(replayed) == 6
+        assert comments == [
+            ("StartupAI-site/startupai-crew", 84, "controller comment")
+        ]
+        assert closed == [("StartupAI-site/startupai-crew", 84)]
+        assert reruns == [("StartupAI-site/startupai-crew", "ci", 42)]
+        assert automerge == [("StartupAI-site/startupai-crew", 77)]
+        assert transitions == [
+            ("crew#84", "In Progress"),
+            ("app#149", "Ready"),
+        ]
+        assert db.list_deferred_actions() == []
+
     def test_recover_interrupted_sessions_requeues_non_pr_work(
         self, tmp_path: Path
     ) -> None:

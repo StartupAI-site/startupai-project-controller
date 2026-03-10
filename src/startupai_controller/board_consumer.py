@@ -99,7 +99,9 @@ from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-i
 )
 from startupai_controller.adapters.sqlite_store import SqliteSessionStore
 from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.domain.resolution_policy import (
@@ -3156,6 +3158,9 @@ def _replay_deferred_actions(
     config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
     *,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     comment_checker: Callable[..., bool] | None = None,
@@ -3200,6 +3205,8 @@ def _replay_deferred_actions(
                         config.project_owner,
                         config.project_number,
                         from_statuses=from_statuses,
+                        review_state_port=review_state_port,
+                        board_port=board_port,
                         board_info_resolver=board_info_resolver,
                         board_mutator=board_mutator,
                         gh_runner=gh_runner,
@@ -3211,6 +3218,8 @@ def _replay_deferred_actions(
                         config.project_owner,
                         config.project_number,
                         from_statuses=from_statuses,
+                        review_state_port=review_state_port,
+                        board_port=board_port,
                         board_info_resolver=board_info_resolver,
                         board_mutator=board_mutator,
                         gh_runner=gh_runner,
@@ -3233,33 +3242,59 @@ def _replay_deferred_actions(
                     issue_ref,
                     critical_path_config,
                 )
-                poster = comment_poster or _post_comment
-                poster(
-                    owner,
-                    repo,
-                    number,
-                    str(payload["body"]),
-                    gh_runner=gh_runner,
-                )
+                if board_port is not None:
+                    board_port.post_issue_comment(
+                        f"{owner}/{repo}",
+                        number,
+                        str(payload["body"]),
+                    )
+                else:
+                    poster = comment_poster or _post_comment
+                    poster(
+                        owner,
+                        repo,
+                        number,
+                        str(payload["body"]),
+                        gh_runner=gh_runner,
+                    )
             elif action.action_type == "close_issue":
                 issue_ref = str(payload["issue_ref"])
                 owner, repo, number = _resolve_issue_coordinates(
                     issue_ref,
                     critical_path_config,
                 )
-                close_issue(owner, repo, number, gh_runner=gh_runner)
+                if board_port is not None:
+                    board_port.close_issue(f"{owner}/{repo}", number)
+                else:
+                    close_issue(owner, repo, number, gh_runner=gh_runner)
             elif action.action_type == "rerun_check":
-                rerun_actions_run(
-                    str(payload["pr_repo"]),
-                    int(payload["run_id"]),
-                    gh_runner=gh_runner,
-                )
+                if pr_port is not None:
+                    if not pr_port.rerun_failed_check(
+                        str(payload["pr_repo"]),
+                        str(payload.get("check_name") or ""),
+                        int(payload["run_id"]),
+                    ):
+                        raise GhQueryError(
+                            f"Failed rerunning check for {payload['pr_repo']} run {payload['run_id']}"
+                        )
+                else:
+                    rerun_actions_run(
+                        str(payload["pr_repo"]),
+                        int(payload["run_id"]),
+                        gh_runner=gh_runner,
+                    )
             elif action.action_type == "enable_automerge":
-                enable_pull_request_automerge(
-                    str(payload["pr_repo"]),
-                    int(payload["pr_number"]),
-                    gh_runner=gh_runner,
-                )
+                if pr_port is not None:
+                    pr_port.enable_automerge(
+                        str(payload["pr_repo"]),
+                        int(payload["pr_number"]),
+                    )
+                else:
+                    enable_pull_request_automerge(
+                        str(payload["pr_repo"]),
+                        int(payload["pr_number"]),
+                        gh_runner=gh_runner,
+                    )
             else:
                 raise GhQueryError(
                     f"Unsupported deferred action type: {action.action_type}"
@@ -3318,22 +3353,32 @@ def _transition_issue_to_in_progress(
     project_number: int,
     *,
     from_statuses: set[str] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move an actively running local repair back into In Progress."""
-    changed, old_status = _set_status_if_changed(
-        issue_ref,
-        from_statuses or {"Review"},
-        "In Progress",
-        config,
-        project_owner,
-        project_number,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+    if review_state_port is not None and board_port is not None:
+        old_status = review_state_port.get_issue_status(issue_ref)
+        if old_status in (from_statuses or {"Review"}):
+            board_port.set_issue_status(issue_ref, "In Progress")
+            changed = True
+        else:
+            changed = False
+    else:
+        changed, old_status = _set_status_if_changed(
+            issue_ref,
+            from_statuses or {"Review"},
+            "In Progress",
+            config,
+            project_owner,
+            project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
     if changed or old_status == "In Progress":
         return
     raise GhQueryError(
@@ -3348,22 +3393,32 @@ def _return_issue_to_ready(
     project_number: int,
     *,
     from_statuses: set[str] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
-    changed, old_status = _set_status_if_changed(
-        issue_ref,
-        from_statuses or {"In Progress"},
-        "Ready",
-        config,
-        project_owner,
-        project_number,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+    if review_state_port is not None and board_port is not None:
+        old_status = review_state_port.get_issue_status(issue_ref)
+        if old_status in (from_statuses or {"In Progress"}):
+            board_port.set_issue_status(issue_ref, "Ready")
+            changed = True
+        else:
+            changed = False
+    else:
+        changed, old_status = _set_status_if_changed(
+            issue_ref,
+            from_statuses or {"In Progress"},
+            "Ready",
+            config,
+            project_owner,
+            project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
     if changed or old_status == "Ready":
         return
     raise GhQueryError(
@@ -3510,6 +3565,9 @@ def _prepare_cycle(
             db,
             config,
             cp_config,
+            pr_port=pr_port,
+            review_state_port=pr_port,
+            board_port=pr_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_checker=comment_checker,
