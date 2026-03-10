@@ -4,9 +4,7 @@ import json
 from types import SimpleNamespace
 
 from startupai_controller.adapters.github_cli import GitHubCliAdapter
-from startupai_controller.board_io import _ProjectItemSnapshot
 from startupai_controller.domain.models import IssueContext, IssueSnapshot
-from startupai_controller.promote_ready import BoardInfo
 
 
 def _config() -> SimpleNamespace:
@@ -113,24 +111,25 @@ def test_has_copilot_review_signal_uses_payload_projection(monkeypatch) -> None:
 
 
 def test_set_issue_status_uses_board_info_and_field_option(monkeypatch) -> None:
-    board_info = BoardInfo(status="Ready", item_id="ITEM", project_id="PROJ")
-    field_calls: list[tuple[str, str]] = []
+    field_calls: list[tuple[str, str, str]] = []
     mutate_calls: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
         GitHubCliAdapter,
         "_query_board_info",
-        lambda self, issue_ref: board_info,
+        lambda self, issue_ref: SimpleNamespace(status="Ready", item_id="ITEM", project_id="PROJ"),
     )
     monkeypatch.setattr(
-        "startupai_controller.board_io._query_status_field_option",
-        lambda project_id, status, gh_runner=None: (
-            field_calls.append((project_id, status)) or ("FIELD", "OPT")
+        GitHubCliAdapter,
+        "_query_single_select_field_option",
+        lambda self, project_id, field_name, option_name: (
+            field_calls.append((project_id, field_name, option_name)) or ("FIELD", "OPT")
         ),
     )
     monkeypatch.setattr(
-        "startupai_controller.board_io._set_board_status",
-        lambda project_id, item_id, field_id, option_id, gh_runner=None: mutate_calls.append(
+        GitHubCliAdapter,
+        "_set_project_single_select",
+        lambda self, project_id, item_id, field_id, option_id: mutate_calls.append(
             (project_id, item_id, field_id, option_id)
         ),
     )
@@ -142,7 +141,7 @@ def test_set_issue_status_uses_board_info_and_field_option(monkeypatch) -> None:
 
     adapter.set_issue_status("crew#42", "Blocked")
 
-    assert field_calls == [("PROJ", "Blocked")]
+    assert field_calls == [("PROJ", "Status", "Blocked")]
     assert mutate_calls == [("PROJ", "ITEM", "FIELD", "OPT")]
 
 
@@ -175,18 +174,23 @@ def test_get_issue_context_returns_typed_context(monkeypatch) -> None:
 
 
 def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
-    board_info = BoardInfo(status="Ready", item_id="ITEM", project_id="PROJ")
     select_calls: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
         GitHubCliAdapter,
         "_query_board_info",
-        lambda self, issue_ref: board_info,
+        lambda self, issue_ref: SimpleNamespace(status="Ready", item_id="ITEM", project_id="PROJ"),
     )
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._set_single_select_field",
-        lambda project_id, item_id, field_name, option_name, gh_runner=None: select_calls.append(
-            (project_id, item_id, field_name, option_name)
+        GitHubCliAdapter,
+        "_query_single_select_field_option",
+        lambda self, project_id, field_name, option_name: ("FIELD", option_name),
+    )
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_set_project_single_select",
+        lambda self, project_id, item_id, field_id, option_id: select_calls.append(
+            (project_id, item_id, field_id, option_id)
         ),
     )
     adapter = GitHubCliAdapter(
@@ -197,7 +201,7 @@ def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
 
     adapter.set_issue_field("crew#42", "Handoff To", "claude")
 
-    assert select_calls == [("PROJ", "ITEM", "Handoff To", "claude")]
+    assert select_calls == [("PROJ", "ITEM", "FIELD", "claude")]
 
 
 def test_required_status_checks_delegates_to_query(monkeypatch) -> None:
@@ -291,7 +295,7 @@ def test_review_snapshots_batches_queries_by_repo(monkeypatch) -> None:
 
 
 def test_get_issue_fields_passes_config_to_field_queries(monkeypatch) -> None:
-    calls: list[tuple[str, str, object, str, int]] = []
+    calls: list[tuple[str, str]] = []
     values = {
         "Status": "Ready",
         "Priority": "P1",
@@ -302,11 +306,11 @@ def test_get_issue_fields_passes_config_to_field_queries(monkeypatch) -> None:
         "Blocked Reason": "",
     }
 
-    def fake_query(issue_ref, field_name, config, project_owner, project_number, *, gh_runner=None):
-        calls.append((issue_ref, field_name, config, project_owner, project_number))
+    def fake_query(self, issue_ref, field_name):
+        calls.append((issue_ref, field_name))
         return values[field_name]
 
-    monkeypatch.setattr("startupai_controller.board_io._query_project_item_field", fake_query)
+    monkeypatch.setattr(GitHubCliAdapter, "_query_project_field_value", fake_query)
     cfg = _config()
     adapter = GitHubCliAdapter(
         project_owner="StartupAI-site",
@@ -318,24 +322,50 @@ def test_get_issue_fields_passes_config_to_field_queries(monkeypatch) -> None:
 
     assert fields.status == "Ready"
     assert fields.executor == "codex"
-    assert all(call[2] is cfg for call in calls)
-    assert all(call[3:] == ("StartupAI-site", 1) for call in calls)
+    assert all(call[0] == "crew#42" for call in calls)
+    assert [call[1] for call in calls] == [
+        "Status",
+        "Priority",
+        "Sprint",
+        "Executor",
+        "Owner",
+        "Handoff To",
+        "Blocked Reason",
+    ]
 
 
 def test_list_issues_by_status_maps_issue_refs_through_config(monkeypatch) -> None:
-    snapshot = _ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#42",
-        status="Review",
-        executor="codex",
-        handoff_to="none",
-        priority="P0",
-        item_id="ITEM",
-        project_id="PROJ",
-        title="Example issue",
-    )
+    payload = {
+        "data": {
+            "organization": {
+                "projectV2": {
+                    "id": "PROJ",
+                    "items": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": ""},
+                        "nodes": [
+                            {
+                                "id": "ITEM",
+                                "fieldValueByName": {"name": "Review"},
+                                "executorField": {"name": "codex"},
+                                "priorityField": {"name": "P0"},
+                                "content": {
+                                    "number": 42,
+                                    "title": "Example issue",
+                                    "repository": {
+                                        "nameWithOwner": "StartupAI-site/startupai-crew"
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                }
+            }
+        }
+    }
     monkeypatch.setattr(
-        "startupai_controller.board_io._list_project_items_by_status",
-        lambda status, project_owner, project_number, gh_runner=None: [snapshot],
+        GitHubCliAdapter,
+        "_graphql",
+        lambda self, query, *, fields: payload,
     )
     adapter = GitHubCliAdapter(
         project_owner="StartupAI-site",
