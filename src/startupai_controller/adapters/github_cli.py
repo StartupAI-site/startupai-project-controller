@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from startupai_controller.domain.models import (
+    CheckObservation,
     IssueContext,
     IssueFields,
     IssueSnapshot,
@@ -46,12 +47,8 @@ from startupai_controller.board_io import (  # noqa: F401
     _parse_pr_url,
     _query_failed_check_runs,
     _query_pr_head_sha,
-    _repo_to_prefix,
     _run_gh,
     _snapshot_to_issue_ref,
-    build_pr_gate_status_from_payload,
-    close_issue,
-    close_pull_request,
     gh_reason_code,
     memoized_query_issue_body,
 )
@@ -110,9 +107,14 @@ class _PullRequestStateProbe:
 
 
 _BOARD_SNAPSHOT_CACHE_TTL_SECONDS = 15
+_REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS = 900
 _cycle_board_snapshot_cache: dict[
     tuple[str, int, int],
     tuple[float, CycleBoardSnapshot],
+] = {}
+_required_status_checks_ttl_cache: dict[
+    tuple[str, str],
+    tuple[float, set[str]],
 ] = {}
 
 
@@ -748,6 +750,25 @@ def _parse_codex_verdict_from_text(
     return decision, route, checklist
 
 
+def _repo_prefix_for_slug(
+    repo_slug: str,
+    config: CriticalPathConfig,
+) -> str | None:
+    """Return the configured issue prefix for one repo slug."""
+    for prefix, configured_slug in config.issue_prefixes.items():
+        if configured_slug == repo_slug:
+            return prefix
+    return None
+
+
+def _repo_to_prefix(
+    full_repo: str,
+    config: CriticalPathConfig,
+) -> str | None:
+    """Compatibility helper returning the configured prefix for one repo slug."""
+    return _repo_prefix_for_slug(full_repo, config)
+
+
 def latest_codex_verdict_from_payload(
     payload: PullRequestViewPayload,
     *,
@@ -829,6 +850,119 @@ def has_copilot_review_signal_from_payload(payload: PullRequestViewPayload) -> b
         if "copilot" in actor and state in accepted_states:
             return True
     return False
+
+
+def build_pr_gate_status_from_payload(
+    payload: PullRequestViewPayload,
+    *,
+    required: set[str],
+) -> PrGateStatus:
+    """Build gate readiness from one expanded PR payload and required checks."""
+    latest: dict[str, tuple[str, CheckObservation]] = {}
+    for check in payload.status_check_rollup:
+        typename = check.get("__typename", "")
+        if typename == "CheckRun":
+            name = str(check.get("name") or "")
+            timestamp = str(check.get("completedAt") or check.get("startedAt") or "")
+            status = str(check.get("status") or "").lower()
+            conclusion = str(check.get("conclusion") or "").lower()
+            details_url = str(check.get("detailsUrl") or "")
+            workflow_name = str(check.get("workflowName") or "")
+            if not name:
+                continue
+            result = (
+                "pending"
+                if status != "completed"
+                else (
+                    "pass"
+                    if conclusion in {"success", "neutral", "skipped"}
+                    else (
+                        "cancelled"
+                        if conclusion in {"cancelled", "startup_failure", "stale"}
+                        else "fail"
+                    )
+                )
+            )
+            observation = CheckObservation(
+                name=name,
+                result=result,
+                status=status,
+                conclusion=conclusion,
+                details_url=details_url,
+                workflow_name=workflow_name,
+                run_id=_extract_run_id(details_url),
+            )
+            previous = latest.get(name)
+            if previous is None or timestamp >= previous[0]:
+                latest[name] = (timestamp, observation)
+        elif typename == "StatusContext":
+            name = str(check.get("context") or "")
+            timestamp = str(check.get("startedAt") or "")
+            state = str(check.get("state") or "").lower()
+            details_url = str(check.get("targetUrl") or "")
+            if not name:
+                continue
+            if state == "success":
+                result = "pass"
+            elif state in {"error", "failure"}:
+                result = "fail"
+            else:
+                result = "pending"
+            observation = CheckObservation(
+                name=name,
+                result=result,
+                status=state,
+                conclusion=state,
+                details_url=details_url,
+                workflow_name="",
+                run_id=_extract_run_id(details_url),
+            )
+            previous = latest.get(name)
+            if previous is None or timestamp >= previous[0]:
+                latest[name] = (timestamp, observation)
+
+    passed: set[str] = set()
+    failed: set[str] = set()
+    pending: set[str] = set()
+    cancelled: set[str] = set()
+    for context in required:
+        if context not in latest:
+            pending.add(context)
+            continue
+        _timestamp, observation = latest[context]
+        if observation.result == "pass":
+            passed.add(context)
+        elif observation.result == "fail":
+            failed.add(context)
+        elif observation.result == "cancelled":
+            cancelled.add(context)
+            pending.add(context)
+        else:
+            pending.add(context)
+
+    return PrGateStatus(
+        required=required,
+        passed=passed,
+        failed=failed,
+        pending=pending,
+        cancelled=cancelled,
+        merge_state_status=payload.merge_state_status,
+        mergeable=payload.mergeable,
+        is_draft=payload.is_draft,
+        state=payload.state.strip().upper(),
+        auto_merge_enabled=payload.auto_merge_enabled,
+        checks={name: observation for name, (_ts, observation) in latest.items()},
+    )
+
+
+def review_state_digest_from_probe(probe: _PullRequestStateProbe) -> str:
+    """Public wrapper for the review-state digest builder."""
+    return _review_state_digest_from_probe(probe)
+
+
+def review_state_digest_from_payload(payload: PullRequestViewPayload) -> str:
+    """Return a stable review-state digest from an expanded PR payload."""
+    return review_state_digest_from_probe(_pull_request_state_probe_from_payload(payload))
 
 
 class GitHubCliAdapter:
@@ -1317,7 +1451,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
             repo_with_owner = (node.get("repository") or {}).get("nameWithOwner", "")
             if not issue_number or not repo_with_owner:
                 continue
-            prefix = _repo_to_prefix(repo_with_owner, config)
+            prefix = _repo_prefix_for_slug(repo_with_owner, config)
             if prefix is None:
                 continue
             refs.append(f"{prefix}#{issue_number}")
@@ -2571,6 +2705,62 @@ def query_pull_request_view_payload(
     return adapter._query_pull_request_view_payload(pr_repo, pr_number)
 
 
+def query_pull_request_view_payloads(
+    pr_repo: str,
+    pr_numbers: Sequence[int],
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> dict[int, PullRequestViewPayload]:
+    """Compatibility wrapper for batched PR payload reads."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    return adapter._query_pull_request_view_payloads(pr_repo, pr_numbers)
+
+
+def memoized_query_pull_request_view_payloads(
+    memo: CycleGitHubMemo,
+    pr_repo: str,
+    pr_numbers: Sequence[int],
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> dict[int, PullRequestViewPayload]:
+    """Compatibility wrapper for memoized batched PR payload reads."""
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        github_memo=memo,
+        gh_runner=gh_runner,
+    )
+    return adapter._memoized_pull_request_view_payloads(pr_repo, pr_numbers)
+
+
+def query_pull_request_state_probes(
+    pr_repo: str,
+    pr_numbers: Sequence[int],
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> dict[int, _PullRequestStateProbe]:
+    """Compatibility wrapper for batched PR state-probe reads."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    return adapter._query_pull_request_state_probes(pr_repo, pr_numbers)
+
+
+def memoized_query_pull_request_state_probes(
+    memo: CycleGitHubMemo,
+    pr_repo: str,
+    pr_numbers: Sequence[int],
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> dict[int, _PullRequestStateProbe]:
+    """Compatibility wrapper for memoized batched PR state-probe reads."""
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        github_memo=memo,
+        gh_runner=gh_runner,
+    )
+    return adapter._memoized_pull_request_state_probes(pr_repo, pr_numbers)
+
+
 def query_latest_codex_verdict(
     pr_repo: str,
     pr_number: int,
@@ -2593,9 +2783,33 @@ def query_required_status_checks(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> set[str]:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    """Compatibility wrapper with process TTL cache and stale-on-error fallback."""
+    cache_key = (pr_repo, base_ref_name)
+    cached = _required_status_checks_ttl_cache.get(cache_key)
+    now_monotonic = time.monotonic()
+    if cached is not None:
+        expires_at, required = cached
+        if expires_at > now_monotonic:
+            return set(required)
+
     adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    return adapter._query_required_status_checks(pr_repo, base_ref_name)
+    try:
+        required = adapter._query_required_status_checks(pr_repo, base_ref_name)
+    except GhQueryError:
+        if cached is not None:
+            return set(cached[1])
+        raise
+
+    _required_status_checks_ttl_cache[cache_key] = (
+        now_monotonic + _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS,
+        set(required),
+    )
+    return set(required)
+
+
+def clear_required_status_checks_cache() -> None:
+    """Clear the process-local required-check TTL cache."""
+    _required_status_checks_ttl_cache.clear()
 
 
 def query_closing_issues(
@@ -2630,6 +2844,51 @@ def query_closing_issues(
             )
         )
     return issues
+
+
+def close_pull_request(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    comment: str,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    _run_gh(
+        [
+            "pr",
+            "close",
+            str(pr_number),
+            "--repo",
+            pr_repo,
+            "--comment",
+            comment,
+        ],
+        gh_runner=gh_runner,
+        operation_type="mutation",
+    )
+
+
+def close_issue(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    _run_gh(
+        [
+            "api",
+            f"repos/{owner}/{repo}/issues/{number}",
+            "-X",
+            "PATCH",
+            "-f",
+            "state=closed",
+        ],
+        gh_runner=gh_runner,
+        operation_type="mutation",
+    )
 
 
 def rerun_actions_run(

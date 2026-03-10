@@ -202,6 +202,7 @@ def _make_consumer_config(tmp_path: Path) -> ConsumerConfig:
         automation_config_path=auto_path,
         db_path=tmp_path / "test.db",
         output_dir=tmp_path / "outputs",
+        drain_path=tmp_path / "consumer.drain",
         schema_path=Path(__file__).resolve().parent.parent
         / "config"
         / "codex_session_result.schema.json",
