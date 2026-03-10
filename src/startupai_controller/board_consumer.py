@@ -5435,6 +5435,152 @@ def _handle_non_review_execution_outcome(
     return updated_session_status, resolution_evaluation, done_reason
 
 
+def _final_phase_for_claimed_session(
+    *,
+    launch_context: PreparedLaunchContext,
+    execution_outcome: SessionExecutionOutcome,
+) -> str:
+    """Determine the final persisted phase for a claimed session."""
+    review_requeued = (
+        execution_outcome.should_transition_to_review
+        and launch_context.issue_ref in execution_outcome.immediate_review_summary.requeued
+    )
+    final_phase = (
+        "completed"
+        if review_requeued
+        else (
+            "review"
+            if execution_outcome.should_transition_to_review
+            else "completed"
+        )
+    )
+    if execution_outcome.session_status in {"failed", "timeout"} and not execution_outcome.pr_url:
+        final_phase = "blocked"
+    if (
+        execution_outcome.resolution_evaluation is not None
+        and execution_outcome.done_reason != "already_resolved"
+    ):
+        final_phase = "blocked"
+    if (
+        launch_context.session_kind == "repair"
+        and execution_outcome.session_status in {"failed", "timeout"}
+    ):
+        final_phase = "completed"
+    return final_phase
+
+
+def _persist_claimed_session_completion(
+    *,
+    db: ConsumerDB,
+    session_id: str,
+    issue_ref: str,
+    execution_outcome: SessionExecutionOutcome,
+    final_phase: str,
+) -> None:
+    """Persist the final session record for a claimed execution outcome."""
+    resolution_evaluation = execution_outcome.resolution_evaluation
+    codex_result = execution_outcome.codex_result
+    _complete_session(
+        db,
+        session_id,
+        issue_ref,
+        status=execution_outcome.session_status,
+        failure_reason=execution_outcome.failure_reason,
+        outcome_json=json.dumps(codex_result) if codex_result else None,
+        pr_url=execution_outcome.pr_url,
+        phase=final_phase,
+        resolution_kind=(
+            resolution_evaluation.resolution_kind
+            if resolution_evaluation is not None
+            else None
+        ),
+        verification_class=(
+            resolution_evaluation.verification_class
+            if resolution_evaluation is not None
+            else None
+        ),
+        resolution_evidence_json=(
+            json.dumps(resolution_evaluation.evidence, sort_keys=True)
+            if resolution_evaluation is not None
+            else None
+        ),
+        resolution_action=(
+            resolution_evaluation.final_action
+            if resolution_evaluation is not None
+            else None
+        ),
+        done_reason=execution_outcome.done_reason,
+    )
+
+
+def _post_claimed_session_result_comment(
+    *,
+    issue_ref: str,
+    session_id: str,
+    codex_result: dict[str, Any] | None,
+    cp_config: CriticalPathConfig,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Post the session result comment when Codex produced structured output."""
+    if not codex_result:
+        return
+    try:
+        _post_result_comment(
+            issue_ref,
+            codex_result,
+            session_id,
+            cp_config,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception) as err:
+        logger.error("Result comment failed: %s", err)
+
+
+def _maybe_escalate_claimed_session_failure(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    issue_ref: str,
+    effective_max_retries: int,
+    session_status: str,
+    codex_result: dict[str, Any] | None,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Escalate terminal failed/timeout sessions once retry ceiling is reached."""
+    if session_status not in {"failed", "timeout"}:
+        return
+    new_retries = db.count_retries(issue_ref)
+    if new_retries < effective_max_retries:
+        return
+    try:
+        escalation_reason = ""
+        if codex_result:
+            escalation_reason = codex_result.get("blocker_reason") or codex_result.get(
+                "summary", ""
+            )
+        _escalate_to_claude(
+            issue_ref,
+            cp_config,
+            config.project_owner,
+            config.project_number,
+            reason=escalation_reason or f"max retries ({effective_max_retries}) exceeded",
+            board_info_resolver=board_info_resolver,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception) as err:
+        logger.error("Escalation failed: %s", err)
+
+
 def _execute_claimed_session(
     *,
     config: ConsumerConfig,
@@ -5572,103 +5718,48 @@ def _finalize_claimed_session(
     candidate = launch_context.issue_ref
     session_id = claimed_context.session_id
     effective_max_retries = claimed_context.effective_max_retries
-    session_status = execution_outcome.session_status
-    pr_url = execution_outcome.pr_url
-    codex_result = execution_outcome.codex_result
-    failure_reason = execution_outcome.failure_reason
-    resolution_evaluation = execution_outcome.resolution_evaluation
-    done_reason = execution_outcome.done_reason
 
     db.release_lease(candidate)
-    review_requeued = (
-        execution_outcome.should_transition_to_review
-        and candidate in execution_outcome.immediate_review_summary.requeued
+    final_phase = _final_phase_for_claimed_session(
+        launch_context=launch_context,
+        execution_outcome=execution_outcome,
     )
-    final_phase = (
-        "completed"
-        if review_requeued
-        else ("review" if execution_outcome.should_transition_to_review else "completed")
+    _persist_claimed_session_completion(
+        db=db,
+        session_id=session_id,
+        issue_ref=candidate,
+        execution_outcome=execution_outcome,
+        final_phase=final_phase,
     )
-    if session_status in {"failed", "timeout"} and not pr_url:
-        final_phase = "blocked"
-    if resolution_evaluation is not None and done_reason != "already_resolved":
-        final_phase = "blocked"
-    if launch_context.session_kind == "repair" and session_status in {"failed", "timeout"}:
-        final_phase = "completed"
-    _complete_session(
-        db,
-        session_id,
-        candidate,
-        status=session_status,
-        failure_reason=failure_reason,
-        outcome_json=json.dumps(codex_result) if codex_result else None,
-        pr_url=pr_url,
-        phase=final_phase,
-        resolution_kind=(
-            resolution_evaluation.resolution_kind
-            if resolution_evaluation is not None
-            else None
-        ),
-        verification_class=(
-            resolution_evaluation.verification_class
-            if resolution_evaluation is not None
-            else None
-        ),
-        resolution_evidence_json=(
-            json.dumps(resolution_evaluation.evidence, sort_keys=True)
-            if resolution_evaluation is not None
-            else None
-        ),
-        resolution_action=(
-            resolution_evaluation.final_action
-            if resolution_evaluation is not None
-            else None
-        ),
-        done_reason=done_reason,
+    _post_claimed_session_result_comment(
+        issue_ref=candidate,
+        session_id=session_id,
+        codex_result=execution_outcome.codex_result,
+        cp_config=cp_config,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
-
-    if codex_result:
-        try:
-            _post_result_comment(
-                candidate,
-                codex_result,
-                session_id,
-                cp_config,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-        except (GhQueryError, Exception) as err:
-            logger.error("Result comment failed: %s", err)
-
-    if session_status in ("failed", "timeout"):
-        new_retries = db.count_retries(candidate)
-        if new_retries >= effective_max_retries:
-            try:
-                escalation_reason = ""
-                if codex_result:
-                    escalation_reason = codex_result.get("blocker_reason") or codex_result.get("summary", "")
-                _escalate_to_claude(
-                    candidate,
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    reason=escalation_reason
-                    or f"max retries ({effective_max_retries}) exceeded",
-                    board_info_resolver=board_info_resolver,
-                    comment_checker=comment_checker,
-                    comment_poster=comment_poster,
-                    gh_runner=gh_runner,
-                )
-            except (GhQueryError, Exception) as err:
-                logger.error("Escalation failed: %s", err)
+    _maybe_escalate_claimed_session_failure(
+        config=config,
+        db=db,
+        issue_ref=candidate,
+        effective_max_retries=effective_max_retries,
+        session_status=execution_outcome.session_status,
+        codex_result=execution_outcome.codex_result,
+        cp_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
 
     return CycleResult(
         action="claimed",
         issue_ref=candidate,
         session_id=session_id,
-        reason=session_status,
-        pr_url=pr_url,
+        reason=execution_outcome.session_status,
+        pr_url=execution_outcome.pr_url,
     )
 
 
