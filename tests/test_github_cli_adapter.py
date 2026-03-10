@@ -9,7 +9,12 @@ from startupai_controller.adapters.github_cli import (
     _query_latest_non_automation_comment_timestamp,
     _query_latest_wip_activity_timestamp,
     _query_issue_assignees,
+    _query_project_item_field,
+    _query_single_select_field_option,
     _set_issue_assignees,
+    _set_single_select_field,
+    _set_status_if_changed,
+    _set_text_field,
     build_cycle_board_snapshot,
     clear_cycle_board_snapshot_cache,
 )
@@ -183,6 +188,24 @@ def test_get_issue_context_returns_typed_context(monkeypatch) -> None:
     )
 
 
+def test_query_project_item_field_uses_adapter_owned_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_project_field_value",
+        lambda self, issue_ref, field_name: f"{issue_ref}:{field_name}",
+    )
+
+    value = _query_project_item_field(
+        "crew#42",
+        "Executor",
+        _config(),
+        "StartupAI-site",
+        1,
+    )
+
+    assert value == "crew#42:Executor"
+
+
 def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
     select_calls: list[tuple[str, str, str, str]] = []
 
@@ -212,6 +235,110 @@ def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
     adapter.set_issue_field("crew#42", "Handoff To", "claude")
 
     assert select_calls == [("PROJ", "ITEM", "FIELD", "claude")]
+
+
+def test_query_single_select_field_option_uses_adapter_owned_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_single_select_field_option",
+        lambda self, project_id, field_name, option_name: (
+            f"{project_id}:{field_name}",
+            f"opt:{option_name}",
+        ),
+    )
+
+    field_id, option_id = _query_single_select_field_option(
+        "PROJ",
+        "Status",
+        "Blocked",
+    )
+
+    assert field_id == "PROJ:Status"
+    assert option_id == "opt:Blocked"
+
+
+def test_set_text_field_uses_adapter_owned_mutation(monkeypatch) -> None:
+    recorded: list[tuple[str, str, str, str]] = []
+
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_field_id",
+        lambda self, project_id, field_name: f"{project_id}:{field_name}",
+    )
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_set_project_text_field",
+        lambda self, project_id, item_id, field_id, value: recorded.append(
+            (project_id, item_id, field_id, value)
+        ),
+    )
+
+    _set_text_field("PROJ", "ITEM", "Blocked Reason", "Needs human")
+
+    assert recorded == [("PROJ", "ITEM", "PROJ:Blocked Reason", "Needs human")]
+
+
+def test_set_single_select_field_uses_adapter_owned_mutation(monkeypatch) -> None:
+    recorded: list[tuple[str, str, str, str]] = []
+
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_single_select_field_option",
+        lambda self, project_id, field_name, option_name: (
+            f"{project_id}:{field_name}",
+            f"opt:{option_name}",
+        ),
+    )
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_set_project_single_select",
+        lambda self, project_id, item_id, field_id, option_id: recorded.append(
+            (project_id, item_id, field_id, option_id)
+        ),
+    )
+
+    _set_single_select_field("PROJ", "ITEM", "Handoff To", "claude")
+
+    assert recorded == [("PROJ", "ITEM", "PROJ:Handoff To", "opt:claude")]
+
+
+def test_set_status_if_changed_uses_adapter_owned_mutation(monkeypatch) -> None:
+    recorded: list[tuple[str, str, str, str]] = []
+
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_board_info",
+        lambda self, issue_ref: SimpleNamespace(
+            status="Review",
+            item_id="ITEM",
+            project_id="PROJ",
+        ),
+    )
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_single_select_field_option",
+        lambda self, project_id, field_name, option_name: ("FIELD", "OPT"),
+    )
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_set_project_single_select",
+        lambda self, project_id, item_id, field_id, option_id: recorded.append(
+            (project_id, item_id, field_id, option_id)
+        ),
+    )
+
+    changed, old_status = _set_status_if_changed(
+        "crew#42",
+        {"Review"},
+        "In Progress",
+        _config(),
+        "StartupAI-site",
+        1,
+    )
+
+    assert changed is True
+    assert old_status == "Review"
+    assert recorded == [("PROJ", "ITEM", "FIELD", "OPT")]
 
 
 def test_required_status_checks_delegates_to_query(monkeypatch) -> None:

@@ -18,6 +18,7 @@ from startupai_controller.board_io import (
     _marker_for,
     _comment_exists,
     _repo_to_prefix,
+    _query_project_item_field,
     _query_failed_check_runs,
     clear_cycle_board_snapshot_cache,
     clear_required_status_checks_cache,
@@ -218,6 +219,49 @@ def test_query_pr_gate_status_normalizes_state_to_uppercase() -> None:
     )
 
     assert result.state == "OPEN"
+
+
+def test_query_project_item_field_wrapper_respects_board_io_runner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Wrapper should still honor board_io._run_gh monkeypatches for compatibility."""
+    config = _load(tmp_path)
+
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "projectItems": {
+                                "nodes": [
+                                    {
+                                        "project": {
+                                            "owner": {"login": "StartupAI-site"},
+                                            "number": 1,
+                                        },
+                                        "fieldByName": {"name": "codex"},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    value = _query_project_item_field(
+        "crew#84",
+        "Executor",
+        config,
+        "StartupAI-site",
+        1,
+    )
+
+    assert value == "codex"
 
 
 def test_query_pull_request_view_payloads_batches_graphql_aliases() -> None:

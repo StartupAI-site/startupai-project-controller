@@ -45,13 +45,8 @@ from startupai_controller.board_io import (  # noqa: F401
     _parse_pr_url,
     _query_failed_check_runs,
     _query_pr_head_sha,
-    _query_project_item_field,
-    _query_single_select_field_option,
     _repo_to_prefix,
     _run_gh,
-    _set_text_field,
-    _set_single_select_field,
-    _set_status_if_changed,
     _snapshot_to_issue_ref,
     build_pr_gate_status_from_payload,
     close_issue,
@@ -118,6 +113,140 @@ _cycle_board_snapshot_cache: dict[
     tuple[str, int, int],
     tuple[float, CycleBoardSnapshot],
 ] = {}
+
+
+def _query_project_item_field(
+    issue_ref: str,
+    field_name: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Read a single project field value through the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        gh_runner=gh_runner,
+    )
+    return adapter._query_project_field_value(issue_ref, field_name)
+
+
+def _query_single_select_field_option(
+    project_id: str,
+    field_name: str,
+    option_name: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[str, str]:
+    """Resolve a single-select field option through the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        gh_runner=gh_runner,
+    )
+    return adapter._query_single_select_field_option(
+        project_id,
+        field_name,
+        option_name,
+    )
+
+
+def _set_text_field(
+    project_id: str,
+    item_id: str,
+    field_name: str,
+    value: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Set a project text field through the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        gh_runner=gh_runner,
+    )
+    field_id = adapter._query_field_id(project_id, field_name)
+    adapter._set_project_text_field(
+        project_id=project_id,
+        item_id=item_id,
+        field_id=field_id,
+        value=value,
+    )
+
+
+def _set_single_select_field(
+    project_id: str,
+    item_id: str,
+    field_name: str,
+    option_name: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Set a project single-select field through the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        gh_runner=gh_runner,
+    )
+    field_id, option_id = adapter._query_single_select_field_option(
+        project_id,
+        field_name,
+        option_name,
+    )
+    adapter._set_project_single_select(
+        project_id=project_id,
+        item_id=item_id,
+        field_id=field_id,
+        option_id=option_id,
+    )
+
+
+def _set_status_if_changed(
+    issue_ref: str,
+    from_statuses: set[str],
+    to_status: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[bool, str]:
+    """Safely transition status through the adapter-owned board mutation path."""
+    adapter = GitHubCliAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        gh_runner=gh_runner,
+    )
+    if board_info_resolver is None:
+        info = adapter._query_board_info(issue_ref)
+    else:
+        info = board_info_resolver(issue_ref, config, project_owner, project_number)
+
+    if info.status not in from_statuses:
+        return False, info.status
+
+    if board_mutator is None:
+        field_id, option_id = adapter._query_single_select_field_option(
+            info.project_id,
+            "Status",
+            to_status,
+        )
+        adapter._set_project_single_select(
+            project_id=info.project_id,
+            item_id=info.item_id,
+            field_id=field_id,
+            option_id=option_id,
+        )
+    else:
+        board_mutator(info.project_id, info.item_id)
+
+    return True, info.status
 
 
 def _extract_run_id(details_url: str) -> int | None:

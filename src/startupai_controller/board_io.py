@@ -699,92 +699,19 @@ def _query_project_item_field(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
-    """Read a project field value (Status, Executor, Handoff To, Blocked Reason).
-
-    Returns the field value as a string, or empty string if not found.
-    """
-    owner, repo, number = _issue_ref_to_repo_parts(issue_ref, config)
-
-    query = """
-query($owner: String!, $repo: String!, $number: Int!, $fieldName: String!) {
-  repository(owner: $owner, name: $repo) {
-    issue(number: $number) {
-      projectItems(first: 20) {
-        nodes {
-          project {
-            owner {
-              ... on Organization { login }
-              ... on User { login }
-            }
-            number
-          }
-          fieldByName: fieldValueByName(name: $fieldName) {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={owner}",
-            "-f",
-            f"repo={repo}",
-            "-F",
-            f"number={number}",
-            "-f",
-            f"fieldName={field_name}",
-        ],
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned project field reads."""
+    from startupai_controller.adapters.github_cli import (
+        _query_project_item_field as _adapter_query_project_item_field,
     )
 
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed reading field '{field_name}' for {issue_ref}: invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        joined = "; ".join(messages) if messages else "unknown GraphQL error"
-        raise GhQueryError(
-            f"Failed reading field '{field_name}' for {issue_ref}: {joined}"
-        )
-
-    nodes = (
-        payload.get("data", {})
-        .get("repository", {})
-        .get("issue", {})
-        .get("projectItems", {})
-        .get("nodes", [])
+    return _adapter_query_project_item_field(
+        issue_ref,
+        field_name,
+        config,
+        project_owner,
+        project_number,
+        gh_runner=gh_runner or _run_gh,
     )
-
-    for node in nodes:
-        project = node.get("project") or {}
-        owner_data = project.get("owner") or {}
-        owner_login = owner_data.get("login")
-        proj_number = project.get("number")
-        if owner_login == project_owner and proj_number == project_number:
-            field_data = node.get("fieldByName") or {}
-            # Single select fields use "name", text fields use "text"
-            return field_data.get("name") or field_data.get("text") or ""
-
-    return ""
 
 
 def _set_text_field(
@@ -795,97 +722,18 @@ def _set_text_field(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
-    """Set a text field value on a project item.
-
-    First queries the field ID by name, then performs the mutation.
-    """
-    # Query field ID
-    query = """
-query($projectId: ID!, $fieldName: String!) {
-  node(id: $projectId) {
-    ... on ProjectV2 {
-      field(name: $fieldName) {
-        ... on ProjectV2Field { id }
-      }
-    }
-  }
-}
-"""
-
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"projectId={project_id}",
-            "-f",
-            f"fieldName={field_name}",
-        ],
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned text field mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_text_field as _adapter_set_text_field,
     )
 
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying field '{field_name}': invalid JSON."
-        ) from error
-
-    field_data = payload.get("data", {}).get("node", {}).get("field") or {}
-    field_id = field_data.get("id")
-    if not field_id:
-        raise GhQueryError(f"Field '{field_name}' not found on project.")
-
-    # Mutate
-    mutation = """
-mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $textValue: String!) {
-  updateProjectV2ItemFieldValue(input: {
-    projectId: $projectId,
-    itemId: $itemId,
-    fieldId: $fieldId,
-    value: { text: $textValue }
-  }) {
-    projectV2Item { id }
-  }
-}
-"""
-
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={mutation}",
-            "-f",
-            f"projectId={project_id}",
-            "-f",
-            f"itemId={item_id}",
-            "-f",
-            f"fieldId={field_id}",
-            "-f",
-            f"textValue={value}",
-        ],
-        gh_runner=gh_runner,
+    _adapter_set_text_field(
+        project_id,
+        item_id,
+        field_name,
+        value,
+        gh_runner=gh_runner or _run_gh,
     )
-
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed setting field '{field_name}': invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        joined = "; ".join(messages) if messages else "unknown GraphQL error"
-        raise GhQueryError(f"Failed setting field '{field_name}': {joined}")
 
 
 def _query_single_select_field_option(
@@ -895,64 +743,16 @@ def _query_single_select_field_option(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, str]:
-    """Resolve a single-select field id and option id by name."""
-    query = """
-query($projectId: ID!, $fieldName: String!) {
-  node(id: $projectId) {
-    ... on ProjectV2 {
-      field(name: $fieldName) {
-        ... on ProjectV2SingleSelectField {
-          id
-          options { id name }
-        }
-      }
-    }
-  }
-}
-"""
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"projectId={project_id}",
-            "-f",
-            f"fieldName={field_name}",
-        ],
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned single-select resolution."""
+    from startupai_controller.adapters.github_cli import (
+        _query_single_select_field_option as _adapter_query_single_select_field_option,
     )
 
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying field '{field_name}': invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        joined = "; ".join(messages) if messages else "unknown GraphQL error"
-        raise GhQueryError(f"Failed querying field '{field_name}': {joined}")
-
-    field = payload.get("data", {}).get("node", {}).get("field") or {}
-    field_id = field.get("id")
-    if not field_id:
-        raise GhQueryError(f"Field '{field_name}' not found on project.")
-
-    options = field.get("options") or []
-    for option in options:
-        if option.get("name") == option_name:
-            return field_id, option.get("id", "")
-
-    raise GhQueryError(
-        f"Option '{option_name}' not found in field '{field_name}'."
+    return _adapter_query_single_select_field_option(
+        project_id,
+        field_name,
+        option_name,
+        gh_runner=gh_runner or _run_gh,
     )
 
 
@@ -964,19 +764,17 @@ def _set_single_select_field(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
-    """Set any single-select project field to a named option."""
-    field_id, option_id = _query_single_select_field_option(
-        project_id,
-        field_name,
-        option_name,
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned single-select mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_single_select_field as _adapter_set_single_select_field,
     )
-    _set_board_status(
+
+    _adapter_set_single_select_field(
         project_id,
         item_id,
-        field_id,
-        option_id,
-        gh_runner=gh_runner,
+        field_name,
+        option_name,
+        gh_runner=gh_runner or _run_gh,
     )
 
 
@@ -992,35 +790,22 @@ def _set_status_if_changed(
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[bool, str]:
-    """Safe mutation helper.
+    """Compatibility wrapper for adapter-owned safe status mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_status_if_changed as _adapter_set_status_if_changed,
+    )
 
-    Gets current status, checks if in from_statuses set, if so sets to
-    to_status. Returns (changed, old_status).
-    """
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-
-    if info.status not in from_statuses:
-        return False, info.status
-
-    mutate = board_mutator
-    if mutate is None:
-        field_id, option_id = _query_status_field_option(
-            info.project_id,
-            to_status,
-            gh_runner=gh_runner,
-        )
-        _set_board_status(
-            info.project_id,
-            info.item_id,
-            field_id,
-            option_id,
-            gh_runner=gh_runner,
-        )
-    else:
-        mutate(info.project_id, info.item_id)
-
-    return True, info.status
+    return _adapter_set_status_if_changed(
+        issue_ref,
+        from_statuses,
+        to_status,
+        config,
+        project_owner,
+        project_number,
+        board_info_resolver=board_info_resolver or _query_issue_board_info,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 # ---------------------------------------------------------------------------

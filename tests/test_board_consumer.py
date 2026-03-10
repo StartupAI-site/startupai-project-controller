@@ -1275,7 +1275,7 @@ class TestTransitionIssueToReview:
                         }
                     }
                 )
-            if 'field(name: "Status")' in args_str:
+            if 'field(name: "Status")' in args_str or "fieldName=Status" in args_str:
                 return json.dumps(
                     {
                         "data": {
