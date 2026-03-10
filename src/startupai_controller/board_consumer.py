@@ -3967,6 +3967,8 @@ def _transition_issue_to_review(
     project_owner: str,
     project_number: int,
     *,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,

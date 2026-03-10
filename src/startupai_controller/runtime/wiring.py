@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 import subprocess
 
+from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.github_cli import CycleGitHubMemo, GitHubCliAdapter
 from startupai_controller.adapters.local_process import LocalProcessAdapter
 from startupai_controller.adapters.sqlite_store import ConsumerDB, SqliteSessionStore
@@ -44,7 +45,14 @@ def build_github_port_bundle(
 ) -> GitHubPortBundle:
     """Build the per-command/per-cycle GitHub adapter bundle."""
     memo = github_memo or CycleGitHubMemo()
-    adapter = GitHubCliAdapter(
+    pr_adapter = GitHubCliAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        github_memo=memo,
+        gh_runner=gh_runner,
+    )
+    board_mutation_adapter = GitHubBoardMutationAdapter(
         project_owner=project_owner,
         project_number=project_number,
         config=config,
@@ -52,10 +60,10 @@ def build_github_port_bundle(
         gh_runner=gh_runner,
     )
     return GitHubPortBundle(
-        pull_requests=adapter,
-        review_state=adapter,
-        board_mutations=adapter,
-        issue_context=adapter,
+        pull_requests=pr_adapter,
+        review_state=pr_adapter,
+        board_mutations=board_mutation_adapter,
+        issue_context=pr_adapter,
         github_memo=memo,
     )
 

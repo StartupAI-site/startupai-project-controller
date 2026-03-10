@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.github_cli import (
     CycleGitHubMemo,
     GitHubCliAdapter,
@@ -52,7 +53,7 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
             ]
         )
 
-    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
     prs = adapter.list_open_prs_for_issue("StartupAI-site/startupai-crew", 42)
@@ -73,7 +74,7 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
 
 def test_list_open_prs_reads_json_directly(monkeypatch) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._run_gh",
+        "startupai_controller.adapters.github_base._run_gh",
         lambda args, gh_runner=None, operation_type="query": json.dumps(
             [
                 {
@@ -339,7 +340,7 @@ def test_is_pr_open_uses_adapter_owned_query(monkeypatch) -> None:
 
 def test_query_project_item_field_uses_adapter_owned_query(monkeypatch) -> None:
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_project_field_value",
         lambda self, issue_ref, field_name: f"{issue_ref}:{field_name}",
     )
@@ -357,7 +358,7 @@ def test_query_project_item_field_uses_adapter_owned_query(monkeypatch) -> None:
 
 def test_query_issue_board_info_uses_adapter_owned_board_lookup(monkeypatch) -> None:
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_board_info",
         lambda self, issue_ref: SimpleNamespace(
             status="Review",
@@ -411,7 +412,7 @@ def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
 
 def test_query_single_select_field_option_uses_adapter_owned_query(monkeypatch) -> None:
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: (
             f"{project_id}:{field_name}",
@@ -448,12 +449,12 @@ def test_set_text_field_uses_adapter_owned_mutation(monkeypatch) -> None:
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_field_id",
         lambda self, project_id, field_name: f"{project_id}:{field_name}",
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_text_field",
         lambda self, project_id, item_id, field_id, value: recorded.append(
             (project_id, item_id, field_id, value)
@@ -469,7 +470,7 @@ def test_set_single_select_field_uses_adapter_owned_mutation(monkeypatch) -> Non
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: (
             f"{project_id}:{field_name}",
@@ -477,7 +478,7 @@ def test_set_single_select_field_uses_adapter_owned_mutation(monkeypatch) -> Non
         ),
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_single_select",
         lambda self, project_id, item_id, field_id, option_id: recorded.append(
             (project_id, item_id, field_id, option_id)
@@ -493,7 +494,7 @@ def test_set_board_status_uses_adapter_owned_status_mutation(monkeypatch) -> Non
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_single_select",
         lambda self, project_id, item_id, field_id, option_id: recorded.append(
             (project_id, item_id, field_id, option_id)
@@ -509,7 +510,7 @@ def test_set_status_if_changed_uses_adapter_owned_mutation(monkeypatch) -> None:
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_board_info",
         lambda self, issue_ref: SimpleNamespace(
             status="Review",
@@ -518,12 +519,12 @@ def test_set_status_if_changed_uses_adapter_owned_mutation(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: ("FIELD", "OPT"),
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_single_select",
         lambda self, project_id, item_id, field_id, option_id: recorded.append(
             (project_id, item_id, field_id, option_id)
