@@ -102,7 +102,11 @@ def test_tick_skips_review_rescue_when_no_review_items(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(control_plane, "ConsumerDB", FakeDB)
+    monkeypatch.setattr(
+        control_plane,
+        "open_consumer_db",
+        lambda db_path: FakeDB(db_path),
+    )
     monkeypatch.setattr(control_plane, "load_config", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         control_plane,

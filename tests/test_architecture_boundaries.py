@@ -25,28 +25,59 @@ SHIM_MODULES = {
 }
 ADAPTER_PREFIX = "startupai_controller.adapters"
 PORTS_PREFIX = "startupai_controller.ports"
+RUNTIME_PREFIX = "startupai_controller.runtime"
+
+def _is_type_checking_test(node: ast.expr) -> bool:
+    return isinstance(node, ast.Name) and node.id == "TYPE_CHECKING"
 
 
-def _imported_modules(path: Path) -> set[str]:
+class _RuntimeImportCollector(ast.NodeVisitor):
+    """Collect import statements while skipping TYPE_CHECKING-only blocks."""
+
+    def __init__(self) -> None:
+        self.imports: set[str] = set()
+
+    def visit_If(self, node: ast.If) -> None:  # noqa: N802
+        if _is_type_checking_test(node.test):
+            for stmt in node.orelse:
+                self.visit(stmt)
+            return
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        self.imports.update(alias.name for alias in node.names)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        if node.module:
+            self.imports.add(node.module)
+
+
+def _runtime_imported_modules(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module)
-    return imports
+    collector = _RuntimeImportCollector()
+    collector.visit(tree)
+    return collector.imports
 
 
-def test_orchestrators_do_not_import_shim_modules() -> None:
+def test_orchestrators_use_canonical_runtime_boundaries() -> None:
     for path in ORCHESTRATOR_MODULES:
-        imported = _imported_modules(path)
-        offending = sorted(imported & SHIM_MODULES)
-        assert offending == [], f"{path.name} imports shim modules: {offending}"
+        imported = _runtime_imported_modules(path)
+        offending = sorted(
+            module
+            for module in imported
+            if module in SHIM_MODULES or module.startswith(ADAPTER_PREFIX)
+        )
+        assert offending == [], (
+            f"{path.name} imports concrete adapter/shim modules at runtime: {offending}"
+        )
+        assert any(
+            module.startswith(PORTS_PREFIX) or module.startswith(RUNTIME_PREFIX)
+            for module in imported
+        ), f"{path.name} does not import canonical ports/runtime wiring"
 
 
 def test_board_graph_has_no_adapter_or_shim_imports() -> None:
-    imported = _imported_modules(GRAPH_MODULE)
+    imported = _runtime_imported_modules(GRAPH_MODULE)
     offending = sorted(
         module
         for module in imported
@@ -57,7 +88,7 @@ def test_board_graph_has_no_adapter_or_shim_imports() -> None:
 
 def test_domain_has_no_port_adapter_or_shim_imports() -> None:
     for path in DOMAIN_ROOT.glob("*.py"):
-        imported = _imported_modules(path)
+        imported = _runtime_imported_modules(path)
         offending = sorted(
             module
             for module in imported
@@ -70,7 +101,7 @@ def test_domain_has_no_port_adapter_or_shim_imports() -> None:
 
 def test_ports_do_not_import_adapters() -> None:
     for path in PORTS_ROOT.glob("*.py"):
-        imported = _imported_modules(path)
+        imported = _runtime_imported_modules(path)
         offending = sorted(
             module for module in imported if module.startswith(ADAPTER_PREFIX)
         )

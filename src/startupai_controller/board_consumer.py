@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 
 from startupai_controller.board_automation import (
@@ -67,29 +67,6 @@ from startupai_controller.consumer_workflow import (
     workflow_status_payload,
     write_workflow_snapshot,
 )
-from startupai_controller.adapters.github_types import (
-    CycleBoardSnapshot,
-    CycleGitHubMemo,
-    LinkedIssue,
-    ProjectItemSnapshot as _ProjectItemSnapshot,
-)
-from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
-    _post_comment,
-    _set_status_if_changed,
-    close_issue,
-    enable_pull_request_automerge,
-    rerun_actions_run,
-)
-from startupai_controller.adapters.github_transport import _run_gh, gh_reason_code
-from startupai_controller.adapters.github_http_adapter import (  # canonical: transport stats
-    begin_request_stats,
-    end_request_stats,
-)
-from startupai_controller.adapters.sqlite_store import ConsumerDB
-from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-internal types
-    MetricEvent,
-    RecoveredLease,
-)
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
@@ -97,10 +74,16 @@ from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.runtime.wiring import (
+    begin_runtime_request_stats,
     build_github_port_bundle,
     build_session_store,
     build_worktree_port,
     clear_github_runtime_caches,
+    end_runtime_request_stats,
+    GitHubRuntimeMemo as CycleGitHubMemo,
+    open_consumer_db,
+    run_runtime_gh as _run_gh,
+    runtime_gh_reason_code as gh_reason_code,
 )
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
@@ -115,6 +98,9 @@ from startupai_controller.domain.models import (
     IssueSnapshot,
     OpenPullRequestMatch,
     IssueContext,
+    LinkedIssue,
+    CycleBoardSnapshot,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
     RepairBranchReconcileOutcome,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
@@ -182,6 +168,13 @@ from startupai_controller.validate_critical_path_promotion import (
     load_config,
     parse_issue_ref,
 )
+
+if TYPE_CHECKING:
+    from startupai_controller.runtime.wiring import (
+        ConsumerDB,
+        MetricEvent,
+        RecoveredLease,
+    )
 
 logger = logging.getLogger("board-consumer")
 
@@ -998,6 +991,7 @@ def _commit_reachable_from_origin_main(
 def _pr_is_merged(
     pr_url: str,
     *,
+    pr_port: PullRequestPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Return True when a PR URL points at a merged pull request."""
@@ -1005,6 +999,11 @@ def _pr_is_merged(
     if parsed is None:
         return False
     owner, repo, pr_number = parsed
+    if pr_port is not None:
+        try:
+            return pr_port.is_pull_request_merged(f"{owner}/{repo}", pr_number)
+        except Exception:
+            return False
     output = _run_gh(
         [
             "pr",
@@ -1032,6 +1031,7 @@ def _verify_resolution_payload(
     *,
     config: ConsumerConfig,
     workflows: dict[str, WorkflowDefinition],
+    pr_port: PullRequestPort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> ResolutionEvaluation:
@@ -1060,6 +1060,7 @@ def _verify_resolution_payload(
         repo_root,
         normalized,
         validation_command,
+        pr_port=pr_port,
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
     )
@@ -1124,6 +1125,7 @@ def _resolution_evidence_payload(
     normalized: dict[str, Any],
     validation_command: str,
     *,
+    pr_port: PullRequestPort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
@@ -1144,7 +1146,7 @@ def _resolution_evidence_payload(
     merged_pr_urls = [
         pr_url
         for pr_url in pr_urls
-        if _pr_is_merged(pr_url, gh_runner=gh_runner)
+        if _pr_is_merged(pr_url, pr_port=pr_port, gh_runner=gh_runner)
     ]
     validation_ok, validation_exit_code, validation_detail = _run_validation_on_main(
         repo_root,
@@ -1246,26 +1248,20 @@ def _set_issue_handoff_target(
     project_owner: str,
     project_number: int,
     *,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    from startupai_controller.adapters.github_cli import (
-        _query_issue_board_info,
-        _set_single_select_field,
-    )
-
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-    if info.status == "NOT_ON_BOARD":
-        return
-    _set_single_select_field(
-        info.project_id,
-        info.item_id,
-        "Handoff To",
-        target,
-        gh_runner=gh_runner,
-    )
+    port = board_port
+    if port is None:
+        port = build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        ).board_mutations
+    port.set_issue_field(issue_ref, "Handoff To", target)
 
 
 def _apply_resolution_action(
@@ -1314,14 +1310,14 @@ def _apply_resolution_action(
                 from_statuses={"Backlog", "In Progress", "Ready"},
             )
         try:
-            poster = comment_poster or _post_comment
+            poster = comment_poster or _runtime_comment_poster
             poster(owner, repo, number, comment_body, gh_runner=gh_runner)
             _record_successful_github_mutation(db)
         except (GhQueryError, Exception) as err:
             _mark_degraded(db, f"resolution-comment:{gh_reason_code(err)}:{err}")
             _queue_issue_comment(db, issue_ref, comment_body)
         try:
-            close_issue(owner, repo, number, gh_runner=gh_runner)
+            _runtime_issue_closer(owner, repo, number, gh_runner=gh_runner)
             _record_successful_github_mutation(db)
         except (GhQueryError, Exception) as err:
             _mark_degraded(db, f"resolution-close:{gh_reason_code(err)}:{err}")
@@ -1360,7 +1356,7 @@ def _apply_resolution_action(
             blocked_reason=blocked_reason,
         )
     try:
-        poster = comment_poster or _post_comment
+        poster = comment_poster or _runtime_comment_poster
         poster(owner, repo, number, comment_body, gh_runner=gh_runner)
         _record_successful_github_mutation(db)
     except (GhQueryError, Exception) as err:
@@ -2257,6 +2253,54 @@ def _default_review_comment_checker(
     return checker
 
 
+def _runtime_comment_poster(
+    owner: str,
+    repo: str,
+    number: int,
+    body: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Post an issue comment through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    bundle.board_mutations.post_issue_comment(f"{owner}/{repo}", number, body)
+
+
+def _runtime_issue_closer(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Close an issue through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    bundle.board_mutations.close_issue(f"{owner}/{repo}", number)
+
+
+def _runtime_automerge_enabler(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Enable auto-merge through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    return bundle.pull_requests.enable_automerge(pr_repo, pr_number)
+
+
+def _runtime_failed_check_rerun(
+    pr_repo: str,
+    run_id: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Re-run a failed check through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    if not bundle.pull_requests.rerun_failed_check(pr_repo, "", run_id):
+        raise GhQueryError(f"Failed rerunning check for {pr_repo} run {run_id}")
+
+
 def _post_consumer_claim_comment(
     issue_ref: str,
     session_id: str,
@@ -2289,7 +2333,7 @@ def _post_consumer_claim_comment(
             f"Session: `{session_id}`",
         ]
     )
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -2407,7 +2451,7 @@ def _post_result_comment(
         lines.append(f"\nDuration: {duration:.0f}s")
 
     body = "\n".join(lines)
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -2437,7 +2481,7 @@ def _post_pr_codex_verdict(
 
     body = _verdict_comment_body(session_id
     )
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, pr_number, body, gh_runner=gh_runner)
     return True
 
@@ -3957,7 +4001,7 @@ def _replay_deferred_issue_comment(
     if board_port is not None:
         board_port.post_issue_comment(f"{owner}/{repo}", number, body)
         return
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -3974,7 +4018,7 @@ def _replay_deferred_issue_close(
     if board_port is not None:
         board_port.close_issue(f"{owner}/{repo}", number)
         return
-    close_issue(owner, repo, number, gh_runner=gh_runner)
+    _runtime_issue_closer(owner, repo, number, gh_runner=gh_runner)
 
 
 def _replay_deferred_check_rerun(
@@ -3993,7 +4037,7 @@ def _replay_deferred_check_rerun(
                 f"Failed rerunning check for {pr_repo} run {run_id}"
             )
         return
-    rerun_actions_run(pr_repo, run_id, gh_runner=gh_runner)
+    _runtime_failed_check_rerun(pr_repo, run_id, gh_runner=gh_runner)
 
 
 def _replay_deferred_automerge_enable(
@@ -4008,7 +4052,7 @@ def _replay_deferred_automerge_enable(
     if pr_port is not None:
         pr_port.enable_automerge(pr_repo, pr_number)
         return
-    enable_pull_request_automerge(pr_repo, pr_number, gh_runner=gh_runner)
+    _runtime_automerge_enabler(pr_repo, pr_number, gh_runner=gh_runner)
 
 
 # ---------------------------------------------------------------------------
@@ -4058,25 +4102,23 @@ def _transition_issue_to_in_progress(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move an actively running local repair back into In Progress."""
-    if review_state_port is not None and board_port is not None:
-        old_status = review_state_port.get_issue_status(issue_ref)
-        if old_status in (from_statuses or {"Review"}):
-            board_port.set_issue_status(issue_ref, "In Progress")
-            changed = True
-        else:
-            changed = False
-    else:
-        changed, old_status = _set_status_if_changed(
-            issue_ref,
-            from_statuses or {"Review"},
-            "In Progress",
-            config,
+    port_review = review_state_port
+    port_board = board_port
+    if port_review is None or port_board is None:
+        bundle = build_github_port_bundle(
             project_owner,
             project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
+            config=config,
             gh_runner=gh_runner,
         )
+        port_review = port_review or bundle.review_state
+        port_board = port_board or bundle.board_mutations
+    old_status = port_review.get_issue_status(issue_ref)
+    if old_status in (from_statuses or {"Review"}):
+        port_board.set_issue_status(issue_ref, "In Progress")
+        changed = True
+    else:
+        changed = False
     if changed or old_status == "In Progress":
         return
     raise GhQueryError(
@@ -4098,25 +4140,23 @@ def _return_issue_to_ready(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
-    if review_state_port is not None and board_port is not None:
-        old_status = review_state_port.get_issue_status(issue_ref)
-        if old_status in (from_statuses or {"In Progress"}):
-            board_port.set_issue_status(issue_ref, "Ready")
-            changed = True
-        else:
-            changed = False
-    else:
-        changed, old_status = _set_status_if_changed(
-            issue_ref,
-            from_statuses or {"In Progress"},
-            "Ready",
-            config,
+    port_review = review_state_port
+    port_board = board_port
+    if port_review is None or port_board is None:
+        bundle = build_github_port_bundle(
             project_owner,
             project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
+            config=config,
             gh_runner=gh_runner,
         )
+        port_review = port_review or bundle.review_state
+        port_board = port_board or bundle.board_mutations
+    old_status = port_review.get_issue_status(issue_ref)
+    if old_status in (from_statuses or {"In Progress"}):
+        port_board.set_issue_status(issue_ref, "Ready")
+        changed = True
+    else:
+        changed = False
     if changed or old_status == "Ready":
         return
     raise GhQueryError(
@@ -4778,7 +4818,7 @@ def _prepare_cycle(
     gh_runner: Callable[..., str] | None = None,
 ) -> PreparedCycleContext:
     """Run control-plane preflight once for a daemon tick."""
-    request_stats_token = begin_request_stats()
+    request_stats_token = begin_runtime_request_stats()
     expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
     if expired:
         logger.info("Expired stale leases: %s", expired)
@@ -4805,7 +4845,7 @@ def _prepare_cycle(
         gh_runner=gh_runner,
     )
 
-    request_stats = end_request_stats(request_stats_token)
+    request_stats = end_runtime_request_stats(request_stats_token)
     github_request_counts = {
         "graphql": request_stats.graphql,
         "rest": request_stats.rest,
@@ -4934,11 +4974,6 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    from startupai_controller.adapters.github_cli import (
-        _query_issue_board_info,
-        _set_single_select_field,
-    )
-
     marker = _marker_for("consumer-escalation", issue_ref)
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
     blocked_reason = reason or "max retries exceeded"
@@ -4954,20 +4989,17 @@ def _escalate_to_claude(
     )
 
     # Set Handoff To field
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-
-    if info.status != "NOT_ON_BOARD":
-        try:
-            _set_single_select_field(
-                info.project_id,
-                info.item_id,
-                "Handoff To",
-                "claude",
-                gh_runner=gh_runner,
-            )
-        except (GhQueryError, Exception):
-            logger.warning("Failed to set Handoff To field for %s", issue_ref)
+    try:
+        _set_issue_handoff_target(
+            issue_ref,
+            "claude",
+            config,
+            project_owner,
+            project_number,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception):
+        logger.warning("Failed to set Handoff To field for %s", issue_ref)
 
     checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     if checker(owner, repo, number, marker, gh_runner=gh_runner):
@@ -4980,7 +5012,7 @@ def _escalate_to_claude(
         f"Reason: {blocked_reason}\n\n"
         f"Handoff To: `claude`"
     )
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -6685,11 +6717,19 @@ def _handle_non_review_execution_outcome(
     updated_session_status = session_status
 
     if session_status == "success" and not has_commits:
+        github_bundle = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner,
+        )
         resolution_evaluation = _verify_resolution_payload(
             candidate,
             codex_result.get("resolution") if codex_result else None,
             config=launch_context.effective_consumer_config,
             workflows=prepared.main_workflows,
+            pr_port=github_bundle.pull_requests,
             subprocess_runner=subprocess_runner,
             gh_runner=gh_runner,
         )
@@ -7218,7 +7258,7 @@ def _run_worker_cycle(
     di_kwargs: dict[str, Any] | None = None,
 ) -> CycleResult:
     """Execute one issue in an isolated worker DB connection."""
-    worker_db = ConsumerDB(db_path=config.db_path)
+    worker_db = open_consumer_db(config.db_path)
     worker_config = replace(config)
     try:
         return run_one_cycle(
@@ -7925,7 +7965,7 @@ def _collect_status_runtime_state(
     status_now: datetime,
 ) -> dict[str, Any]:
     """Collect DB-backed runtime state for status reporting."""
-    db = ConsumerDB(db_path=config.db_path)
+    db = open_consumer_db(config.db_path)
     try:
         leases = db.active_lease_count()
         slots = sorted(db.active_slot_ids())

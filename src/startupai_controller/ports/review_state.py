@@ -31,6 +31,10 @@ class ReviewStatePort(Protocol):
         """Return the full typed field bundle for an issue."""
         ...
 
+    def project_field_value(self, issue_ref: str, field_name: str) -> str:
+        """Return one raw board field value for an issue."""
+        ...
+
     def search_open_issue_numbers_with_comment_marker(
         self, repo: str, marker: str
     ) -> tuple[int, ...]:
@@ -54,6 +58,22 @@ class ReviewStatePort(Protocol):
 
     def comment_exists(self, repo: str, issue_number: int, marker: str) -> bool:
         """Return True when a marker comment already exists for the issue or PR."""
+        ...
+
+    def latest_non_automation_comment_timestamp(
+        self,
+        repo: str,
+        issue_number: int,
+    ) -> datetime | None:
+        """Return the latest human-authored comment timestamp for an issue."""
+        ...
+
+    def issue_updated_at(self, repo: str, issue_number: int) -> datetime | None:
+        """Return the latest issue updated_at timestamp."""
+        ...
+
+    def issue_assignees(self, repo: str, issue_number: int) -> tuple[str, ...]:
+        """Return the current assignee logins for an issue."""
         ...
 
     def build_board_snapshot(self) -> CycleBoardSnapshot:

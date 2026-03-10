@@ -12,13 +12,24 @@ from typing import Callable
 import subprocess
 
 from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
-from startupai_controller.adapters.github_cli import CycleGitHubMemo, GitHubCliAdapter
+from startupai_controller.adapters.pull_requests import CycleGitHubMemo
+from startupai_controller.adapters.github_cli import GitHubCliAdapter
+from startupai_controller.adapters.github_http_adapter import (
+    begin_request_stats,
+    end_request_stats,
+)
+from startupai_controller.adapters.github_transport import _run_gh, gh_reason_code
 from startupai_controller.adapters.review_state import (
     GitHubReviewStateAdapter,
     clear_cycle_board_snapshot_cache,
 )
 from startupai_controller.adapters.local_process import LocalProcessAdapter
-from startupai_controller.adapters.sqlite_store import ConsumerDB, SqliteSessionStore
+from startupai_controller.adapters.sqlite_store import (
+    ConsumerDB,
+    MetricEvent,
+    RecoveredLease,
+    SqliteSessionStore,
+)
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.pull_requests import PullRequestPort
@@ -37,6 +48,9 @@ class GitHubPortBundle:
     board_mutations: BoardMutationPort
     issue_context: IssueContextPort
     github_memo: CycleGitHubMemo
+
+
+GitHubRuntimeMemo = CycleGitHubMemo
 
 
 def build_github_port_bundle(
@@ -84,6 +98,11 @@ def build_session_store(db: ConsumerDB) -> SessionStorePort:
     return SqliteSessionStore(db)
 
 
+def open_consumer_db(db_path) -> ConsumerDB:
+    """Open the concrete SQLite store at the runtime wiring boundary."""
+    return ConsumerDB(db_path=db_path)
+
+
 def build_worktree_port(
     *,
     gh_runner: Callable[..., str] | None = None,
@@ -99,3 +118,33 @@ def build_worktree_port(
 def clear_github_runtime_caches() -> None:
     """Clear short-lived GitHub adapter caches owned by the runtime boundary."""
     clear_cycle_board_snapshot_cache()
+
+
+def new_github_runtime_memo() -> GitHubRuntimeMemo:
+    """Build a fresh per-command/per-cycle GitHub memo."""
+    return GitHubRuntimeMemo()
+
+
+def begin_runtime_request_stats():
+    """Begin GitHub request statistics collection at the runtime boundary."""
+    return begin_request_stats()
+
+
+def end_runtime_request_stats(token):
+    """End GitHub request statistics collection at the runtime boundary."""
+    return end_request_stats(token)
+
+
+def run_runtime_gh(
+    args: list[str],
+    *,
+    gh_runner: Callable[..., str] | None = None,
+    operation_type: str = "",
+) -> str:
+    """Execute one GitHub CLI command through the runtime boundary."""
+    return _run_gh(args, gh_runner=gh_runner, operation_type=operation_type)
+
+
+def runtime_gh_reason_code(error: Exception) -> str:
+    """Classify one GitHub transport/query error at the runtime boundary."""
+    return gh_reason_code(error)

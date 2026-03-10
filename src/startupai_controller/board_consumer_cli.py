@@ -233,12 +233,12 @@ def _cmd_serve_status(
 def _cmd_reconcile(config: ConsumerConfig, *, dry_run: bool = False) -> int:
     """Reconcile board truth against local consumer state."""
     core = _core()
-    db = core.ConsumerDB(db_path=config.db_path)
+    db = core.open_consumer_db(config.db_path)
     try:
         cp_config = core.load_config(config.critical_paths_path)
         auto_config = core.load_automation_config(config.automation_config_path)
         core._apply_automation_runtime(config, auto_config)
-        session_store = core.SqliteSessionStore(db)
+        session_store = core.build_session_store(db)
         result = core._reconcile_board_truth(
             config,
             cp_config,
@@ -419,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "resume":
         return _cmd_resume(config)
 
-    db = core.ConsumerDB(db_path=config.db_path)
+    db = core.open_consumer_db(config.db_path)
 
     if args.command == "one-shot":
         result = core.run_one_cycle(

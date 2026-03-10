@@ -7,6 +7,7 @@ from typing import Any
 
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
+    LinkedIssue,
     ProjectItemSnapshot,
 )
 
@@ -38,16 +39,6 @@ class CycleGitHubMemo:
 
 
 @dataclass(frozen=True)
-class LinkedIssue:
-    """One issue linked from a PR body."""
-
-    owner: str
-    repo: str
-    number: int
-    ref: str
-
-
-@dataclass(frozen=True)
 class CodexReviewVerdict:
     """Adapter-local codex verdict extracted from PR comments/reviews."""
 
@@ -65,6 +56,8 @@ class PullRequestViewPayload:
 
     pr_repo: str
     pr_number: int
+    url: str
+    head_ref_name: str
     author: str
     body: str
     state: str
@@ -72,6 +65,7 @@ class PullRequestViewPayload:
     merge_state_status: str
     mergeable: str
     base_ref_name: str
+    merged_at: str
     auto_merge_enabled: bool
     comments: tuple[dict[str, Any], ...] = ()
     reviews: tuple[dict[str, Any], ...] = ()

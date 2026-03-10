@@ -260,6 +260,9 @@ query($owner: String!, $number: Int!, $cursor: String) {
             blocked_reason=field("Blocked Reason"),
         )
 
+    def project_field_value(self, issue_ref: str, field_name: str) -> str:
+        return self._query_project_field_value(issue_ref, field_name)
+
     def search_open_issue_numbers_with_comment_marker(
         self,
         repo: str,
@@ -361,6 +364,45 @@ query($owner: String!, $number: Int!, $cursor: String) {
     def comment_exists(self, repo: str, issue_number: int, marker: str) -> bool:
         owner, repo_name = repo.split("/", maxsplit=1)
         return self._comment_exists(owner, repo_name, issue_number, marker)
+
+    def latest_non_automation_comment_timestamp(
+        self,
+        repo: str,
+        issue_number: int,
+    ) -> datetime | None:
+        owner, repo_name = repo.split("/", maxsplit=1)
+        return _query_latest_non_automation_comment_timestamp(
+            owner,
+            repo_name,
+            issue_number,
+            gh_runner=self._gh_runner,
+        )
+
+    def issue_updated_at(self, repo: str, issue_number: int) -> datetime | None:
+        owner, repo_name = repo.split("/", maxsplit=1)
+        output = _run_gh(
+            [
+                "api",
+                f"repos/{owner}/{repo_name}/issues/{issue_number}",
+                "-q",
+                ".updated_at",
+            ],
+            gh_runner=self._gh_runner,
+        ).strip()
+        return _parse_github_timestamp(output)
+
+    def issue_assignees(self, repo: str, issue_number: int) -> tuple[str, ...]:
+        owner, repo_name = repo.split("/", maxsplit=1)
+        output = _run_gh(
+            [
+                "api",
+                f"repos/{owner}/{repo_name}/issues/{issue_number}",
+                "-q",
+                ".assignees[].login",
+            ],
+            gh_runner=self._gh_runner,
+        )
+        return tuple(line.strip() for line in output.splitlines() if line.strip())
 
     def build_board_snapshot(self) -> CycleBoardSnapshot:
         return build_cycle_board_snapshot(

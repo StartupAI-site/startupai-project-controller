@@ -26,7 +26,7 @@ Restructure toward ADR-007 hexagonal-domain architecture with three layers:
 ```
 domain/     Pure policy — stdlib only, zero outer-layer imports
 ports/      Protocol classes — domain/ + stdlib only
-adapters/   Implementations wrapping board_io, consumer_db, github_http
+adapters/   Capability-specific mechanism implementations over transport/store code
 ```
 
 ### Domain modules
@@ -83,26 +83,30 @@ assembled per command / per daemon cycle through `runtime/wiring.py`.
 - **Composition root**: runtime adapter selection now happens in
   `runtime/wiring.py`, which builds per-command / per-cycle bundles for
   GitHub-backed ports, session store access, and worktree/process access.
-- **Shim removal on orchestrators**: runtime orchestrators no longer import
-  `board_io.py`, `consumer_db.py`, or `github_http.py` directly. Their runtime
-  boundary is now canonical domain/ports/runtime wiring plus adapter surfaces.
+- **Canonical runtime boundary**: runtime orchestrators no longer import
+  `board_io.py`, `consumer_db.py`, `github_http.py`, or adapter helper modules
+  directly. Their runtime boundary is now `domain/`, `ports/`, and
+  `runtime/wiring.py`.
 - **Graph input cleanup**: `board_graph.py` consumes typed inputs and no longer
   imports adapters or shim modules directly.
+- **Capability adapters**: GitHub runtime access is now split across adapter
+  modules by responsibility (`pull_requests`, `review_state`, `board_mutation`,
+  transport/types), instead of routing orchestration through one giant shim.
 
 ### Transitional (not yet migrated)
 
-The remaining transitional surfaces are now mostly **adapter-level** or
-**coordinator-level**, not shim-level:
+The remaining transitional surfaces are now mostly **adapter concentration** or
+**compatibility-shell** issues, not orchestration-boundary issues:
 
-- `board_consumer.py` and `board_automation.py` still import a broad helper
-  surface from adapter modules, especially `adapters/github_cli.py`, for
-  capabilities not yet reduced to small port-only method sets.
-- `GitHubCliAdapter` still concentrates too much GitHub board/PR/review
-  mechanism in one adapter implementation and remains the largest remaining
-  mechanism gravity well.
-- `board_io.py` is no longer a primary runtime dependency for orchestrators, but
-  it still contains compatibility wrappers and residual mechanism ownership for
-  unmigrated helper slices.
+- `GitHubCliAdapter` remains as a compatibility façade while runtime ownership
+  is split across capability adapters. It is smaller than before, but not yet
+  deleted.
+- `board_io.py` is now a compatibility shell and legacy wrapper surface. It is
+  no longer imported by runtime orchestrators, but compatibility callers/tests
+  still rely on it.
+- `consumer_db.py` remains the underlying persistence/mechanism host behind
+  `SqliteSessionStore`; the persistence boundary is real, but the store logic
+  is not yet fully decomposed by capability.
 - Adapter-internal types such as `CodexReviewVerdict`, `PullRequestViewPayload`,
   `MetricEvent`, and `RecoveredLease` remain owned by adapter/mechanism modules,
   not the domain.
@@ -129,15 +133,13 @@ Coordinators consume those bundles instead of choosing concrete adapters inline.
   runtime wiring
 - `board_graph.py` — typed input only, no adapter/shim reads
 
-**Not yet wired** (require new ports — M10 scope):
-- `_apply_resolution_action()` — uses metrics, deferred actions, board mutations
-- `_hydrate_issue_context()` — uses context cache (`get_issue_context`, `set_issue_context`)
-- `_prepare_launch_candidate()` → `_setup_launch_worktree()` — uses worktree/subprocess/metrics
-
-These functions use `ConsumerDB` methods outside the SessionStorePort scope
-(metrics recording, deferred action queuing, context caching). Port protocols
-for these operations (MetricsPort, DeferredActionPort, ContextCachePort,
-WorktreePort) are deferred to M10.
+**Still transitional**:
+- `_apply_resolution_action()` and some status/metrics paths still rely on
+  coordinator-local compatibility wrappers over the store/mutation boundary.
+- `_hydrate_issue_context()` and worktree preparation still use the worktree /
+  issue-context boundary more directly than the cleaner port-only ideal.
+- Compatibility shell paths remain for external callers and tests, even though
+  runtime orchestration is now on canonical boundaries.
 
 ### God-function decomposition
 
@@ -158,11 +160,11 @@ function is retained as a thin delegation shim for external callers.
 
 ### Remaining board_io surface
 
-`board_io.py` is now a compatibility shell plus residual mechanism host for
-unmigrated helper slices. It is no longer directly imported by runtime
-orchestrators, but it still backs some adapter functionality and compatibility
-tests. Further work should continue moving real mechanism out of `board_io.py`
-until it becomes compatibility-only in practice as well as in intent.
+`board_io.py` is now primarily a compatibility shell. Runtime orchestrators do
+not import it directly, and capability adapters own the active GitHub
+board/PR/review paths. The remaining `board_io.py` surface exists to preserve
+legacy caller/test compatibility and to provide a narrow fallback layer while
+older entry points are retired.
 
 ## Consequences
 
@@ -174,8 +176,9 @@ until it becomes compatibility-only in practice as well as in intent.
 - God-functions are decomposed into focused sub-functions with single responsibilities
 - Re-export shims add temporary maintenance burden (removal tracked separately)
 - Board query/mutation mechanism access is substantially improved — runtime
-  orchestrators no longer call `board_io.py` directly, but some adapter-level
-  helper dependence remains transitional
+  orchestrators now use canonical domain/ports/runtime wiring boundaries, while
+  the remaining transitional work is concentrated in compatibility shells and
+  adapter consolidation rather than boundary violations
 
 ## Scope
 

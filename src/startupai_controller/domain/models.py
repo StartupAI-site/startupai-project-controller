@@ -353,6 +353,16 @@ class OpenPullRequest:
     author: str = ""
 
 
+@dataclass(frozen=True)
+class LinkedIssue:
+    """One issue linked from a PR body."""
+
+    owner: str
+    repo: str
+    number: int
+    ref: str
+
+
 # ---------------------------------------------------------------------------
 # New port contract types
 # ---------------------------------------------------------------------------
