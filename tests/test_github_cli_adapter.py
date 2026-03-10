@@ -227,7 +227,7 @@ def test_review_snapshots_batches_queries_by_repo(monkeypatch) -> None:
     payload_calls: list[tuple[str, tuple[int, ...]]] = []
     required_calls: list[tuple[str, str]] = []
 
-    def fake_payloads(memo, pr_repo, pr_numbers, *, gh_runner=None):
+    def fake_payloads(self, pr_repo, pr_numbers):
         normalized = tuple(pr_numbers)
         payload_calls.append((pr_repo, normalized))
         return {
@@ -240,16 +240,18 @@ def test_review_snapshots_batches_queries_by_repo(monkeypatch) -> None:
             for number in normalized
         }
 
-    def fake_required(memo, pr_repo, base_ref_name, *, gh_runner=None):
+    def fake_required(self, pr_repo, base_ref_name="main"):
         required_calls.append((pr_repo, base_ref_name))
         return {"ci"}
 
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.memoized_query_pull_request_view_payloads",
+        GitHubCliAdapter,
+        "_memoized_pull_request_view_payloads",
         fake_payloads,
     )
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.memoized_query_required_status_checks",
+        GitHubCliAdapter,
+        "_query_required_status_checks",
         fake_required,
     )
     monkeypatch.setattr(
@@ -393,7 +395,7 @@ def test_list_issues_by_status_maps_issue_refs_through_config(monkeypatch) -> No
 def test_review_state_digests_batches_by_repo(monkeypatch) -> None:
     calls: list[tuple[str, tuple[int, ...]]] = []
 
-    def fake_probes(memo, pr_repo, pr_numbers, *, gh_runner=None):
+    def fake_probes(self, pr_repo, pr_numbers):
         calls.append((pr_repo, pr_numbers))
         return {
             number: {"repo": pr_repo, "number": number}
@@ -401,11 +403,12 @@ def test_review_state_digests_batches_by_repo(monkeypatch) -> None:
         }
 
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.memoized_query_pull_request_state_probes",
+        GitHubCliAdapter,
+        "_memoized_pull_request_state_probes",
         fake_probes,
     )
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.review_state_digest_from_probe",
+        "startupai_controller.adapters.github_cli._review_state_digest_from_probe",
         lambda probe: f"{probe['repo']}#{probe['number']}",
     )
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
@@ -434,14 +437,16 @@ def test_post_codex_verdict_if_missing_checks_marker_first(monkeypatch) -> None:
     poster_calls: list[tuple[str, str, int, str]] = []
 
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._comment_exists",
-        lambda owner, repo, number, marker, gh_runner=None: (
+        GitHubCliAdapter,
+        "_comment_exists",
+        lambda self, owner, repo, number, marker: (
             checker_calls.append((owner, repo, number, marker)) or False
         ),
     )
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._post_comment",
-        lambda owner, repo, number, body, gh_runner=None: poster_calls.append(
+        GitHubCliAdapter,
+        "_post_issue_comment",
+        lambda self, owner, repo, number, body: poster_calls.append(
             (owner, repo, number, body)
         ),
     )

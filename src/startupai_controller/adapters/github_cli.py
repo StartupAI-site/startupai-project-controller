@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+import hashlib
 import json
+import re
 import time
+from typing import Any
 
 from startupai_controller.domain.models import (
     IssueContext,
@@ -26,14 +29,12 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 from startupai_controller.board_io import (  # noqa: F401
     COPILOT_CODING_AGENT_LOGINS,
-    CodexReviewVerdict,
     CycleBoardSnapshot,
     CycleGitHubMemo,
     LinkedIssue,
     PullRequestViewPayload,
     _ProjectItemSnapshot,
     _comment_activity_timestamp,
-    _comment_exists,
     _is_automation_login,
     _is_copilot_coding_agent_actor,
     _is_pr_open,
@@ -41,10 +42,8 @@ from startupai_controller.board_io import (  # noqa: F401
     _list_project_items,
     _list_project_items_by_status,
     _marker_for,
-    _parse_codex_verdict_from_text,
     _parse_github_timestamp,
     _parse_pr_url,
-    _post_comment,
     _query_failed_check_runs,
     _query_issue_assignees,
     _query_issue_comments,
@@ -70,16 +69,7 @@ from startupai_controller.board_io import (  # noqa: F401
     close_issue,
     close_pull_request,
     gh_reason_code,
-    has_copilot_review_signal_from_payload,
-    latest_codex_verdict_from_payload,
-    list_issue_comment_bodies,
     memoized_query_issue_body,
-    memoized_query_pull_request_state_probes,
-    memoized_query_pull_request_view_payloads,
-    memoized_query_required_status_checks,
-    query_latest_codex_verdict,
-    review_state_digest_from_payload,
-    review_state_digest_from_probe,
 )
 
 
@@ -102,6 +92,280 @@ class _PullRequestListItem:
     is_draft: bool
     body: str
     author: str
+
+
+@dataclass(frozen=True)
+class CodexReviewVerdict:
+    """Adapter-local codex verdict extracted from PR comments/reviews."""
+
+    decision: str
+    route: str
+    source: str
+    timestamp: str
+    actor: str
+    checklist: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _PullRequestStateProbe:
+    """Adapter-local lightweight PR state for digest scheduling."""
+
+    pr_repo: str
+    pr_number: int
+    state: str
+    is_draft: bool
+    merge_state_status: str
+    mergeable: str
+    base_ref_name: str
+    auto_merge_enabled: bool
+    head_ref_oid: str
+    updated_at: str
+    latest_comment_at: str
+    latest_review_at: str
+    status_check_rollup: tuple[dict[str, Any], ...] = ()
+
+
+def _extract_run_id(details_url: str) -> int | None:
+    """Extract a GitHub Actions run ID from a details URL when present."""
+    match = re.search(r"/actions/runs/(\d+)", details_url)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _normalize_graphql_rollup_node(node: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize GraphQL status-check nodes into the shared rollup shape."""
+    typename = str(node.get("__typename") or "")
+    if typename == "CheckRun":
+        return {
+            "__typename": "CheckRun",
+            "name": str(node.get("name") or ""),
+            "status": str(node.get("status") or "").lower(),
+            "conclusion": str(node.get("conclusion") or "").lower(),
+            "detailsUrl": str(node.get("detailsUrl") or ""),
+            "completedAt": str(node.get("completedAt") or ""),
+            "startedAt": str(node.get("startedAt") or ""),
+        }
+    if typename == "StatusContext":
+        return {
+            "__typename": "StatusContext",
+            "context": str(node.get("context") or ""),
+            "state": str(node.get("state") or "").lower(),
+            "targetUrl": str(node.get("targetUrl") or ""),
+            "startedAt": str(node.get("createdAt") or ""),
+        }
+    return None
+
+
+def _latest_node_timestamp(nodes: Sequence[dict[str, Any]], *keys: str) -> str:
+    """Return the latest available timestamp from a list of GraphQL nodes."""
+    timestamps: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        for key in keys:
+            value = str(node.get(key) or "")
+            if value:
+                timestamps.append(value)
+    return max(timestamps) if timestamps else ""
+
+
+def _pull_request_state_probe_from_payload(
+    payload: PullRequestViewPayload,
+) -> _PullRequestStateProbe:
+    """Build a lightweight review-state probe from an expanded PR payload."""
+    latest_comment_at = ""
+    if payload.comments:
+        latest_comment_at = max(
+            str(comment.get("createdAt") or "")
+            for comment in payload.comments
+            if isinstance(comment, dict)
+        )
+    latest_review_at = ""
+    if payload.reviews:
+        latest_review_at = max(
+            str(review.get("submittedAt") or "")
+            for review in payload.reviews
+            if isinstance(review, dict)
+        )
+    return _PullRequestStateProbe(
+        pr_repo=payload.pr_repo,
+        pr_number=payload.pr_number,
+        state=payload.state,
+        is_draft=payload.is_draft,
+        merge_state_status=payload.merge_state_status,
+        mergeable=payload.mergeable,
+        base_ref_name=payload.base_ref_name,
+        auto_merge_enabled=payload.auto_merge_enabled,
+        head_ref_oid="",
+        updated_at="",
+        latest_comment_at=latest_comment_at,
+        latest_review_at=latest_review_at,
+        status_check_rollup=payload.status_check_rollup,
+    )
+
+
+def _review_state_digest_from_probe(probe: _PullRequestStateProbe) -> str:
+    """Return a stable digest for the lightweight state of a review PR."""
+    latest_checks: dict[str, tuple[str, str]] = {}
+    for check in probe.status_check_rollup:
+        typename = check.get("__typename", "")
+        if typename == "CheckRun":
+            name = str(check.get("name") or "")
+            timestamp = str(check.get("completedAt") or check.get("startedAt") or "")
+            status = str(check.get("status") or "").lower()
+            conclusion = str(check.get("conclusion") or "").lower()
+            result = (
+                "pending"
+                if status != "completed"
+                else (
+                    "pass"
+                    if conclusion in {"success", "neutral", "skipped"}
+                    else (
+                        "cancelled"
+                        if conclusion in {"cancelled", "startup_failure", "stale"}
+                        else "fail"
+                    )
+                )
+            )
+        elif typename == "StatusContext":
+            name = str(check.get("context") or "")
+            timestamp = str(check.get("startedAt") or "")
+            state = str(check.get("state") or "").lower()
+            result = (
+                "pass"
+                if state == "success"
+                else ("fail" if state in {"error", "failure"} else "pending")
+            )
+        else:
+            continue
+        if not name:
+            continue
+        previous = latest_checks.get(name)
+        if previous is None or timestamp >= previous[0]:
+            latest_checks[name] = (timestamp, result)
+
+    payload = {
+        "state": probe.state.strip().upper(),
+        "is_draft": bool(probe.is_draft),
+        "merge_state_status": probe.merge_state_status,
+        "mergeable": probe.mergeable,
+        "base_ref_name": probe.base_ref_name,
+        "auto_merge_enabled": bool(probe.auto_merge_enabled),
+        "head_ref_oid": probe.head_ref_oid,
+        "updated_at": probe.updated_at,
+        "latest_comment_at": probe.latest_comment_at,
+        "latest_review_at": probe.latest_review_at,
+        "checks": sorted(
+            (name, result) for name, (_ts, result) in latest_checks.items()
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_codex_verdict_from_text(
+    text: str,
+) -> tuple[str | None, str | None, list[str]]:
+    """Extract codex verdict markers from free text."""
+    decision_match = re.search(r"\bcodex-review\s*:\s*(pass|fail)\b", text, re.I)
+    route_match = re.search(
+        r"\bcodex-route\s*:\s*(none|codex|executor|claude|human)\b",
+        text,
+        re.I,
+    )
+    checklist = re.findall(r"^\s*-\s*\[\s\]\s+(.+)$", text, flags=re.M)
+    decision = decision_match.group(1).lower() if decision_match else None
+    route = route_match.group(1).lower() if route_match else None
+    return decision, route, checklist
+
+
+def latest_codex_verdict_from_payload(
+    payload: PullRequestViewPayload,
+    *,
+    trusted_actors: set[str] | frozenset[str] | None = None,
+) -> CodexReviewVerdict | None:
+    """Return the latest codex verdict marker from one expanded PR payload."""
+    candidates: list[CodexReviewVerdict] = []
+
+    for comment in payload.comments:
+        body = comment.get("body") or ""
+        decision, route, checklist = _parse_codex_verdict_from_text(body)
+        if decision is None:
+            continue
+        actor = (
+            (
+                (comment.get("author") or {}).get("login")
+                or (comment.get("user") or {}).get("login")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        if trusted_actors and actor not in trusted_actors:
+            continue
+        ts = comment.get("createdAt", "")
+        chosen_route = "none" if decision == "pass" else (route or "executor")
+        candidates.append(
+            CodexReviewVerdict(
+                decision=decision,
+                route=chosen_route,
+                source="comment",
+                timestamp=ts,
+                actor=actor,
+                checklist=checklist,
+            )
+        )
+
+    for review in payload.reviews:
+        body = review.get("body") or ""
+        decision, route, checklist = _parse_codex_verdict_from_text(body)
+        if decision is None:
+            continue
+        actor = (
+            (
+                (review.get("author") or {}).get("login")
+                or (review.get("user") or {}).get("login")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        if trusted_actors and actor not in trusted_actors:
+            continue
+        ts = review.get("submittedAt", "")
+        chosen_route = "none" if decision == "pass" else (route or "executor")
+        candidates.append(
+            CodexReviewVerdict(
+                decision=decision,
+                route=chosen_route,
+                source="review",
+                timestamp=ts,
+                actor=actor,
+                checklist=checklist,
+            )
+        )
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item.timestamp)
+    return candidates[-1]
+
+
+def has_copilot_review_signal_from_payload(payload: PullRequestViewPayload) -> bool:
+    """Return True when Copilot has submitted an approved/commented review."""
+    accepted_states = {"APPROVED", "COMMENTED"}
+    for review in payload.reviews:
+        state = str(review.get("state", "")).upper()
+        actor = ((review.get("author") or {}).get("login") or "").lower()
+        if "copilot" in actor and state in accepted_states:
+            return True
+    return False
 
 
 class GitHubCliAdapter:
@@ -632,6 +896,375 @@ query($owner: String!, $repo: String!, $number: Int!) {
         self._github_memo.required_status_checks[key] = set(required)
         return set(required)
 
+    def _query_pull_request_view_payloads(
+        self,
+        pr_repo: str,
+        pr_numbers: Sequence[int],
+    ) -> dict[int, PullRequestViewPayload]:
+        """Return expanded PR payloads for a bounded set of PR numbers."""
+        if "/" not in pr_repo:
+            raise ValueError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
+        owner, repo = pr_repo.split("/", maxsplit=1)
+        numbers = tuple(sorted({int(number) for number in pr_numbers}))
+        if not numbers:
+            return {}
+        if len(numbers) == 1:
+            number = numbers[0]
+            return {number: self._query_pull_request_view_payload(pr_repo, number)}
+
+        fields = """
+      number
+      state
+      isDraft
+      mergeStateStatus
+      mergeable
+      baseRefName
+      autoMergeRequest { enabledAt }
+      body
+      author { login }
+      reviews(last: 100) {
+        nodes {
+          body
+          submittedAt
+          state
+          author { login }
+        }
+      }
+      comments(last: 100) {
+        nodes {
+          body
+          createdAt
+          author { login }
+        }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    status
+                    conclusion
+                    detailsUrl
+                    completedAt
+                    startedAt
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    """
+        query_parts = "\n".join(
+            f"pr_{number}: pullRequest(number: {number}) {{ {fields} }}"
+            for number in numbers
+        )
+        query = (
+            "query($owner: String!, $repo: String!) {\n"
+            "  repository(owner: $owner, name: $repo) {\n"
+            f"{query_parts}\n"
+            "  }\n"
+            "}"
+        )
+        payload = self._graphql(
+            query,
+            fields=[
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"repo={repo}",
+            ],
+        )
+        repository = (payload.get("data") or {}).get("repository") or {}
+        results: dict[int, PullRequestViewPayload] = {}
+        for number in numbers:
+            node = repository.get(f"pr_{number}")
+            if not isinstance(node, dict):
+                continue
+            review_nodes = (
+                (node.get("reviews") or {}).get("nodes", [])
+                if isinstance(node.get("reviews"), dict)
+                else []
+            )
+            comment_nodes = (
+                (node.get("comments") or {}).get("nodes", [])
+                if isinstance(node.get("comments"), dict)
+                else []
+            )
+            commit_nodes = (
+                (node.get("commits") or {}).get("nodes", [])
+                if isinstance(node.get("commits"), dict)
+                else []
+            )
+            status_nodes: list[dict[str, Any]] = []
+            if commit_nodes:
+                latest_commit = commit_nodes[-1]
+                rollup = (
+                    (((latest_commit.get("commit") or {}).get("statusCheckRollup") or {}).get("contexts") or {})
+                )
+                for item in rollup.get("nodes", []) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized = _normalize_graphql_rollup_node(item)
+                    if normalized is not None:
+                        status_nodes.append(normalized)
+            results[number] = PullRequestViewPayload(
+                pr_repo=pr_repo,
+                pr_number=number,
+                author=str(((node.get("author") or {}).get("login") or "")).strip().lower(),
+                body=str(node.get("body") or ""),
+                state=str(node.get("state") or ""),
+                is_draft=bool(node.get("isDraft", False)),
+                merge_state_status=str(node.get("mergeStateStatus") or ""),
+                mergeable=str(node.get("mergeable") or ""),
+                base_ref_name=str(node.get("baseRefName") or "main"),
+                auto_merge_enabled=node.get("autoMergeRequest") is not None,
+                comments=tuple(item for item in comment_nodes if isinstance(item, dict)),
+                reviews=tuple(item for item in review_nodes if isinstance(item, dict)),
+                status_check_rollup=tuple(status_nodes),
+            )
+        return results
+
+    def _memoized_pull_request_view_payloads(
+        self,
+        pr_repo: str,
+        pr_numbers: Sequence[int],
+    ) -> dict[int, PullRequestViewPayload]:
+        """Return expanded PR payloads using cycle-local memoization."""
+        numbers = tuple(sorted({int(number) for number in pr_numbers}))
+        missing = [
+            number
+            for number in numbers
+            if (pr_repo, number) not in self._github_memo.review_pull_requests
+        ]
+        if missing:
+            fetched = self._query_pull_request_view_payloads(pr_repo, tuple(missing))
+            for number, payload in fetched.items():
+                self._github_memo.review_pull_requests[(pr_repo, number)] = payload
+        return {
+            number: self._github_memo.review_pull_requests[(pr_repo, number)]
+            for number in numbers
+            if (pr_repo, number) in self._github_memo.review_pull_requests
+        }
+
+    def _query_pull_request_state_probes(
+        self,
+        pr_repo: str,
+        pr_numbers: Sequence[int],
+    ) -> dict[int, _PullRequestStateProbe]:
+        """Return lightweight PR probes for digest-based review scheduling."""
+        if "/" not in pr_repo:
+            raise ValueError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
+        owner, repo = pr_repo.split("/", maxsplit=1)
+        numbers = tuple(sorted({int(number) for number in pr_numbers}))
+        if not numbers:
+            return {}
+
+        fields = """
+      number
+      state
+      isDraft
+      mergeStateStatus
+      mergeable
+      baseRefName
+      headRefOid
+      updatedAt
+      autoMergeRequest { enabledAt }
+      reviews(last: 1) {
+        nodes { submittedAt }
+      }
+      comments(last: 1) {
+        nodes { createdAt }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    status
+                    conclusion
+                    detailsUrl
+                    completedAt
+                    startedAt
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    """
+        query_parts = "\n".join(
+            f"pr_{number}: pullRequest(number: {number}) {{ {fields} }}"
+            for number in numbers
+        )
+        query = (
+            "query($owner: String!, $repo: String!) {\n"
+            "  repository(owner: $owner, name: $repo) {\n"
+            f"{query_parts}\n"
+            "  }\n"
+            "}"
+        )
+        payload = self._graphql(
+            query,
+            fields=[
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"repo={repo}",
+            ],
+        )
+        repository = (payload.get("data") or {}).get("repository") or {}
+        results: dict[int, _PullRequestStateProbe] = {}
+        for number in numbers:
+            node = repository.get(f"pr_{number}")
+            if not isinstance(node, dict):
+                continue
+            review_nodes = (
+                (node.get("reviews") or {}).get("nodes", [])
+                if isinstance(node.get("reviews"), dict)
+                else []
+            )
+            comment_nodes = (
+                (node.get("comments") or {}).get("nodes", [])
+                if isinstance(node.get("comments"), dict)
+                else []
+            )
+            commit_nodes = (
+                (node.get("commits") or {}).get("nodes", [])
+                if isinstance(node.get("commits"), dict)
+                else []
+            )
+            status_nodes: list[dict[str, Any]] = []
+            if commit_nodes:
+                latest_commit = commit_nodes[-1]
+                rollup = (
+                    (((latest_commit.get("commit") or {}).get("statusCheckRollup") or {}).get("contexts") or {})
+                )
+                for item in rollup.get("nodes", []) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized = _normalize_graphql_rollup_node(item)
+                    if normalized is not None:
+                        status_nodes.append(normalized)
+            results[number] = _PullRequestStateProbe(
+                pr_repo=pr_repo,
+                pr_number=number,
+                state=str(node.get("state") or ""),
+                is_draft=bool(node.get("isDraft", False)),
+                merge_state_status=str(node.get("mergeStateStatus") or ""),
+                mergeable=str(node.get("mergeable") or ""),
+                base_ref_name=str(node.get("baseRefName") or "main"),
+                auto_merge_enabled=node.get("autoMergeRequest") is not None,
+                head_ref_oid=str(node.get("headRefOid") or ""),
+                updated_at=str(node.get("updatedAt") or ""),
+                latest_comment_at=_latest_node_timestamp(comment_nodes, "createdAt"),
+                latest_review_at=_latest_node_timestamp(review_nodes, "submittedAt"),
+                status_check_rollup=tuple(status_nodes),
+            )
+        return results
+
+    def _memoized_pull_request_state_probes(
+        self,
+        pr_repo: str,
+        pr_numbers: Sequence[int],
+    ) -> dict[int, _PullRequestStateProbe]:
+        """Return lightweight PR probes using cycle-local memoization."""
+        numbers = tuple(sorted({int(number) for number in pr_numbers}))
+        missing = [
+            number
+            for number in numbers
+            if (pr_repo, number) not in self._github_memo.review_state_probes
+        ]
+        if missing:
+            fetched = self._query_pull_request_state_probes(pr_repo, tuple(missing))
+            for number, payload in fetched.items():
+                self._github_memo.review_state_probes[(pr_repo, number)] = payload
+        return {
+            number: self._github_memo.review_state_probes[(pr_repo, number)]
+            for number in numbers
+            if (pr_repo, number) in self._github_memo.review_state_probes
+        }
+
+    def _list_issue_comment_bodies(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+    ) -> list[str]:
+        """Return issue comment bodies using the cycle-local memo cache."""
+        key = (owner, repo, number)
+        cached = self._github_memo.issue_comment_bodies.get(key)
+        if cached is not None:
+            return list(cached)
+        payload = self._gh_json(
+            [
+                "api",
+                f"repos/{owner}/{repo}/issues/{number}/comments",
+                "--paginate",
+            ],
+            error_message=(
+                f"Failed querying comments for {owner}/{repo}#{number}: invalid JSON."
+            ),
+        )
+        if not isinstance(payload, list):
+            raise GhQueryError(
+                f"Failed querying comments for {owner}/{repo}#{number}: invalid payload."
+            )
+        bodies = [
+            str(item.get("body") or "")
+            for item in payload
+            if isinstance(item, dict) and str(item.get("body") or "")
+        ]
+        self._github_memo.issue_comment_bodies[key] = list(bodies)
+        return list(bodies)
+
+    def _comment_exists(self, owner: str, repo: str, number: int, marker: str) -> bool:
+        """Return True when a marker comment already exists on the issue/PR."""
+        try:
+            return any(
+                marker in body
+                for body in self._list_issue_comment_bodies(owner, repo, number)
+            )
+        except GhQueryError:
+            return False
+
+    def _post_issue_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+        """Post a comment on a GitHub issue or PR and update the memo cache."""
+        _run_gh(
+            [
+                "api",
+                f"repos/{owner}/{repo}/issues/{number}/comments",
+                "-f",
+                f"body={body}",
+            ],
+            gh_runner=self._gh_runner,
+        )
+        key = (owner, repo, number)
+        cached = self._github_memo.issue_comment_bodies.get(key)
+        if cached is not None:
+            self._github_memo.issue_comment_bodies[key] = [*cached, body]
+
 
     # -- PullRequestPort methods --
 
@@ -777,14 +1410,12 @@ query($owner: String!, $repo: String!, $number: Int!) {
             numbers_by_repo.setdefault(pr_repo, []).append(pr_number)
 
         for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
-            probes = memoized_query_pull_request_state_probes(
-                self._github_memo,
+            probes = self._memoized_pull_request_state_probes(
                 pr_repo,
                 tuple(sorted(set(pr_numbers))),
-                gh_runner=self._gh_runner,
             )
             for pr_number, probe in probes.items():
-                digests[(pr_repo, pr_number)] = review_state_digest_from_probe(probe)
+                digests[(pr_repo, pr_number)] = _review_state_digest_from_probe(probe)
         return digests
 
     def review_snapshots(
@@ -799,11 +1430,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
             numbers_by_repo.setdefault(pr_repo, []).append(pr_number)
 
         for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
-            payloads = memoized_query_pull_request_view_payloads(
-                self._github_memo,
+            payloads = self._memoized_pull_request_view_payloads(
                 pr_repo,
                 tuple(sorted(set(pr_numbers))),
-                gh_runner=self._gh_runner,
             )
             for pr_number in sorted(set(pr_numbers)):
                 payload = payloads.get(pr_number)
@@ -815,11 +1444,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
                     raise GhQueryError(
                         f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
                     )
-                required_checks = memoized_query_required_status_checks(
-                    self._github_memo,
+                required_checks = self._query_required_status_checks(
                     pr_repo,
                     payload.base_ref_name or "main",
-                    gh_runner=self._gh_runner,
                 )
                 snapshots[(pr_repo, pr_number)] = _build_review_snapshot_from_payload(
                     pr_repo=pr_repo,
@@ -839,10 +1466,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
             raise GhQueryError(f"Invalid PR URL for codex verdict: {pr_url}")
         owner, repo, pr_number = parsed
         marker = verdict_marker_text(session_id)
-        if _comment_exists(owner, repo, pr_number, marker, gh_runner=self._gh_runner):
+        if self._comment_exists(owner, repo, pr_number, marker):
             return False
         body = verdict_comment_body(session_id)
-        _post_comment(owner, repo, pr_number, body, gh_runner=self._gh_runner)
+        self._post_issue_comment(owner, repo, pr_number, body)
         return True
 
     # -- IssueContextPort methods --
@@ -1041,6 +1668,44 @@ def query_open_pull_requests(
     return adapter.list_open_prs(pr_repo)
 
 
+def list_issue_comment_bodies(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[str]:
+    """Compatibility wrapper implemented on the adapter-owned comment path."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    return adapter._list_issue_comment_bodies(owner, repo, number)
+
+
+def _comment_exists(
+    owner: str,
+    repo: str,
+    number: int,
+    marker: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> bool:
+    """Compatibility wrapper implemented on the adapter-owned comment path."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    return adapter._comment_exists(owner, repo, number, marker)
+
+
+def _post_comment(
+    owner: str,
+    repo: str,
+    number: int,
+    body: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility wrapper implemented on the adapter-owned comment path."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    adapter._post_issue_comment(owner, repo, number, body)
+
+
 def query_pull_request_view_payload(
     pr_repo: str,
     pr_number: int,
@@ -1050,6 +1715,22 @@ def query_pull_request_view_payload(
     """Compatibility wrapper implemented on the adapter-owned mechanism."""
     adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
     return adapter._query_pull_request_view_payload(pr_repo, pr_number)
+
+
+def query_latest_codex_verdict(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    trusted_actors: set[str] | frozenset[str] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> CodexReviewVerdict | None:
+    """Compatibility wrapper implemented on the adapter-owned PR payload path."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    payload = adapter._query_pull_request_view_payload(pr_repo, pr_number)
+    return latest_codex_verdict_from_payload(
+        payload,
+        trusted_actors=trusted_actors,
+    )
 
 
 def query_required_status_checks(
