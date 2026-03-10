@@ -12,6 +12,8 @@ from startupai_controller.domain.scheduling_policy import (
     wip_limit_for_lane as _wip_limit_for_lane,
     protected_queue_executor_target as _protected_queue_executor_target,
     priority_rank as _priority_rank,
+    repo_prefix_for_slug as _repo_prefix_for_slug,
+    snapshot_to_issue_ref as _snapshot_to_issue_ref,
     admission_candidate_rank as _admission_candidate_rank,
     normalize_heading as _normalize_heading,
     admission_watermarks,
@@ -114,6 +116,49 @@ class TestPriorityRank:
         assert _priority_rank("P1") < _priority_rank("P2")
         assert _priority_rank("P2") < _priority_rank("P3")
         assert _priority_rank("P3") < _priority_rank("Unknown")
+
+
+class TestSnapshotIssueRef:
+    """Characterize snapshot_to_issue_ref and repo_prefix_for_slug."""
+
+    ISSUE_PREFIXES = {
+        "app": "StartupAI-site/app.startupai-site",
+        "crew": "StartupAI-site/startupai-project-controller",
+        "site": "StartupAI-site/startupai.site",
+    }
+
+    def test_repo_prefix_for_slug(self) -> None:
+        assert (
+            _repo_prefix_for_slug(
+                "StartupAI-site/startupai.site",
+                self.ISSUE_PREFIXES,
+            )
+            == "site"
+        )
+
+    def test_snapshot_issue_ref_preserves_canonical_ref(self) -> None:
+        assert _snapshot_to_issue_ref("app#46", self.ISSUE_PREFIXES) == "app#46"
+
+    def test_snapshot_issue_ref_normalizes_repo_scoped_ref(self) -> None:
+        assert (
+            _snapshot_to_issue_ref(
+                "StartupAI-site/startupai.site#37",
+                self.ISSUE_PREFIXES,
+            )
+            == "site#37"
+        )
+
+    def test_snapshot_issue_ref_rejects_unknown_repo(self) -> None:
+        assert (
+            _snapshot_to_issue_ref(
+                "StartupAI-site/unknown#37",
+                self.ISSUE_PREFIXES,
+            )
+            is None
+        )
+
+    def test_snapshot_issue_ref_rejects_non_numeric_issue(self) -> None:
+        assert _snapshot_to_issue_ref("site#x", self.ISSUE_PREFIXES) is None
 
 
 # ---------------------------------------------------------------------------

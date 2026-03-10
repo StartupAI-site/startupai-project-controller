@@ -16,6 +16,11 @@ from typing import Any
 MARKER_PREFIX = "startupai-board-bot"
 
 
+def marker_for(kind: str, ref: str) -> str:
+    """Build a deterministic machine marker for issue/PR comments."""
+    return f"<!-- {MARKER_PREFIX}:{kind}:{ref} -->"
+
+
 def deterministic_branch_pattern(issue_number: int) -> re.Pattern[str]:
     """Return the canonical issue branch pattern for PR adoption."""
     return re.compile(rf"^feat/{issue_number}-[a-z0-9-]+$")

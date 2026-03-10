@@ -46,17 +46,14 @@ from startupai_controller.board_consumer import (
     _replay_deferred_actions,
     _drain_review_queue,
 )
-from startupai_controller.adapters.github_cli import (
-    CycleBoardSnapshot,
-    CycleGitHubMemo,
-    _list_project_items_by_status,
-    _snapshot_to_issue_ref,
-    build_cycle_board_snapshot,
-)
-from startupai_controller.adapters.github_http_adapter import begin_request_stats, end_request_stats
-from startupai_controller.adapters.github_transport import gh_reason_code
-from startupai_controller.adapters.sqlite_store import ConsumerDB
 from startupai_controller.consumer_workflow import default_repo_roots
+from startupai_controller.runtime.wiring import (
+    begin_runtime_request_stats,
+    build_github_port_bundle,
+    end_runtime_request_stats,
+    open_consumer_db,
+    runtime_gh_reason_code,
+)
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     GhQueryError,
@@ -95,23 +92,12 @@ def _consumer_service_active() -> bool:
 def _review_scope_refs(
     config: ConsumerConfig,
     critical_path_config,
-    board_snapshot: CycleBoardSnapshot | None = None,
+    review_state_port,
 ) -> list[str]:
     """Return governed Review issue refs for this executor."""
     review_refs: list[str] = []
-    snapshots = (
-        board_snapshot.items_with_status("Review")
-        if board_snapshot is not None
-        else _list_project_items_by_status(
-            "Review",
-            config.project_owner,
-            config.project_number,
-        )
-    )
-    for snapshot in snapshots:
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
-        if issue_ref is None:
-            continue
+    for snapshot in review_state_port.list_issues_by_status("Review"):
+        issue_ref = snapshot.issue_ref
         if parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
             continue
         if snapshot.executor.strip().lower() != config.executor:
@@ -123,8 +109,8 @@ def _review_scope_refs(
 def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
     """Run one repo-tracked overnight control-plane tick."""
     config = _consumer_config_from_args(args)
-    db = ConsumerDB(db_path=config.db_path)
-    request_stats_token = begin_request_stats()
+    db = open_consumer_db(config.db_path)
+    request_stats_token = begin_runtime_request_stats()
     timings_ms: dict[str, int] = {}
     request_counts_recorded = False
 
@@ -133,7 +119,7 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
     ) -> dict[str, object]:
         nonlocal request_counts_recorded
         if not request_counts_recorded:
-            request_stats = end_request_stats(request_stats_token)
+            request_stats = end_runtime_request_stats(request_stats_token)
             payload["github_request_counts"] = {
                 "graphql": request_stats.graphql,
                 "rest": request_stats.rest,
@@ -147,7 +133,11 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
         _apply_automation_runtime(config, automation_config)
         _workflows, statuses, effective_interval = _current_main_workflows(config)
         config.poll_interval_seconds = effective_interval
-        github_memo = CycleGitHubMemo()
+        github_bundle = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=critical_path_config,
+        )
 
         replayed = ()
         if not args.dry_run:
@@ -160,10 +150,13 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
                 )
                 timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
             except GhQueryError as error:
-                _mark_degraded(db, f"deferred-replay:{gh_reason_code(error)}:{error}")
+                _mark_degraded(
+                    db,
+                    f"deferred-replay:{runtime_gh_reason_code(error)}:{error}",
+                )
                 return 4, _finalize_payload({
                     "health": "degraded_recovering",
-                    "reason_code": gh_reason_code(error),
+                    "reason_code": runtime_gh_reason_code(error),
                     "error": f"deferred-replay:{error}",
                     "consumer_service_active": _consumer_service_active(),
                     "timings_ms": timings_ms,
@@ -171,10 +164,7 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
 
         try:
             phase_started = time.monotonic()
-            board_snapshot = build_cycle_board_snapshot(
-                config.project_owner,
-                config.project_number,
-            )
+            board_snapshot = None
             timings_ms["board_snapshot"] = int((time.monotonic() - phase_started) * 1000)
 
             phase_started = time.monotonic()
@@ -188,10 +178,13 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
             )
             timings_ms["executor_routing"] = int((time.monotonic() - phase_started) * 1000)
         except GhQueryError as error:
-            _mark_degraded(db, f"executor-routing:{gh_reason_code(error)}:{error}")
+            _mark_degraded(
+                db,
+                f"executor-routing:{runtime_gh_reason_code(error)}:{error}",
+            )
             return 4, _finalize_payload({
                 "health": "degraded_recovering",
-                "reason_code": gh_reason_code(error),
+                "reason_code": runtime_gh_reason_code(error),
                 "error": f"executor-routing:{error}",
                 "consumer_service_active": _consumer_service_active(),
                 "timings_ms": timings_ms,
@@ -207,7 +200,8 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
             automation_config,
             board_snapshot=board_snapshot,
             dry_run=args.dry_run,
-            github_memo=github_memo,
+            github_memo=github_bundle.github_memo,
+            pr_port=github_bundle.pull_requests,
         )
         timings_ms["review_queue"] = int((time.monotonic() - phase_started) * 1000)
         if review_queue_summary.error:
@@ -237,7 +231,7 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
             active_lease_issue_refs=tuple(db.active_lease_issue_refs()),
             dry_run=args.dry_run,
             board_snapshot=board_snapshot,
-            github_memo=github_memo,
+            github_memo=github_bundle.github_memo,
         )
         timings_ms["admission"] = int((time.monotonic() - phase_started) * 1000)
         admission_summary = admission_summary_payload(
@@ -306,7 +300,7 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
     finally:
         if not request_counts_recorded:
             try:
-                end_request_stats(request_stats_token)
+                end_runtime_request_stats(request_stats_token)
             except Exception:
                 pass
         db.close()

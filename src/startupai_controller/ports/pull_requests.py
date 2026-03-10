@@ -66,6 +66,44 @@ class PullRequestPort(Protocol):
         """Update a PR branch to the latest base branch."""
         ...
 
+    def is_pull_request_open(self, pr_repo: str, pr_number: int) -> bool:
+        """Return True when a PR exists and is open."""
+        ...
+
+    def is_pull_request_merged(self, pr_repo: str, pr_number: int) -> bool:
+        """Return True when a PR exists and is merged."""
+        ...
+
+    def pull_request_updated_at(
+        self,
+        pr_repo: str,
+        pr_number: int,
+    ) -> str | None:
+        """Return the PR updated timestamp as an ISO string, or None."""
+        ...
+
+    def pull_request_head_sha(self, pr_repo: str, pr_number: int) -> str | None:
+        """Return the PR head SHA, or None when unavailable."""
+        ...
+
+    def failed_check_runs(
+        self,
+        pr_repo: str,
+        head_sha: str,
+    ) -> tuple[str, ...] | None:
+        """Return failed check-run names for one commit head SHA."""
+        ...
+
+    def close_pull_request(
+        self,
+        pr_repo: str,
+        pr_number: int,
+        *,
+        comment: str | None = None,
+    ) -> None:
+        """Close a pull request, optionally posting a closing comment."""
+        ...
+
     def review_state_digests(
         self, pr_refs: list[tuple[str, int]]
     ) -> dict[tuple[str, int], str]:

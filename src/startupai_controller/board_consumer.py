@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 
 from startupai_controller.board_automation import (
@@ -67,42 +67,24 @@ from startupai_controller.consumer_workflow import (
     workflow_status_payload,
     write_workflow_snapshot,
 )
-from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
-    CycleBoardSnapshot,
-    CycleGitHubMemo,
-    GitHubCliAdapter,
-    LinkedIssue,
-    _ProjectItemSnapshot,
-    _comment_exists,
-    build_cycle_board_snapshot,
-    _list_project_items_by_status,
-    _marker_for,
-    _post_comment,
-    _set_status_if_changed,
-    _snapshot_to_issue_ref,
-    clear_cycle_board_snapshot_cache,
-    close_issue,
-    enable_pull_request_automerge,
-    rerun_actions_run,
-)
-from startupai_controller.adapters.github_transport import _run_gh, gh_reason_code
-from startupai_controller.adapters.github_http_adapter import (  # canonical: transport stats
-    begin_request_stats,
-    end_request_stats,
-)
-from startupai_controller.adapters.local_process import LocalProcessAdapter
-from startupai_controller.adapters.sqlite_store import ConsumerDB
-from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-internal types
-    MetricEvent,
-    RecoveredLease,
-)
-from startupai_controller.adapters.sqlite_store import SqliteSessionStore
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
+from startupai_controller.runtime.wiring import (
+    begin_runtime_request_stats,
+    build_github_port_bundle,
+    build_session_store,
+    build_worktree_port,
+    clear_github_runtime_caches,
+    end_runtime_request_stats,
+    GitHubRuntimeMemo as CycleGitHubMemo,
+    open_consumer_db,
+    run_runtime_gh as _run_gh,
+    runtime_gh_reason_code as gh_reason_code,
+)
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     build_resolution_comment,
@@ -116,6 +98,9 @@ from startupai_controller.domain.models import (
     IssueSnapshot,
     OpenPullRequestMatch,
     IssueContext,
+    LinkedIssue,
+    CycleBoardSnapshot,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
     RepairBranchReconcileOutcome,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
@@ -126,7 +111,11 @@ from startupai_controller.domain.models import (
 )
 from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
+    marker_for as _marker_for,
     parse_pr_url as _parse_pr_url,
+)
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _snapshot_to_issue_ref,
 )
 from startupai_controller.domain.review_queue_policy import (
     DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
@@ -179,6 +168,13 @@ from startupai_controller.validate_critical_path_promotion import (
     load_config,
     parse_issue_ref,
 )
+
+if TYPE_CHECKING:
+    from startupai_controller.runtime.wiring import (
+        ConsumerDB,
+        MetricEvent,
+        RecoveredLease,
+    )
 
 logger = logging.getLogger("board-consumer")
 
@@ -420,6 +416,7 @@ class CycleRuntimeContext:
     global_limit: int
     github_memo: CycleGitHubMemo
     pr_port: PullRequestPort
+    review_state_port: ReviewStatePort
 
 
 @dataclass(frozen=True)
@@ -469,7 +466,7 @@ def _record_successful_github_mutation(
     now: datetime | None = None,
 ) -> None:
     """Persist the latest successful GitHub mutation timestamp."""
-    clear_cycle_board_snapshot_cache()
+    clear_github_runtime_caches()
     _record_control_timestamp(
         db, CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT, now=now
     )
@@ -994,6 +991,7 @@ def _commit_reachable_from_origin_main(
 def _pr_is_merged(
     pr_url: str,
     *,
+    pr_port: PullRequestPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Return True when a PR URL points at a merged pull request."""
@@ -1001,6 +999,11 @@ def _pr_is_merged(
     if parsed is None:
         return False
     owner, repo, pr_number = parsed
+    if pr_port is not None:
+        try:
+            return pr_port.is_pull_request_merged(f"{owner}/{repo}", pr_number)
+        except Exception:
+            return False
     output = _run_gh(
         [
             "pr",
@@ -1028,6 +1031,7 @@ def _verify_resolution_payload(
     *,
     config: ConsumerConfig,
     workflows: dict[str, WorkflowDefinition],
+    pr_port: PullRequestPort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> ResolutionEvaluation:
@@ -1046,8 +1050,66 @@ def _verify_resolution_payload(
     kind = str(normalized["kind"])
     summary = str(normalized["summary"] or "").strip()
     repo_root = _repo_root_for_issue_ref(config, issue_ref)
+    validation_command = _resolution_validation_command(
+        issue_ref,
+        normalized,
+        config=config,
+        workflows=workflows,
+    )
+    evidence = _resolution_evidence_payload(
+        repo_root,
+        normalized,
+        validation_command,
+        pr_port=pr_port,
+        subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+    )
+    if _resolution_is_strong(normalized, evidence):
+        return ResolutionEvaluation(
+            resolution_kind=kind,
+            verification_class="strong",
+            final_action="closed_as_already_resolved",
+            summary=summary or "Verified existing implementation already satisfies the issue.",
+            evidence=evidence,
+        )
+
+    if kind in NON_AUTO_CLOSE_RESOLUTION_KINDS:
+        return ResolutionEvaluation(
+            resolution_kind=kind,
+            verification_class="weak",
+            final_action="blocked_for_resolution_review",
+            summary=summary or f"Resolution `{kind}` requires review.",
+            evidence=evidence,
+            blocked_reason=f"resolution-review-required:{kind}",
+        )
+
+    verification_class = (
+        "ambiguous"
+        if resolution_has_meaningful_signal(normalized)
+        else "failed"
+    )
+    blocked_reason = _resolution_blocked_reason(normalized, evidence)
+
+    return ResolutionEvaluation(
+        resolution_kind=kind,
+        verification_class=verification_class,
+        final_action="blocked_for_resolution_review",
+        summary=summary or "Resolution evidence was not strong enough to auto-close.",
+        evidence=evidence,
+        blocked_reason=blocked_reason,
+    )
+
+
+def _resolution_validation_command(
+    issue_ref: str,
+    normalized: dict[str, Any],
+    *,
+    config: ConsumerConfig,
+    workflows: dict[str, WorkflowDefinition],
+) -> str:
+    """Resolve the validation command for a resolution verification run."""
     workflow = workflows.get(parse_issue_ref(issue_ref).prefix)
-    validation_command = (
+    return (
         str(normalized["validation_command"]).strip()
         if normalized["validation_command"]
         else (
@@ -1057,6 +1119,17 @@ def _verify_resolution_payload(
         )
     )
 
+
+def _resolution_evidence_payload(
+    repo_root: Path,
+    normalized: dict[str, Any],
+    validation_command: str,
+    *,
+    pr_port: PullRequestPort | None = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> dict[str, Any]:
+    """Collect deterministic evidence for resolution verification."""
     code_refs = list(normalized["code_refs"])
     commit_shas = list(normalized["commit_shas"])
     pr_urls = list(normalized["pr_urls"])
@@ -1073,22 +1146,24 @@ def _verify_resolution_payload(
     merged_pr_urls = [
         pr_url
         for pr_url in pr_urls
-        if _pr_is_merged(pr_url, gh_runner=gh_runner)
+        if _pr_is_merged(pr_url, pr_port=pr_port, gh_runner=gh_runner)
     ]
     validation_ok, validation_exit_code, validation_detail = _run_validation_on_main(
         repo_root,
         validation_command,
         subprocess_runner=subprocess_runner,
     )
-    evidence = {
+    return {
         "code_refs": code_refs,
         "missing_code_refs": missing_code_refs,
+        "code_refs_ok": code_refs_ok,
         "commit_shas": commit_shas,
         "reachable_commit_shas": reachable_commits,
         "pr_urls": pr_urls,
         "merged_pr_urls": merged_pr_urls,
         "validated_on_main_claim": bool(normalized["validated_on_main"]),
         "validation_command": validation_command,
+        "validation_ok": validation_ok,
         "validation_exit_code": validation_exit_code,
         "validation_detail": validation_detail[:500] if validation_detail else "",
         "acceptance_criteria_met": bool(normalized["acceptance_criteria_met"]),
@@ -1096,66 +1171,49 @@ def _verify_resolution_payload(
         "equivalence_claim": normalized["equivalence_claim"],
     }
 
-    if kind in NON_AUTO_CLOSE_RESOLUTION_KINDS:
-        return ResolutionEvaluation(
-            resolution_kind=kind,
-            verification_class="weak",
-            final_action="blocked_for_resolution_review",
-            summary=summary or f"Resolution `{kind}` requires review.",
-            evidence=evidence,
-            blocked_reason=f"resolution-review-required:{kind}",
-        )
 
-    has_reference_evidence = bool(code_refs or commit_shas or pr_urls)
-    auto_close_allowed = resolution_allows_autoclose(normalized)
-    strong = all(
+def _resolution_is_strong(
+    normalized: dict[str, Any],
+    evidence: dict[str, Any],
+) -> bool:
+    """Return True when resolution evidence is strong enough to auto-close."""
+    has_reference_evidence = bool(
+        evidence["code_refs"] or evidence["commit_shas"] or evidence["pr_urls"]
+    )
+    return all(
         [
-            auto_close_allowed,
+            resolution_allows_autoclose(normalized),
             has_reference_evidence,
-            code_refs_ok,
-            bool(reachable_commits or merged_pr_urls),
+            bool(evidence["code_refs_ok"]),
+            bool(evidence["reachable_commit_shas"] or evidence["merged_pr_urls"]),
             bool(normalized["validated_on_main"]),
-            validation_ok,
+            bool(evidence["validation_ok"]),
             bool(normalized["acceptance_criteria_met"]),
         ]
     )
-    if strong:
-        return ResolutionEvaluation(
-            resolution_kind=kind,
-            verification_class="strong",
-            final_action="closed_as_already_resolved",
-            summary=summary or "Verified existing implementation already satisfies the issue.",
-            evidence=evidence,
-        )
 
-    verification_class = (
-        "ambiguous"
-        if resolution_has_meaningful_signal(normalized)
-        else "failed"
-    )
-    if not auto_close_allowed:
-        blocked_reason = "resolution-review-required:unsupported-resolution-kind"
-    elif not has_reference_evidence:
-        blocked_reason = "resolution-review-required:missing-evidence"
-    elif not code_refs_ok:
-        blocked_reason = "resolution-review-required:missing-code-refs"
-    elif not (reachable_commits or merged_pr_urls):
-        blocked_reason = "resolution-review-required:unverified-main-evidence"
-    elif not normalized["validated_on_main"] or not validation_ok:
-        blocked_reason = "resolution-review-required:validation-failed"
-    elif not normalized["acceptance_criteria_met"]:
-        blocked_reason = "resolution-review-required:acceptance-not-met"
-    else:
-        blocked_reason = "resolution-review-required:ambiguous"
 
-    return ResolutionEvaluation(
-        resolution_kind=kind,
-        verification_class=verification_class,
-        final_action="blocked_for_resolution_review",
-        summary=summary or "Resolution evidence was not strong enough to auto-close.",
-        evidence=evidence,
-        blocked_reason=blocked_reason,
+def _resolution_blocked_reason(
+    normalized: dict[str, Any],
+    evidence: dict[str, Any],
+) -> str:
+    """Return the deterministic blocked reason for a non-strong resolution."""
+    has_reference_evidence = bool(
+        evidence["code_refs"] or evidence["commit_shas"] or evidence["pr_urls"]
     )
+    if not resolution_allows_autoclose(normalized):
+        return "resolution-review-required:unsupported-resolution-kind"
+    if not has_reference_evidence:
+        return "resolution-review-required:missing-evidence"
+    if not evidence["code_refs_ok"]:
+        return "resolution-review-required:missing-code-refs"
+    if not (evidence["reachable_commit_shas"] or evidence["merged_pr_urls"]):
+        return "resolution-review-required:unverified-main-evidence"
+    if not normalized["validated_on_main"] or not evidence["validation_ok"]:
+        return "resolution-review-required:validation-failed"
+    if not normalized["acceptance_criteria_met"]:
+        return "resolution-review-required:acceptance-not-met"
+    return "resolution-review-required:ambiguous"
 
 
 def _queue_issue_comment(
@@ -1190,26 +1248,20 @@ def _set_issue_handoff_target(
     project_owner: str,
     project_number: int,
     *,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    from startupai_controller.adapters.github_cli import (
-        _query_issue_board_info,
-        _set_single_select_field,
-    )
-
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-    if info.status == "NOT_ON_BOARD":
-        return
-    _set_single_select_field(
-        info.project_id,
-        info.item_id,
-        "Handoff To",
-        target,
-        gh_runner=gh_runner,
-    )
+    port = board_port
+    if port is None:
+        port = build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        ).board_mutations
+    port.set_issue_field(issue_ref, "Handoff To", target)
 
 
 def _apply_resolution_action(
@@ -1258,14 +1310,14 @@ def _apply_resolution_action(
                 from_statuses={"Backlog", "In Progress", "Ready"},
             )
         try:
-            poster = comment_poster or _post_comment
+            poster = comment_poster or _runtime_comment_poster
             poster(owner, repo, number, comment_body, gh_runner=gh_runner)
             _record_successful_github_mutation(db)
         except (GhQueryError, Exception) as err:
             _mark_degraded(db, f"resolution-comment:{gh_reason_code(err)}:{err}")
             _queue_issue_comment(db, issue_ref, comment_body)
         try:
-            close_issue(owner, repo, number, gh_runner=gh_runner)
+            _runtime_issue_closer(owner, repo, number, gh_runner=gh_runner)
             _record_successful_github_mutation(db)
         except (GhQueryError, Exception) as err:
             _mark_degraded(db, f"resolution-close:{gh_reason_code(err)}:{err}")
@@ -1304,7 +1356,7 @@ def _apply_resolution_action(
             blocked_reason=blocked_reason,
         )
     try:
-        poster = comment_poster or _post_comment
+        poster = comment_poster or _runtime_comment_poster
         poster(owner, repo, number, comment_body, gh_runner=gh_runner)
         _record_successful_github_mutation(db)
     except (GhQueryError, Exception) as err:
@@ -1323,7 +1375,9 @@ def _run_workspace_hooks(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Run repo-owned workspace hook commands in the claimed worktree."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     port.run_workspace_hooks(
         commands,
         worktree_path=worktree_path,
@@ -1361,18 +1415,27 @@ def _select_best_candidate(
     if this_repo_prefix is not None:
         repo_prefixes = (this_repo_prefix,)
     ready_items = ready_items or tuple(
-        _list_project_items_by_status(
-            "Ready", project_owner, project_number, gh_runner=gh_runner
-        )
+        build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            github_memo=github_memo,
+            gh_runner=gh_runner,
+        ).review_state.list_issues_by_status("Ready")
     )
     eligible: list[_ProjectItemSnapshot] = []
     for snapshot in ready_items:
         if snapshot.executor.strip().lower() != executor:
             continue
-        ref = _snapshot_to_issue_ref(snapshot, config)
-        if ref is None:
-            continue
-        if parse_issue_ref(ref).prefix not in repo_prefixes:
+        ref = snapshot.issue_ref
+        try:
+            parsed_ref = parse_issue_ref(ref)
+        except ConfigError:
+            ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
+            if ref is None:
+                continue
+            parsed_ref = parse_issue_ref(ref)
+        if parsed_ref.prefix not in repo_prefixes:
             continue
         if issue_filter is not None and not issue_filter(ref):
             continue
@@ -1400,8 +1463,27 @@ def _select_best_candidate(
         return None
 
     eligible.sort(key=lambda s: _ready_snapshot_rank(s, config))
-    best_ref = _snapshot_to_issue_ref(eligible[0], config)
+    best_ref = _snapshot_to_issue_ref(eligible[0].issue_ref, config.issue_prefixes)
     return best_ref
+
+
+def _list_project_items_by_status(
+    status: str,
+    project_owner: str,
+    project_number: int,
+    *,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[_ProjectItemSnapshot]:
+    """Compatibility helper that reads board snapshots through ReviewStatePort."""
+    return list(
+        build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        ).review_state.build_board_snapshot().items_with_status(status)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1418,11 +1500,11 @@ def _fetch_issue_context(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
     """Read issue title, body, and labels via the issue-context boundary."""
-    port = issue_context_port or GitHubCliAdapter(
-        project_owner="",
-        project_number=0,
+    port = issue_context_port or build_github_port_bundle(
+        "",
+        0,
         gh_runner=gh_runner,
-    )
+    ).issue_context
     context = port.get_issue_context(owner, repo, number)
     return {
         "title": context.title,
@@ -1439,7 +1521,7 @@ def _snapshot_for_issue(
 ) -> _ProjectItemSnapshot | None:
     """Return the thin board snapshot row for an issue ref."""
     for snapshot in board_snapshot.items:
-        if _snapshot_to_issue_ref(snapshot, config) == issue_ref:
+        if _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes) == issue_ref:
             return snapshot
     return None
 
@@ -1560,7 +1642,9 @@ def _list_repo_worktrees(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Return (worktree_path, branch_name) pairs for a repo root."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     return [(entry.path, entry.branch_name) for entry in port.list_worktrees(str(repo_root))]
 
 
@@ -1571,7 +1655,9 @@ def _worktree_is_clean(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Return True when a worktree has no local changes."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     return port.is_clean(worktree_path)
 
 
@@ -1603,8 +1689,10 @@ def _prepare_worktree(
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
     parsed = parse_issue_ref(issue_ref)
-    store = session_store or SqliteSessionStore(db)
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    store = session_store or build_session_store(db)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     if config.worktree_reuse_enabled:
         repo_root = config.repo_roots.get(parsed.prefix)
         if repo_root is None:
@@ -1677,7 +1765,9 @@ def _create_worktree(
 
     Shells out to wt-create.sh.
     """
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     entry = port.create_issue_worktree(
         issue_ref,
         title,
@@ -1694,7 +1784,9 @@ def _fast_forward_existing_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     port.fast_forward_existing(worktree_path, branch)
 
 
@@ -1711,7 +1803,9 @@ def _reconcile_repair_branch(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> RepairBranchReconcileOutcome:
     """Reconcile a repair branch against its remote and origin/main."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     return port.reconcile_repair_branch(worktree_path, branch)
 
 
@@ -2142,6 +2236,71 @@ def _build_pr_body(
     )
 
 
+def _default_review_comment_checker(
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> Callable[[str, str, int, str], bool]:
+    """Build the default marker-check helper through ReviewStatePort."""
+    review_state_port = build_github_port_bundle(
+        "",
+        0,
+        gh_runner=gh_runner,
+    ).review_state
+
+    def checker(owner: str, repo: str, number: int, marker: str, *, gh_runner=None) -> bool:
+        return review_state_port.comment_exists(f"{owner}/{repo}", number, marker)
+
+    return checker
+
+
+def _runtime_comment_poster(
+    owner: str,
+    repo: str,
+    number: int,
+    body: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Post an issue comment through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    bundle.board_mutations.post_issue_comment(f"{owner}/{repo}", number, body)
+
+
+def _runtime_issue_closer(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Close an issue through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    bundle.board_mutations.close_issue(f"{owner}/{repo}", number)
+
+
+def _runtime_automerge_enabler(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Enable auto-merge through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    return bundle.pull_requests.enable_automerge(pr_repo, pr_number)
+
+
+def _runtime_failed_check_rerun(
+    pr_repo: str,
+    run_id: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Re-run a failed check through the runtime port boundary."""
+    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
+    if not bundle.pull_requests.rerun_failed_check(pr_repo, "", run_id):
+        raise GhQueryError(f"Failed rerunning check for {pr_repo} run {run_id}")
+
+
 def _post_consumer_claim_comment(
     issue_ref: str,
     session_id: str,
@@ -2163,7 +2322,7 @@ def _post_consumer_claim_comment(
         branch_name=branch_name,
         executor=executor,
     )
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     if checker(owner, repo, number, marker, gh_runner=gh_runner):
         return
     body = "\n".join(
@@ -2174,7 +2333,7 @@ def _post_consumer_claim_comment(
             f"Session: `{session_id}`",
         ]
     )
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -2190,11 +2349,11 @@ def _list_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequestMatch]:
     """Return open PRs that reference an issue number in the repository."""
-    port = pr_port or GitHubCliAdapter(
-        project_owner="",
-        project_number=0,
+    port = pr_port or build_github_port_bundle(
+        "",
+        0,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     payload = port.list_open_prs_for_issue(f"{owner}/{repo}", issue_number)
     matches: list[OpenPullRequestMatch] = []
     for item in payload:
@@ -2259,7 +2418,7 @@ def _post_result_comment(
     marker = _marker_for("consumer-result", issue_ref)
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
 
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     # Don't check for duplicates — each cycle posts a new result
 
     outcome = result.get("outcome", "unknown")
@@ -2292,7 +2451,7 @@ def _post_result_comment(
         lines.append(f"\nDuration: {duration:.0f}s")
 
     body = "\n".join(lines)
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -2316,13 +2475,13 @@ def _post_pr_codex_verdict(
 
     owner, repo, pr_number = parsed
     marker = _verdict_marker_text(session_id)
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     if checker(owner, repo, pr_number, marker, gh_runner=gh_runner):
         return False
 
     body = _verdict_comment_body(session_id
     )
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, pr_number, body, gh_runner=gh_runner)
     return True
 
@@ -2675,7 +2834,9 @@ def _review_scope_issue_refs(
     """Return governed review issue refs for the consumer executor."""
     refs: list[str] = []
     for snapshot in board_snapshot.items_with_status("Review"):
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
+        issue_ref = _snapshot_to_issue_ref(
+            snapshot.issue_ref, critical_path_config.issue_prefixes
+        )
         if issue_ref is None:
             continue
         if parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
@@ -2891,7 +3052,9 @@ def _update_board_snapshot_statuses(
         return board_snapshot
     items: list[_ProjectItemSnapshot] = []
     for snapshot in board_snapshot.items:
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
+        issue_ref = _snapshot_to_issue_ref(
+            snapshot.issue_ref, critical_path_config.issue_prefixes
+        )
         if issue_ref is None or issue_ref not in status_updates:
             items.append(snapshot)
             continue
@@ -3539,37 +3702,55 @@ def _drain_review_queue(
     *,
     pr_port: PullRequestPort | None = None,
     session_store: SessionStorePort | None = None,
-    board_snapshot: CycleBoardSnapshot,
+    board_snapshot: CycleBoardSnapshot | None = None,
     dry_run: bool = False,
     github_memo: CycleGitHubMemo | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
     """Process a bounded batch of queued Review items."""
-    if automation_config is None:
-        return ReviewQueueDrainSummary(), board_snapshot
-
-    store = session_store or SqliteSessionStore(db)
-    now = datetime.now(timezone.utc)
     memo = github_memo or CycleGitHubMemo()
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    if automation_config is None:
+        return ReviewQueueDrainSummary(), (
+            board_snapshot
+            if board_snapshot is not None
+            else build_github_port_bundle(
+                config.project_owner,
+                config.project_number,
+                config=critical_path_config,
+                github_memo=memo,
+                gh_runner=gh_runner,
+            ).review_state.build_board_snapshot()
+        )
+
+    effective_board_snapshot = board_snapshot or build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=critical_path_config,
         github_memo=memo,
         gh_runner=gh_runner,
-    )
+    ).review_state.build_board_snapshot()
+
+    store = session_store or build_session_store(db)
+    now = datetime.now(timezone.utc)
+    effective_pr_port = pr_port or build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
+        config=critical_path_config,
+        github_memo=memo,
+        gh_runner=gh_runner,
+    ).pull_requests
 
     prepared_batch, empty_summary = _prepare_review_queue_batch(
         config=config,
         store=store,
         critical_path_config=critical_path_config,
-        board_snapshot=board_snapshot,
+        board_snapshot=effective_board_snapshot,
         pr_port=effective_pr_port,
         now=now,
         dry_run=dry_run,
     )
     if empty_summary is not None:
-        return empty_summary, board_snapshot
+        return empty_summary, effective_board_snapshot
     assert prepared_batch is not None
 
     processing_outcome = _process_review_queue_due_groups(
@@ -3579,7 +3760,7 @@ def _drain_review_queue(
         automation_config=automation_config,
         pr_port=effective_pr_port,
         prepared_batch=prepared_batch,
-        board_snapshot=board_snapshot,
+        board_snapshot=effective_board_snapshot,
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
@@ -3820,7 +4001,7 @@ def _replay_deferred_issue_comment(
     if board_port is not None:
         board_port.post_issue_comment(f"{owner}/{repo}", number, body)
         return
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -3837,7 +4018,7 @@ def _replay_deferred_issue_close(
     if board_port is not None:
         board_port.close_issue(f"{owner}/{repo}", number)
         return
-    close_issue(owner, repo, number, gh_runner=gh_runner)
+    _runtime_issue_closer(owner, repo, number, gh_runner=gh_runner)
 
 
 def _replay_deferred_check_rerun(
@@ -3856,7 +4037,7 @@ def _replay_deferred_check_rerun(
                 f"Failed rerunning check for {pr_repo} run {run_id}"
             )
         return
-    rerun_actions_run(pr_repo, run_id, gh_runner=gh_runner)
+    _runtime_failed_check_rerun(pr_repo, run_id, gh_runner=gh_runner)
 
 
 def _replay_deferred_automerge_enable(
@@ -3871,7 +4052,7 @@ def _replay_deferred_automerge_enable(
     if pr_port is not None:
         pr_port.enable_automerge(pr_repo, pr_number)
         return
-    enable_pull_request_automerge(pr_repo, pr_number, gh_runner=gh_runner)
+    _runtime_automerge_enabler(pr_repo, pr_number, gh_runner=gh_runner)
 
 
 # ---------------------------------------------------------------------------
@@ -3885,6 +4066,8 @@ def _transition_issue_to_review(
     project_owner: str,
     project_number: int,
     *,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -3919,25 +4102,23 @@ def _transition_issue_to_in_progress(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move an actively running local repair back into In Progress."""
-    if review_state_port is not None and board_port is not None:
-        old_status = review_state_port.get_issue_status(issue_ref)
-        if old_status in (from_statuses or {"Review"}):
-            board_port.set_issue_status(issue_ref, "In Progress")
-            changed = True
-        else:
-            changed = False
-    else:
-        changed, old_status = _set_status_if_changed(
-            issue_ref,
-            from_statuses or {"Review"},
-            "In Progress",
-            config,
+    port_review = review_state_port
+    port_board = board_port
+    if port_review is None or port_board is None:
+        bundle = build_github_port_bundle(
             project_owner,
             project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
+            config=config,
             gh_runner=gh_runner,
         )
+        port_review = port_review or bundle.review_state
+        port_board = port_board or bundle.board_mutations
+    old_status = port_review.get_issue_status(issue_ref)
+    if old_status in (from_statuses or {"Review"}):
+        port_board.set_issue_status(issue_ref, "In Progress")
+        changed = True
+    else:
+        changed = False
     if changed or old_status == "In Progress":
         return
     raise GhQueryError(
@@ -3959,25 +4140,23 @@ def _return_issue_to_ready(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
-    if review_state_port is not None and board_port is not None:
-        old_status = review_state_port.get_issue_status(issue_ref)
-        if old_status in (from_statuses or {"In Progress"}):
-            board_port.set_issue_status(issue_ref, "Ready")
-            changed = True
-        else:
-            changed = False
-    else:
-        changed, old_status = _set_status_if_changed(
-            issue_ref,
-            from_statuses or {"In Progress"},
-            "Ready",
-            config,
+    port_review = review_state_port
+    port_board = board_port
+    if port_review is None or port_board is None:
+        bundle = build_github_port_bundle(
             project_owner,
             project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
+            config=config,
             gh_runner=gh_runner,
         )
+        port_review = port_review or bundle.review_state
+        port_board = port_board or bundle.board_mutations
+    old_status = port_review.get_issue_status(issue_ref)
+    if old_status in (from_statuses or {"In Progress"}):
+        port_board.set_issue_status(issue_ref, "Ready")
+        changed = True
+    else:
+        changed = False
     if changed or old_status == "Ready":
         return
     raise GhQueryError(
@@ -4207,12 +4386,12 @@ def _recover_interrupted_sessions(
     except ConfigError as err:
         logger.error("Interrupted-session recovery skipped: %s", err)
         return recovered
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    effective_pr_port = pr_port or build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=cp_config,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     effective_review_state_port = review_state_port or effective_pr_port
     effective_board_port = board_port or effective_pr_port
 
@@ -4298,7 +4477,7 @@ def _initialize_cycle_runtime(
     gh_runner: Callable[..., str] | None = None,
 ) -> CycleRuntimeContext:
     """Build cycle-scoped runtime wiring and effective config."""
-    session_store = SqliteSessionStore(db)
+    session_store = build_session_store(db)
 
     cp_config = load_config(config.critical_paths_path)
     try:
@@ -4318,9 +4497,9 @@ def _initialize_cycle_runtime(
     )
     config.poll_interval_seconds = effective_interval
     github_memo = CycleGitHubMemo()
-    pr_port = GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    github_ports = build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=cp_config,
         github_memo=github_memo,
         gh_runner=gh_runner,
@@ -4341,7 +4520,8 @@ def _initialize_cycle_runtime(
         effective_interval=effective_interval,
         global_limit=global_limit,
         github_memo=github_memo,
-        pr_port=pr_port,
+        pr_port=github_ports.pull_requests,
+        review_state_port=github_ports.review_state,
     )
 
 
@@ -4382,17 +4562,14 @@ def _run_deferred_replay_phase(
 
 def _load_board_snapshot_phase(
     config: ConsumerConfig,
+    runtime: CycleRuntimeContext,
     *,
     timings_ms: dict[str, int],
     gh_runner: Callable[..., str] | None,
 ) -> CycleBoardSnapshot:
     """Load the cycle board snapshot."""
     phase_started = time.monotonic()
-    board_snapshot = build_cycle_board_snapshot(
-        config.project_owner,
-        config.project_number,
-        gh_runner=gh_runner,
-    )
+    board_snapshot = runtime.review_state_port.build_board_snapshot()
     timings_ms["board_snapshot"] = int((time.monotonic() - phase_started) * 1000)
     return board_snapshot
 
@@ -4584,6 +4761,7 @@ def _execute_prepare_cycle_phases(
     )
     board_snapshot = _load_board_snapshot_phase(
         config,
+        runtime,
         timings_ms=timings_ms,
         gh_runner=gh_runner,
     )
@@ -4640,7 +4818,7 @@ def _prepare_cycle(
     gh_runner: Callable[..., str] | None = None,
 ) -> PreparedCycleContext:
     """Run control-plane preflight once for a daemon tick."""
-    request_stats_token = begin_request_stats()
+    request_stats_token = begin_runtime_request_stats()
     expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
     if expired:
         logger.info("Expired stale leases: %s", expired)
@@ -4667,7 +4845,7 @@ def _prepare_cycle(
         gh_runner=gh_runner,
     )
 
-    request_stats = end_request_stats(request_stats_token)
+    request_stats = end_runtime_request_stats(request_stats_token)
     github_request_counts = {
         "graphql": request_stats.graphql,
         "rest": request_stats.rest,
@@ -4684,7 +4862,9 @@ def _prepare_cycle(
         for snapshot in board_snapshot.items_with_status("Ready"):
             if snapshot.executor.strip().lower() != config.executor:
                 continue
-            issue_ref = _snapshot_to_issue_ref(snapshot, runtime.cp_config)
+            issue_ref = _snapshot_to_issue_ref(
+                snapshot.issue_ref, runtime.cp_config.issue_prefixes
+            )
             if issue_ref is None:
                 continue
             if (
@@ -4794,11 +4974,6 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    from startupai_controller.adapters.github_cli import (
-        _query_issue_board_info,
-        _set_single_select_field,
-    )
-
     marker = _marker_for("consumer-escalation", issue_ref)
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
     blocked_reason = reason or "max retries exceeded"
@@ -4814,22 +4989,19 @@ def _escalate_to_claude(
     )
 
     # Set Handoff To field
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
+    try:
+        _set_issue_handoff_target(
+            issue_ref,
+            "claude",
+            config,
+            project_owner,
+            project_number,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception):
+        logger.warning("Failed to set Handoff To field for %s", issue_ref)
 
-    if info.status != "NOT_ON_BOARD":
-        try:
-            _set_single_select_field(
-                info.project_id,
-                info.item_id,
-                "Handoff To",
-                "claude",
-                gh_runner=gh_runner,
-            )
-        except (GhQueryError, Exception):
-            logger.warning("Failed to set Handoff To field for %s", issue_ref)
-
-    checker = comment_checker or _comment_exists
+    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
     if checker(owner, repo, number, marker, gh_runner=gh_runner):
         return
 
@@ -4840,7 +5012,7 @@ def _escalate_to_claude(
         f"Reason: {blocked_reason}\n\n"
         f"Handoff To: `claude`"
     )
-    poster = comment_poster or _post_comment
+    poster = comment_poster or _runtime_comment_poster
     poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
@@ -4921,7 +5093,7 @@ def _reconcile_board_truth(
     automation_config: BoardAutomationConfig | None,
     db: ConsumerDB,
     *,
-    session_store: SqliteSessionStore | None = None,
+    session_store: SessionStorePort | None = None,
     pr_port: PullRequestPort | None = None,
     review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort | None = None,
@@ -4935,7 +5107,7 @@ def _reconcile_board_truth(
     if automation_config is None:
         return ReconciliationResult()
 
-    store = session_store or SqliteSessionStore(db)
+    store = session_store or build_session_store(db)
     active_workers = store.active_workers()
     active_issue_refs = {worker.issue_ref for worker in active_workers}
     active_repair_issue_refs = {
@@ -4947,12 +5119,12 @@ def _reconcile_board_truth(
     moved_in_progress: list[str] = []
     moved_review: list[str] = []
     moved_blocked: list[str] = []
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=consumer_config.project_owner,
-        project_number=consumer_config.project_number,
+    effective_pr_port = pr_port or build_github_port_bundle(
+        consumer_config.project_owner,
+        consumer_config.project_number,
         config=critical_path_config,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     effective_review_state_port = review_state_port or effective_pr_port
     effective_board_port = board_port or effective_pr_port
 
@@ -4961,7 +5133,9 @@ def _reconcile_board_truth(
     ) -> str | None:
         if isinstance(snapshot, IssueSnapshot):
             return snapshot.issue_ref
-        return _snapshot_to_issue_ref(snapshot, critical_path_config)
+        return _snapshot_to_issue_ref(
+            snapshot.issue_ref, critical_path_config.issue_prefixes
+        )
 
     moved_in_progress.extend(
         _reconcile_active_repair_review_items(
@@ -5373,16 +5547,16 @@ def _prepare_launch_candidate(
     """Prepare local launch state for an issue before board claim."""
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
-    store = session_store or SqliteSessionStore(db)
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    store = session_store or build_session_store(db)
+    effective_pr_port = pr_port or build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=cp_config,
         github_memo=prepared.github_memo,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     effective_issue_context_port = issue_context_port or effective_pr_port
-    effective_worktree_port = worktree_port or LocalProcessAdapter(
+    effective_worktree_port = worktree_port or build_worktree_port(
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
     )
@@ -6342,7 +6516,7 @@ def _handoff_execution_to_review(
     if session_status != "success":
         return immediate_review_summary
 
-    handoff_store = SqliteSessionStore(db)
+    handoff_store = build_session_store(db)
     _post_claimed_session_verdict_marker(
         db=db,
         pr_url=pr_url,
@@ -6454,13 +6628,13 @@ def _run_immediate_review_handoff(
     """Run immediate rescue for the just-opened review PR."""
     try:
         review_memo = CycleGitHubMemo()
-        handoff_pr_port = GitHubCliAdapter(
-            project_owner=config.project_owner,
-            project_number=config.project_number,
+        handoff_pr_port = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
             config=critical_path_config,
             github_memo=review_memo,
             gh_runner=gh_runner,
-        )
+        ).pull_requests
         queue_entries = [
             entry
             for entry in store.list_review_queue_items()
@@ -6543,11 +6717,19 @@ def _handle_non_review_execution_outcome(
     updated_session_status = session_status
 
     if session_status == "success" and not has_commits:
+        github_bundle = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner,
+        )
         resolution_evaluation = _verify_resolution_payload(
             candidate,
             codex_result.get("resolution") if codex_result else None,
             config=launch_context.effective_consumer_config,
             workflows=prepared.main_workflows,
+            pr_port=github_bundle.pull_requests,
             subprocess_runner=subprocess_runner,
             gh_runner=gh_runner,
         )
@@ -7076,7 +7258,7 @@ def _run_worker_cycle(
     di_kwargs: dict[str, Any] | None = None,
 ) -> CycleResult:
     """Execute one issue in an isolated worker DB connection."""
-    worker_db = ConsumerDB(db_path=config.db_path)
+    worker_db = open_consumer_db(config.db_path)
     worker_config = replace(config)
     try:
         return run_one_cycle(
@@ -7561,10 +7743,9 @@ def _github_review_summary(
             "Review",
             config.project_owner,
             config.project_number,
+            config=cp_config,
         ):
-            issue_ref = _snapshot_to_issue_ref(snapshot, cp_config)
-            if issue_ref is None:
-                continue
+            issue_ref = snapshot.issue_ref
             if parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
                 continue
             if snapshot.executor.strip().lower() != config.executor:
@@ -7784,7 +7965,7 @@ def _collect_status_runtime_state(
     status_now: datetime,
 ) -> dict[str, Any]:
     """Collect DB-backed runtime state for status reporting."""
-    db = ConsumerDB(db_path=config.db_path)
+    db = open_consumer_db(config.db_path)
     try:
         leases = db.active_lease_count()
         slots = sorted(db.active_slot_ids())
@@ -7866,37 +8047,12 @@ def _build_status_payload(
         oldest_deferred_action_age_seconds=oldest_deferred_action_age_seconds,
         poll_interval_seconds=effective_interval,
     )
-    lane_wip_limits: dict[str, dict[str, int]] = {}
-    if auto_config is not None:
-        for executor in auto_config.execution_authority_executors:
-            executor_limits = auto_config.wip_limits.get(executor, {})
-            lane_wip_limits[executor] = {
-                repo_prefix: executor_limits.get(repo_prefix, 1)
-                for repo_prefix in auto_config.execution_authority_repos
-            }
+    lane_wip_limits = _lane_wip_limits_payload(auto_config)
 
     return {
         "active_leases": leases,
         "active_slots": slots,
-        "workers": [
-            {
-                "id": worker.id,
-                "issue_ref": worker.issue_ref,
-                "slot_id": worker.slot_id,
-                "phase": worker.phase,
-                "status": worker.status,
-                "session_kind": worker.session_kind,
-                "repair_pr_url": worker.repair_pr_url,
-                "branch_reconcile_state": worker.branch_reconcile_state,
-                "branch_reconcile_error": worker.branch_reconcile_error,
-                "pr_url": worker.pr_url,
-                "resolution_kind": worker.resolution_kind,
-                "verification_class": worker.verification_class,
-                "resolution_action": worker.resolution_action,
-                "done_reason": worker.done_reason,
-            }
-            for worker in workers
-        ],
+        "workers": [_worker_status_payload(worker) for worker in workers],
         "repo_prefixes": list(config.repo_prefixes),
         "global_concurrency": config.global_concurrency,
         "lane_wip_limits": lane_wip_limits,
@@ -7920,30 +8076,10 @@ def _build_status_payload(
         "deferred_action_count": deferred_action_count,
         "oldest_deferred_action_age_seconds": oldest_deferred_action_age_seconds,
         "control_plane_health": control_plane_health,
-        "throughput_metrics": {
-            "baseline_status": "pending-soak",
-            "windows": {"1h": throughput_1h, "24h": throughput_24h},
-        },
-        "reliability_metrics": {
-            "durable_start_reliability_1h": throughput_1h["durable_start_reliability"],
-            "durable_start_reliability_24h": throughput_24h["durable_start_reliability"],
-            "startup_failures_1h": throughput_1h["startup_failures"],
-            "startup_failures_24h": throughput_24h["startup_failures"],
-        },
-        "context_cache_metrics": {
-            "hit_rate_1h": throughput_1h["cache_hit_rate"],
-            "hit_rate_24h": throughput_24h["cache_hit_rate"],
-            "hits_1h": throughput_1h["cache_hits"],
-            "hits_24h": throughput_24h["cache_hits"],
-            "misses_1h": throughput_1h["cache_misses"],
-            "misses_24h": throughput_24h["cache_misses"],
-        },
-        "worktree_reuse_metrics": {
-            "reused_1h": throughput_1h["worktree_reused"],
-            "reused_24h": throughput_24h["worktree_reused"],
-            "blocked_1h": throughput_1h["worktree_blocked"],
-            "blocked_24h": throughput_24h["worktree_blocked"],
-        },
+        "throughput_metrics": _throughput_status_payload(throughput_1h, throughput_24h),
+        "reliability_metrics": _reliability_status_payload(throughput_1h, throughput_24h),
+        "context_cache_metrics": _context_cache_status_payload(throughput_1h, throughput_24h),
+        "worktree_reuse_metrics": _worktree_reuse_status_payload(throughput_1h, throughput_24h),
         "review_summary": review_summary,
         "review_queue": review_queue,
         "admission": admission_summary,
@@ -7952,34 +8088,138 @@ def _build_status_payload(
             for repo_prefix, status in workflow_statuses.items()
         },
         "recent_sessions": [
-            {
-                "id": s.id,
-                "issue_ref": s.issue_ref,
-                "status": s.status,
-                "executor": s.executor,
-                "slot_id": s.slot_id,
-                "phase": s.phase,
-                "session_kind": s.session_kind,
-                "repair_pr_url": s.repair_pr_url,
-                "branch_reconcile_state": s.branch_reconcile_state,
-                "branch_reconcile_error": s.branch_reconcile_error,
-                "started_at": s.started_at,
-                "completed_at": s.completed_at,
-                "pr_url": s.pr_url,
-                "resolution_kind": s.resolution_kind,
-                "verification_class": s.verification_class,
-                "resolution_action": s.resolution_action,
-                "done_reason": s.done_reason,
-                **_session_retry_state(
-                    s,
-                    config=config,
-                    workflows=main_workflows,
-                    now=status_now,
-                ),
-            }
-            for s in sessions
+            _recent_session_status_payload(
+                session,
+                config=config,
+                workflows=main_workflows,
+                now=status_now,
+            )
+            for session in sessions
         ],
         "local_only": local_only,
+    }
+
+
+def _lane_wip_limits_payload(
+    auto_config: BoardAutomationConfig | None,
+) -> dict[str, dict[str, int]]:
+    """Render lane WIP limits grouped by executor."""
+    if auto_config is None:
+        return {}
+    lane_wip_limits: dict[str, dict[str, int]] = {}
+    for executor in auto_config.execution_authority_executors:
+        executor_limits = auto_config.wip_limits.get(executor, {})
+        lane_wip_limits[executor] = {
+            repo_prefix: executor_limits.get(repo_prefix, 1)
+            for repo_prefix in auto_config.execution_authority_repos
+        }
+    return lane_wip_limits
+
+
+def _worker_status_payload(worker: SessionInfo) -> dict[str, Any]:
+    """Render one active worker payload."""
+    return {
+        "id": worker.id,
+        "issue_ref": worker.issue_ref,
+        "slot_id": worker.slot_id,
+        "phase": worker.phase,
+        "status": worker.status,
+        "session_kind": worker.session_kind,
+        "repair_pr_url": worker.repair_pr_url,
+        "branch_reconcile_state": worker.branch_reconcile_state,
+        "branch_reconcile_error": worker.branch_reconcile_error,
+        "pr_url": worker.pr_url,
+        "resolution_kind": worker.resolution_kind,
+        "verification_class": worker.verification_class,
+        "resolution_action": worker.resolution_action,
+        "done_reason": worker.done_reason,
+    }
+
+
+def _throughput_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render throughput payload for status JSON."""
+    return {
+        "baseline_status": "pending-soak",
+        "windows": {"1h": throughput_1h, "24h": throughput_24h},
+    }
+
+
+def _reliability_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render reliability payload for status JSON."""
+    return {
+        "durable_start_reliability_1h": throughput_1h["durable_start_reliability"],
+        "durable_start_reliability_24h": throughput_24h["durable_start_reliability"],
+        "startup_failures_1h": throughput_1h["startup_failures"],
+        "startup_failures_24h": throughput_24h["startup_failures"],
+    }
+
+
+def _context_cache_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render issue-context cache payload for status JSON."""
+    return {
+        "hit_rate_1h": throughput_1h["cache_hit_rate"],
+        "hit_rate_24h": throughput_24h["cache_hit_rate"],
+        "hits_1h": throughput_1h["cache_hits"],
+        "hits_24h": throughput_24h["cache_hits"],
+        "misses_1h": throughput_1h["cache_misses"],
+        "misses_24h": throughput_24h["cache_misses"],
+    }
+
+
+def _worktree_reuse_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render worktree reuse payload for status JSON."""
+    return {
+        "reused_1h": throughput_1h["worktree_reused"],
+        "reused_24h": throughput_24h["worktree_reused"],
+        "blocked_1h": throughput_1h["worktree_blocked"],
+        "blocked_24h": throughput_24h["worktree_blocked"],
+    }
+
+
+def _recent_session_status_payload(
+    session: SessionInfo,
+    *,
+    config: ConsumerConfig,
+    workflows: dict[str, RepoWorkflow],
+    now: datetime,
+) -> dict[str, Any]:
+    """Render one recent session payload for status JSON."""
+    return {
+        "id": session.id,
+        "issue_ref": session.issue_ref,
+        "status": session.status,
+        "executor": session.executor,
+        "slot_id": session.slot_id,
+        "phase": session.phase,
+        "session_kind": session.session_kind,
+        "repair_pr_url": session.repair_pr_url,
+        "branch_reconcile_state": session.branch_reconcile_state,
+        "branch_reconcile_error": session.branch_reconcile_error,
+        "started_at": session.started_at,
+        "completed_at": session.completed_at,
+        "pr_url": session.pr_url,
+        "resolution_kind": session.resolution_kind,
+        "verification_class": session.verification_class,
+        "resolution_action": session.resolution_action,
+        "done_reason": session.done_reason,
+        **_session_retry_state(
+            session,
+            config=config,
+            workflows=workflows,
+            now=now,
+        ),
     }
 
 

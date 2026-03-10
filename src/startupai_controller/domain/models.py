@@ -353,9 +353,54 @@ class OpenPullRequest:
     author: str = ""
 
 
+@dataclass(frozen=True)
+class LinkedIssue:
+    """One issue linked from a PR body."""
+
+    owner: str
+    repo: str
+    number: int
+    ref: str
+
+
 # ---------------------------------------------------------------------------
 # New port contract types
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProjectItemSnapshot:
+    """Thin project-board item view used by scheduling and snapshot reads."""
+
+    issue_ref: str
+    status: str
+    executor: str
+    handoff_to: str
+    priority: str = ""
+    item_id: str = ""
+    project_id: str = ""
+    sprint: str = ""
+    agent: str = ""
+    owner_field: str = ""
+    title: str = ""
+    body: str = ""
+    repo_slug: str = ""
+    repo_name: str = ""
+    repo_owner: str = ""
+    issue_number: int = 0
+    issue_updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class CycleBoardSnapshot:
+    """Thin per-cycle view of board items reused across hot-path phases."""
+
+    items: tuple[ProjectItemSnapshot, ...]
+    by_status: dict[str, tuple[ProjectItemSnapshot, ...]] = field(default_factory=dict)
+
+    def items_with_status(self, status: str) -> tuple[ProjectItemSnapshot, ...]:
+        """Return cached items in the given status."""
+        return self.by_status.get(status, ())
 
 
 @dataclass(frozen=True)

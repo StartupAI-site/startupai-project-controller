@@ -15,6 +15,12 @@ The controller manages the [StartupAI Alpha → Launch](https://github.com/orgs/
 3. **Control Plane** (`board_control_plane.py`) — Sync/recovery operations (tick, field sync)
 4. **Supporting modules** — board_io, board_graph, consumer_db, consumer_workflow, github_http, promote_ready, validate_critical_path_promotion, project_field_sync, resolution_proof, gh_cli_timeout
 
+Runtime wiring is assembled through `src/startupai_controller/runtime/wiring.py`.
+Coordinators should depend on `domain/`, `ports/`, and runtime wiring only.
+Compatibility shims (`board_io.py`, `consumer_db.py`, `github_http.py`) still
+exist for legacy callers and tests, but runtime orchestrators do not import
+them directly.
+
 ## Architectural Guardrails
 
 This repo is a control plane. Reliability matters more than cleverness.
@@ -33,13 +39,13 @@ This repo is a control plane. Reliability matters more than cleverness.
 
 ## Directory Structure
 ```
-src/startupai_controller/   # 13 Python modules
+src/startupai_controller/   # 48 Python modules
 config/                      # Config and schema files
 ├── board-automation-config.json
 ├── critical-paths.json
 ├── project-field-sync-config.json
 └── codex_session_result.schema.json
-tests/                       # 11 test files (357 tests)
+tests/                       # 24 test files (765 tests)
 docs/adr/                    # Architecture decisions
 systemd/                     # systemd user unit
 ```
@@ -124,4 +130,4 @@ systemctl --user status startupai-consumer
 - stdlib-only + PyYAML (no heavy deps)
 
 ---
-**Last Updated**: 2026-03-09
+**Last Updated**: 2026-03-10

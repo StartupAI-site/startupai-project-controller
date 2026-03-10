@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.github_cli import (
     CycleGitHubMemo,
     GitHubCliAdapter,
@@ -11,7 +12,6 @@ from startupai_controller.adapters.github_cli import (
     _query_failed_check_runs,
     _query_pr_head_sha,
     _query_issue_board_info,
-    _query_latest_non_automation_comment_timestamp,
     _query_latest_wip_activity_timestamp,
     _query_issue_assignees,
     _query_project_item_field,
@@ -23,9 +23,13 @@ from startupai_controller.adapters.github_cli import (
     _set_single_select_field,
     _set_status_if_changed,
     _set_text_field,
+    memoized_query_issue_body,
+)
+from startupai_controller.adapters.review_state import (
+    GitHubReviewStateAdapter,
+    _query_latest_non_automation_comment_timestamp,
     build_cycle_board_snapshot,
     clear_cycle_board_snapshot_cache,
-    memoized_query_issue_body,
 )
 from startupai_controller.domain.models import IssueContext, IssueSnapshot
 
@@ -52,7 +56,7 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
             ]
         )
 
-    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
     prs = adapter.list_open_prs_for_issue("StartupAI-site/startupai-crew", 42)
@@ -73,7 +77,7 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
 
 def test_list_open_prs_reads_json_directly(monkeypatch) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._run_gh",
+        "startupai_controller.adapters.github_base._run_gh",
         lambda args, gh_runner=None, operation_type="query": json.dumps(
             [
                 {
@@ -197,6 +201,81 @@ def test_get_issue_context_returns_typed_context(monkeypatch) -> None:
     )
 
 
+def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args, gh_runner=None, operation_type="query"):
+        calls.append(args)
+        return json.dumps({"items": [{"number": 84}, {"number": 85}]})
+
+    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    numbers = adapter.search_open_issue_numbers_with_comment_marker(
+        "StartupAI-site/startupai-crew",
+        "startupai-board-bot:handoff:job=",
+    )
+
+    assert numbers == (84, 85)
+    assert calls[0][0:4] == ["api", "search/issues", "-X", "GET"]
+    assert any(
+        arg == 'q=repo:StartupAI-site/startupai-crew is:issue is:open in:comments "startupai-board-bot:handoff:job="'
+        for arg in calls[0]
+    )
+
+
+def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_base._run_gh",
+        lambda args, gh_runner=None, operation_type="query": json.dumps(
+            [
+                {"body": "first"},
+                {"body": "second"},
+                {"body": ""},
+            ]
+        ),
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    comments = adapter.list_issue_comment_bodies(
+        "StartupAI-site/startupai-crew",
+        84,
+    )
+
+    assert comments == ("first", "second", "")
+
+
+def test_latest_matching_comment_timestamp_delegates_to_query_helper(monkeypatch) -> None:
+    expected = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+    recorded: list[tuple[str, str, int, tuple[str, ...]]] = []
+
+    def fake_latest_matching(owner, repo, number, markers, gh_runner=None):
+        recorded.append((owner, repo, number, markers))
+        return expected
+
+    monkeypatch.setattr(
+        "startupai_controller.adapters.review_state._query_latest_matching_comment_timestamp",
+        fake_latest_matching,
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    result = adapter.latest_matching_comment_timestamp(
+        "StartupAI-site/startupai-crew",
+        84,
+        ("marker-a", "marker-b"),
+    )
+
+    assert result == expected
+    assert recorded == [
+        (
+            "StartupAI-site",
+            "startupai-crew",
+            84,
+            ("marker-a", "marker-b"),
+        )
+    ]
+
+
 def test_query_issue_body_uses_adapter_owned_query(monkeypatch) -> None:
     monkeypatch.setattr(
         "startupai_controller.adapters.github_cli._run_gh",
@@ -266,7 +345,7 @@ def test_is_pr_open_uses_adapter_owned_query(monkeypatch) -> None:
 
 def test_query_project_item_field_uses_adapter_owned_query(monkeypatch) -> None:
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_project_field_value",
         lambda self, issue_ref, field_name: f"{issue_ref}:{field_name}",
     )
@@ -284,7 +363,7 @@ def test_query_project_item_field_uses_adapter_owned_query(monkeypatch) -> None:
 
 def test_query_issue_board_info_uses_adapter_owned_board_lookup(monkeypatch) -> None:
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_board_info",
         lambda self, issue_ref: SimpleNamespace(
             status="Review",
@@ -338,7 +417,7 @@ def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
 
 def test_query_single_select_field_option_uses_adapter_owned_query(monkeypatch) -> None:
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: (
             f"{project_id}:{field_name}",
@@ -375,12 +454,12 @@ def test_set_text_field_uses_adapter_owned_mutation(monkeypatch) -> None:
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_field_id",
         lambda self, project_id, field_name: f"{project_id}:{field_name}",
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_text_field",
         lambda self, project_id, item_id, field_id, value: recorded.append(
             (project_id, item_id, field_id, value)
@@ -396,7 +475,7 @@ def test_set_single_select_field_uses_adapter_owned_mutation(monkeypatch) -> Non
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: (
             f"{project_id}:{field_name}",
@@ -404,7 +483,7 @@ def test_set_single_select_field_uses_adapter_owned_mutation(monkeypatch) -> Non
         ),
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_single_select",
         lambda self, project_id, item_id, field_id, option_id: recorded.append(
             (project_id, item_id, field_id, option_id)
@@ -420,7 +499,7 @@ def test_set_board_status_uses_adapter_owned_status_mutation(monkeypatch) -> Non
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_single_select",
         lambda self, project_id, item_id, field_id, option_id: recorded.append(
             (project_id, item_id, field_id, option_id)
@@ -436,7 +515,7 @@ def test_set_status_if_changed_uses_adapter_owned_mutation(monkeypatch) -> None:
     recorded: list[tuple[str, str, str, str]] = []
 
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_board_info",
         lambda self, issue_ref: SimpleNamespace(
             status="Review",
@@ -445,12 +524,12 @@ def test_set_status_if_changed_uses_adapter_owned_mutation(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: ("FIELD", "OPT"),
     )
     monkeypatch.setattr(
-        GitHubCliAdapter,
+        GitHubBoardMutationAdapter,
         "_set_project_single_select",
         lambda self, project_id, item_id, field_id, option_id: recorded.append(
             (project_id, item_id, field_id, option_id)
@@ -781,7 +860,7 @@ def test_build_cycle_board_snapshot_uses_adapter_owned_cache(monkeypatch) -> Non
         calls["count"] += 1
         return json.dumps(payload)
 
-    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
 
     first = build_cycle_board_snapshot("StartupAI-site", 1)
     second = build_cycle_board_snapshot("StartupAI-site", 1)
@@ -800,7 +879,7 @@ def test_query_latest_non_automation_comment_timestamp_filters_markers_and_bots(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli._query_issue_comments",
+        "startupai_controller.adapters.review_state._query_issue_comments",
         lambda owner, repo, number, gh_runner=None: [
             {
                 "body": "<!-- startupai-board-bot:marker -->",

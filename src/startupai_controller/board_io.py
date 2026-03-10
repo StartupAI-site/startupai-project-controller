@@ -33,6 +33,10 @@ from startupai_controller.domain.models import (
     OpenPullRequest,
     PrGateStatus,
 )
+from startupai_controller.domain.repair_policy import marker_for
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _canonical_snapshot_to_issue_ref,
+)
 from startupai_controller.adapters.github_transport import (
     GhCommandError,
     _run_gh,
@@ -201,7 +205,7 @@ def _parse_github_timestamp(raw: str) -> datetime | None:
 
 def _marker_for(kind: str, ref: str) -> str:
     """Generate an HTML comment marker for idempotency."""
-    return f"<!-- {MARKER_PREFIX}:{kind}:{ref} -->"
+    return marker_for(kind, ref)
 
 
 def _comment_exists(
@@ -312,7 +316,7 @@ def _query_issue_comments(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[dict]:
     """Compatibility wrapper for adapter-owned issue comment queries."""
-    from startupai_controller.adapters.github_cli import _query_issue_comments as _adapter_query_issue_comments
+    from startupai_controller.adapters.review_state import _query_issue_comments as _adapter_query_issue_comments
 
     return _adapter_query_issue_comments(
         owner,
@@ -324,7 +328,7 @@ def _query_issue_comments(
 
 def _comment_activity_timestamp(comment: dict) -> datetime | None:
     """Compatibility wrapper for adapter-owned comment activity timestamps."""
-    from startupai_controller.adapters.github_cli import _comment_activity_timestamp as _adapter_comment_activity_timestamp
+    from startupai_controller.adapters.review_state import _comment_activity_timestamp as _adapter_comment_activity_timestamp
 
     return _adapter_comment_activity_timestamp(comment)
 
@@ -338,7 +342,7 @@ def _query_latest_matching_comment_timestamp(
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
     """Compatibility wrapper for adapter-owned marker timestamp queries."""
-    from startupai_controller.adapters.github_cli import (
+    from startupai_controller.adapters.review_state import (
         _query_latest_matching_comment_timestamp as _adapter_query_latest_matching_comment_timestamp,
     )
 
@@ -359,7 +363,7 @@ def _query_latest_non_automation_comment_timestamp(
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
     """Compatibility wrapper for adapter-owned activity timestamp queries."""
-    from startupai_controller.adapters.github_cli import (
+    from startupai_controller.adapters.review_state import (
         _query_latest_non_automation_comment_timestamp as _adapter_query_latest_non_automation_comment_timestamp,
     )
 
@@ -428,20 +432,8 @@ def _snapshot_to_issue_ref(
     snapshot: _ProjectItemSnapshot,
     config: CriticalPathConfig,
 ) -> str | None:
-    """Convert a _ProjectItemSnapshot repo#number to a config-prefix ref.
-
-    e.g. 'StartupAI-site/startupai-crew#88' -> 'crew#88'
-    """
-    # snapshot.issue_ref is "owner/repo#number"
-    parts = snapshot.issue_ref.split("#", maxsplit=1)
-    if len(parts) != 2:
-        return None
-    full_repo = parts[0]
-    number = parts[1]
-    prefix = _repo_to_prefix(full_repo, config)
-    if prefix is None:
-        return None
-    return f"{prefix}#{number}"
+    """Compatibility wrapper for canonical domain issue-ref normalization."""
+    return _canonical_snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
 
 
 # ---------------------------------------------------------------------------
@@ -1256,7 +1248,7 @@ def _list_project_items_by_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
     """Compatibility wrapper for adapter-owned project status queries."""
-    from startupai_controller.adapters.github_cli import _list_project_items_by_status as _adapter_list_project_items_by_status
+    from startupai_controller.adapters.review_state import _list_project_items_by_status as _adapter_list_project_items_by_status
 
     return _adapter_list_project_items_by_status(
         status,
@@ -1273,7 +1265,7 @@ def build_cycle_board_snapshot(
     gh_runner: Callable[..., str] | None = None,
 ) -> CycleBoardSnapshot:
     """Compatibility wrapper for adapter-owned cycle board snapshots."""
-    from startupai_controller.adapters.github_cli import build_cycle_board_snapshot as _adapter_build_cycle_board_snapshot
+    from startupai_controller.adapters.review_state import build_cycle_board_snapshot as _adapter_build_cycle_board_snapshot
 
     return _adapter_build_cycle_board_snapshot(
         project_owner,
@@ -1284,7 +1276,7 @@ def build_cycle_board_snapshot(
 
 def clear_cycle_board_snapshot_cache() -> None:
     """Compatibility wrapper for adapter-owned snapshot cache clearing."""
-    from startupai_controller.adapters.github_cli import clear_cycle_board_snapshot_cache as _adapter_clear_cycle_board_snapshot_cache
+    from startupai_controller.adapters.review_state import clear_cycle_board_snapshot_cache as _adapter_clear_cycle_board_snapshot_cache
 
     _adapter_clear_cycle_board_snapshot_cache()
 
