@@ -1048,8 +1048,65 @@ def _verify_resolution_payload(
     kind = str(normalized["kind"])
     summary = str(normalized["summary"] or "").strip()
     repo_root = _repo_root_for_issue_ref(config, issue_ref)
+    validation_command = _resolution_validation_command(
+        issue_ref,
+        normalized,
+        config=config,
+        workflows=workflows,
+    )
+    evidence = _resolution_evidence_payload(
+        repo_root,
+        normalized,
+        validation_command,
+        subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+    )
+    if _resolution_is_strong(normalized, evidence):
+        return ResolutionEvaluation(
+            resolution_kind=kind,
+            verification_class="strong",
+            final_action="closed_as_already_resolved",
+            summary=summary or "Verified existing implementation already satisfies the issue.",
+            evidence=evidence,
+        )
+
+    if kind in NON_AUTO_CLOSE_RESOLUTION_KINDS:
+        return ResolutionEvaluation(
+            resolution_kind=kind,
+            verification_class="weak",
+            final_action="blocked_for_resolution_review",
+            summary=summary or f"Resolution `{kind}` requires review.",
+            evidence=evidence,
+            blocked_reason=f"resolution-review-required:{kind}",
+        )
+
+    verification_class = (
+        "ambiguous"
+        if resolution_has_meaningful_signal(normalized)
+        else "failed"
+    )
+    blocked_reason = _resolution_blocked_reason(normalized, evidence)
+
+    return ResolutionEvaluation(
+        resolution_kind=kind,
+        verification_class=verification_class,
+        final_action="blocked_for_resolution_review",
+        summary=summary or "Resolution evidence was not strong enough to auto-close.",
+        evidence=evidence,
+        blocked_reason=blocked_reason,
+    )
+
+
+def _resolution_validation_command(
+    issue_ref: str,
+    normalized: dict[str, Any],
+    *,
+    config: ConsumerConfig,
+    workflows: dict[str, WorkflowDefinition],
+) -> str:
+    """Resolve the validation command for a resolution verification run."""
     workflow = workflows.get(parse_issue_ref(issue_ref).prefix)
-    validation_command = (
+    return (
         str(normalized["validation_command"]).strip()
         if normalized["validation_command"]
         else (
@@ -1059,6 +1116,16 @@ def _verify_resolution_payload(
         )
     )
 
+
+def _resolution_evidence_payload(
+    repo_root: Path,
+    normalized: dict[str, Any],
+    validation_command: str,
+    *,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> dict[str, Any]:
+    """Collect deterministic evidence for resolution verification."""
     code_refs = list(normalized["code_refs"])
     commit_shas = list(normalized["commit_shas"])
     pr_urls = list(normalized["pr_urls"])
@@ -1082,15 +1149,17 @@ def _verify_resolution_payload(
         validation_command,
         subprocess_runner=subprocess_runner,
     )
-    evidence = {
+    return {
         "code_refs": code_refs,
         "missing_code_refs": missing_code_refs,
+        "code_refs_ok": code_refs_ok,
         "commit_shas": commit_shas,
         "reachable_commit_shas": reachable_commits,
         "pr_urls": pr_urls,
         "merged_pr_urls": merged_pr_urls,
         "validated_on_main_claim": bool(normalized["validated_on_main"]),
         "validation_command": validation_command,
+        "validation_ok": validation_ok,
         "validation_exit_code": validation_exit_code,
         "validation_detail": validation_detail[:500] if validation_detail else "",
         "acceptance_criteria_met": bool(normalized["acceptance_criteria_met"]),
@@ -1098,66 +1167,49 @@ def _verify_resolution_payload(
         "equivalence_claim": normalized["equivalence_claim"],
     }
 
-    if kind in NON_AUTO_CLOSE_RESOLUTION_KINDS:
-        return ResolutionEvaluation(
-            resolution_kind=kind,
-            verification_class="weak",
-            final_action="blocked_for_resolution_review",
-            summary=summary or f"Resolution `{kind}` requires review.",
-            evidence=evidence,
-            blocked_reason=f"resolution-review-required:{kind}",
-        )
 
-    has_reference_evidence = bool(code_refs or commit_shas or pr_urls)
-    auto_close_allowed = resolution_allows_autoclose(normalized)
-    strong = all(
+def _resolution_is_strong(
+    normalized: dict[str, Any],
+    evidence: dict[str, Any],
+) -> bool:
+    """Return True when resolution evidence is strong enough to auto-close."""
+    has_reference_evidence = bool(
+        evidence["code_refs"] or evidence["commit_shas"] or evidence["pr_urls"]
+    )
+    return all(
         [
-            auto_close_allowed,
+            resolution_allows_autoclose(normalized),
             has_reference_evidence,
-            code_refs_ok,
-            bool(reachable_commits or merged_pr_urls),
+            bool(evidence["code_refs_ok"]),
+            bool(evidence["reachable_commit_shas"] or evidence["merged_pr_urls"]),
             bool(normalized["validated_on_main"]),
-            validation_ok,
+            bool(evidence["validation_ok"]),
             bool(normalized["acceptance_criteria_met"]),
         ]
     )
-    if strong:
-        return ResolutionEvaluation(
-            resolution_kind=kind,
-            verification_class="strong",
-            final_action="closed_as_already_resolved",
-            summary=summary or "Verified existing implementation already satisfies the issue.",
-            evidence=evidence,
-        )
 
-    verification_class = (
-        "ambiguous"
-        if resolution_has_meaningful_signal(normalized)
-        else "failed"
-    )
-    if not auto_close_allowed:
-        blocked_reason = "resolution-review-required:unsupported-resolution-kind"
-    elif not has_reference_evidence:
-        blocked_reason = "resolution-review-required:missing-evidence"
-    elif not code_refs_ok:
-        blocked_reason = "resolution-review-required:missing-code-refs"
-    elif not (reachable_commits or merged_pr_urls):
-        blocked_reason = "resolution-review-required:unverified-main-evidence"
-    elif not normalized["validated_on_main"] or not validation_ok:
-        blocked_reason = "resolution-review-required:validation-failed"
-    elif not normalized["acceptance_criteria_met"]:
-        blocked_reason = "resolution-review-required:acceptance-not-met"
-    else:
-        blocked_reason = "resolution-review-required:ambiguous"
 
-    return ResolutionEvaluation(
-        resolution_kind=kind,
-        verification_class=verification_class,
-        final_action="blocked_for_resolution_review",
-        summary=summary or "Resolution evidence was not strong enough to auto-close.",
-        evidence=evidence,
-        blocked_reason=blocked_reason,
+def _resolution_blocked_reason(
+    normalized: dict[str, Any],
+    evidence: dict[str, Any],
+) -> str:
+    """Return the deterministic blocked reason for a non-strong resolution."""
+    has_reference_evidence = bool(
+        evidence["code_refs"] or evidence["commit_shas"] or evidence["pr_urls"]
     )
+    if not resolution_allows_autoclose(normalized):
+        return "resolution-review-required:unsupported-resolution-kind"
+    if not has_reference_evidence:
+        return "resolution-review-required:missing-evidence"
+    if not evidence["code_refs_ok"]:
+        return "resolution-review-required:missing-code-refs"
+    if not (evidence["reachable_commit_shas"] or evidence["merged_pr_urls"]):
+        return "resolution-review-required:unverified-main-evidence"
+    if not normalized["validated_on_main"] or not evidence["validation_ok"]:
+        return "resolution-review-required:validation-failed"
+    if not normalized["acceptance_criteria_met"]:
+        return "resolution-review-required:acceptance-not-met"
+    return "resolution-review-required:ambiguous"
 
 
 def _queue_issue_comment(
@@ -7896,37 +7948,12 @@ def _build_status_payload(
         oldest_deferred_action_age_seconds=oldest_deferred_action_age_seconds,
         poll_interval_seconds=effective_interval,
     )
-    lane_wip_limits: dict[str, dict[str, int]] = {}
-    if auto_config is not None:
-        for executor in auto_config.execution_authority_executors:
-            executor_limits = auto_config.wip_limits.get(executor, {})
-            lane_wip_limits[executor] = {
-                repo_prefix: executor_limits.get(repo_prefix, 1)
-                for repo_prefix in auto_config.execution_authority_repos
-            }
+    lane_wip_limits = _lane_wip_limits_payload(auto_config)
 
     return {
         "active_leases": leases,
         "active_slots": slots,
-        "workers": [
-            {
-                "id": worker.id,
-                "issue_ref": worker.issue_ref,
-                "slot_id": worker.slot_id,
-                "phase": worker.phase,
-                "status": worker.status,
-                "session_kind": worker.session_kind,
-                "repair_pr_url": worker.repair_pr_url,
-                "branch_reconcile_state": worker.branch_reconcile_state,
-                "branch_reconcile_error": worker.branch_reconcile_error,
-                "pr_url": worker.pr_url,
-                "resolution_kind": worker.resolution_kind,
-                "verification_class": worker.verification_class,
-                "resolution_action": worker.resolution_action,
-                "done_reason": worker.done_reason,
-            }
-            for worker in workers
-        ],
+        "workers": [_worker_status_payload(worker) for worker in workers],
         "repo_prefixes": list(config.repo_prefixes),
         "global_concurrency": config.global_concurrency,
         "lane_wip_limits": lane_wip_limits,
@@ -7950,30 +7977,10 @@ def _build_status_payload(
         "deferred_action_count": deferred_action_count,
         "oldest_deferred_action_age_seconds": oldest_deferred_action_age_seconds,
         "control_plane_health": control_plane_health,
-        "throughput_metrics": {
-            "baseline_status": "pending-soak",
-            "windows": {"1h": throughput_1h, "24h": throughput_24h},
-        },
-        "reliability_metrics": {
-            "durable_start_reliability_1h": throughput_1h["durable_start_reliability"],
-            "durable_start_reliability_24h": throughput_24h["durable_start_reliability"],
-            "startup_failures_1h": throughput_1h["startup_failures"],
-            "startup_failures_24h": throughput_24h["startup_failures"],
-        },
-        "context_cache_metrics": {
-            "hit_rate_1h": throughput_1h["cache_hit_rate"],
-            "hit_rate_24h": throughput_24h["cache_hit_rate"],
-            "hits_1h": throughput_1h["cache_hits"],
-            "hits_24h": throughput_24h["cache_hits"],
-            "misses_1h": throughput_1h["cache_misses"],
-            "misses_24h": throughput_24h["cache_misses"],
-        },
-        "worktree_reuse_metrics": {
-            "reused_1h": throughput_1h["worktree_reused"],
-            "reused_24h": throughput_24h["worktree_reused"],
-            "blocked_1h": throughput_1h["worktree_blocked"],
-            "blocked_24h": throughput_24h["worktree_blocked"],
-        },
+        "throughput_metrics": _throughput_status_payload(throughput_1h, throughput_24h),
+        "reliability_metrics": _reliability_status_payload(throughput_1h, throughput_24h),
+        "context_cache_metrics": _context_cache_status_payload(throughput_1h, throughput_24h),
+        "worktree_reuse_metrics": _worktree_reuse_status_payload(throughput_1h, throughput_24h),
         "review_summary": review_summary,
         "review_queue": review_queue,
         "admission": admission_summary,
@@ -7982,34 +7989,138 @@ def _build_status_payload(
             for repo_prefix, status in workflow_statuses.items()
         },
         "recent_sessions": [
-            {
-                "id": s.id,
-                "issue_ref": s.issue_ref,
-                "status": s.status,
-                "executor": s.executor,
-                "slot_id": s.slot_id,
-                "phase": s.phase,
-                "session_kind": s.session_kind,
-                "repair_pr_url": s.repair_pr_url,
-                "branch_reconcile_state": s.branch_reconcile_state,
-                "branch_reconcile_error": s.branch_reconcile_error,
-                "started_at": s.started_at,
-                "completed_at": s.completed_at,
-                "pr_url": s.pr_url,
-                "resolution_kind": s.resolution_kind,
-                "verification_class": s.verification_class,
-                "resolution_action": s.resolution_action,
-                "done_reason": s.done_reason,
-                **_session_retry_state(
-                    s,
-                    config=config,
-                    workflows=main_workflows,
-                    now=status_now,
-                ),
-            }
-            for s in sessions
+            _recent_session_status_payload(
+                session,
+                config=config,
+                workflows=main_workflows,
+                now=status_now,
+            )
+            for session in sessions
         ],
         "local_only": local_only,
+    }
+
+
+def _lane_wip_limits_payload(
+    auto_config: BoardAutomationConfig | None,
+) -> dict[str, dict[str, int]]:
+    """Render lane WIP limits grouped by executor."""
+    if auto_config is None:
+        return {}
+    lane_wip_limits: dict[str, dict[str, int]] = {}
+    for executor in auto_config.execution_authority_executors:
+        executor_limits = auto_config.wip_limits.get(executor, {})
+        lane_wip_limits[executor] = {
+            repo_prefix: executor_limits.get(repo_prefix, 1)
+            for repo_prefix in auto_config.execution_authority_repos
+        }
+    return lane_wip_limits
+
+
+def _worker_status_payload(worker: SessionInfo) -> dict[str, Any]:
+    """Render one active worker payload."""
+    return {
+        "id": worker.id,
+        "issue_ref": worker.issue_ref,
+        "slot_id": worker.slot_id,
+        "phase": worker.phase,
+        "status": worker.status,
+        "session_kind": worker.session_kind,
+        "repair_pr_url": worker.repair_pr_url,
+        "branch_reconcile_state": worker.branch_reconcile_state,
+        "branch_reconcile_error": worker.branch_reconcile_error,
+        "pr_url": worker.pr_url,
+        "resolution_kind": worker.resolution_kind,
+        "verification_class": worker.verification_class,
+        "resolution_action": worker.resolution_action,
+        "done_reason": worker.done_reason,
+    }
+
+
+def _throughput_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render throughput payload for status JSON."""
+    return {
+        "baseline_status": "pending-soak",
+        "windows": {"1h": throughput_1h, "24h": throughput_24h},
+    }
+
+
+def _reliability_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render reliability payload for status JSON."""
+    return {
+        "durable_start_reliability_1h": throughput_1h["durable_start_reliability"],
+        "durable_start_reliability_24h": throughput_24h["durable_start_reliability"],
+        "startup_failures_1h": throughput_1h["startup_failures"],
+        "startup_failures_24h": throughput_24h["startup_failures"],
+    }
+
+
+def _context_cache_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render issue-context cache payload for status JSON."""
+    return {
+        "hit_rate_1h": throughput_1h["cache_hit_rate"],
+        "hit_rate_24h": throughput_24h["cache_hit_rate"],
+        "hits_1h": throughput_1h["cache_hits"],
+        "hits_24h": throughput_24h["cache_hits"],
+        "misses_1h": throughput_1h["cache_misses"],
+        "misses_24h": throughput_24h["cache_misses"],
+    }
+
+
+def _worktree_reuse_status_payload(
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+) -> dict[str, Any]:
+    """Render worktree reuse payload for status JSON."""
+    return {
+        "reused_1h": throughput_1h["worktree_reused"],
+        "reused_24h": throughput_24h["worktree_reused"],
+        "blocked_1h": throughput_1h["worktree_blocked"],
+        "blocked_24h": throughput_24h["worktree_blocked"],
+    }
+
+
+def _recent_session_status_payload(
+    session: SessionInfo,
+    *,
+    config: ConsumerConfig,
+    workflows: dict[str, RepoWorkflow],
+    now: datetime,
+) -> dict[str, Any]:
+    """Render one recent session payload for status JSON."""
+    return {
+        "id": session.id,
+        "issue_ref": session.issue_ref,
+        "status": session.status,
+        "executor": session.executor,
+        "slot_id": session.slot_id,
+        "phase": session.phase,
+        "session_kind": session.session_kind,
+        "repair_pr_url": session.repair_pr_url,
+        "branch_reconcile_state": session.branch_reconcile_state,
+        "branch_reconcile_error": session.branch_reconcile_error,
+        "started_at": session.started_at,
+        "completed_at": session.completed_at,
+        "pr_url": session.pr_url,
+        "resolution_kind": session.resolution_kind,
+        "verification_class": session.verification_class,
+        "resolution_action": session.resolution_action,
+        "done_reason": session.done_reason,
+        **_session_retry_state(
+            session,
+            config=config,
+            workflows=workflows,
+            now=now,
+        ),
     }
 
 

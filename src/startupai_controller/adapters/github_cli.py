@@ -2397,6 +2397,67 @@ query($owner: String!, $number: Int!, $cursor: String) {
             blocked_reason=field("Blocked Reason"),
         )
 
+    def search_open_issue_numbers_with_comment_marker(
+        self, repo: str, marker: str
+    ) -> tuple[int, ...]:
+        search_query = f'repo:{repo} is:issue is:open in:comments "{marker}"'
+        output = _run_gh(
+            [
+                "api",
+                "search/issues",
+                "-X",
+                "GET",
+                "-f",
+                f"q={search_query}",
+                "-f",
+                "per_page=100",
+            ],
+            gh_runner=self._gh_runner,
+        )
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise GhQueryError(
+                f"Invalid issue search payload for repo:{repo}."
+            ) from error
+        numbers: list[int] = []
+        for item in payload.get("items", []):
+            number = item.get("number")
+            if number is None:
+                continue
+            try:
+                numbers.append(int(number))
+            except (TypeError, ValueError):
+                continue
+        return tuple(numbers)
+
+    def list_issue_comment_bodies(
+        self, repo: str, issue_number: int
+    ) -> tuple[str, ...]:
+        owner, repo_name = repo.split("/", maxsplit=1)
+        comments = _query_issue_comments(
+            owner,
+            repo_name,
+            issue_number,
+            gh_runner=self._gh_runner,
+        )
+        return tuple(str(comment.get("body") or "") for comment in comments)
+
+    def latest_matching_comment_timestamp(
+        self,
+        repo: str,
+        issue_number: int,
+        markers: tuple[str, ...],
+    ) -> datetime | None:
+        owner, repo_name = repo.split("/", maxsplit=1)
+        return _query_latest_matching_comment_timestamp(
+            owner,
+            repo_name,
+            issue_number,
+            markers,
+            gh_runner=self._gh_runner,
+        )
+
 
 def _list_project_items_by_status(
     status: str,

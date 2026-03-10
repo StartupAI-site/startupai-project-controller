@@ -162,10 +162,16 @@ def _fake_review_state_port(
     status_by_issue: dict[str, str] | None = None,
     snapshots_by_status: dict[str, list[SimpleNamespace]] | None = None,
     fields_by_issue: dict[str, SimpleNamespace] | None = None,
+    search_results: dict[tuple[str, str], tuple[int, ...]] | None = None,
+    comment_bodies_by_issue: dict[tuple[str, int], tuple[str, ...]] | None = None,
+    latest_comment_timestamps: dict[tuple[str, int], datetime | None] | None = None,
 ):
     statuses = status_by_issue or {}
     snapshots = snapshots_by_status or {}
     fields = fields_by_issue or {}
+    searches = search_results or {}
+    comment_bodies = comment_bodies_by_issue or {}
+    latest_timestamps = latest_comment_timestamps or {}
 
     def _field(issue_ref: str, name: str, default: str) -> str:
         return getattr(fields.get(issue_ref, SimpleNamespace()), name, default)
@@ -182,6 +188,15 @@ def _fake_review_state_port(
             owner=_field(issue_ref, "owner", "codex:local-consumer"),
             handoff_to=_field(issue_ref, "handoff_to", "none"),
             blocked_reason=_field(issue_ref, "blocked_reason", ""),
+        ),
+        search_open_issue_numbers_with_comment_marker=lambda repo, marker: tuple(
+            searches.get((repo, marker), ())
+        ),
+        list_issue_comment_bodies=lambda repo, issue_number: tuple(
+            comment_bodies.get((repo, issue_number), ())
+        ),
+        latest_matching_comment_timestamp=lambda repo, issue_number, markers: latest_timestamps.get(
+            (repo, issue_number)
         ),
     )
 
@@ -713,35 +728,16 @@ def test_propagate_blocker_sweep_skips_empty_reason(tmp_path: Path) -> None:
 # -- reconcile-handoffs tests -------------------------------------------------
 
 
-def _empty_search_response() -> str:
-    """Build a mock search API response with no items."""
-    return json.dumps({"total_count": 0, "items": []})
-
-
-def _search_response(*numbers: int) -> str:
-    """Build a mock search API response with issue numbers."""
-    return json.dumps(
-        {
-            "total_count": len(numbers),
-            "items": [{"number": number} for number in numbers],
-        }
-    )
-
-
-def _slurped_comments_response(comments: list[dict]) -> str:
-    """Build a mock gh api --paginate --slurp issue comments response."""
-    return json.dumps([comments])
-
-
 def test_reconcile_ack_marks_completed(tmp_path: Path) -> None:
     """ACK signal present -> job counted as completed."""
     config = _load(tmp_path)
-    # When no handoff markers found, all counters start at 0
+    review_state_port = _fake_review_state_port()
     counts = reconcile_handoffs(
         config,
         "StartupAI-site",
         1,
-        gh_runner=lambda args: _empty_search_response(),
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(),
     )
     assert isinstance(counts, dict)
     assert "completed" in counts
@@ -752,38 +748,28 @@ def test_reconcile_retries_once(tmp_path: Path) -> None:
     config = _load(tmp_path)
     now = datetime.now(timezone.utc)
     posted: list[str] = []
-
-    def fake_gh(args):
-        if args[:2] == ["api", "search/issues"]:
-            query = next((arg for arg in args if arg.startswith("q=")), "")
-            return (
-                _search_response(84)
-                if "repo:StartupAI-site/startupai-crew" in query
-                else _empty_search_response()
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#84": "Backlog"},
+        search_results={
+            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+        },
+        comment_bodies_by_issue={
+            ("StartupAI-site/startupai-crew", 84): (
+                f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
             )
-        if args[:2] == ["api", "repos/StartupAI-site/startupai-crew/issues/84/comments"]:
-            return _slurped_comments_response(
-                [
-                    {
-                        "body": f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
-                        "created_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
-                        "updated_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
-                        "user": {"login": "chris00walker"},
-                    }
-                ]
-            )
-        raise AssertionError(f"Unexpected gh call: {args}")
-
-    with patch.object(automation, "_query_project_item_field", return_value="Backlog"), patch.object(
-        automation, "_post_comment", lambda _o, _r, _n, body, **_k: posted.append(body)
-    ):
-        counts = reconcile_handoffs(
-            config,
-            "StartupAI-site",
-            1,
-            ack_timeout_minutes=30,
-            gh_runner=fake_gh,
-        )
+        },
+        latest_comment_timestamps={
+            ("StartupAI-site/startupai-crew", 84): now - timedelta(minutes=31)
+        },
+    )
+    counts = reconcile_handoffs(
+        config,
+        "StartupAI-site",
+        1,
+        ack_timeout_minutes=30,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(posted),
+    )
     assert counts["retried"] == 1
     assert not counts["escalated"]
     assert posted
@@ -794,28 +780,20 @@ def test_reconcile_handoffs_uses_ports_for_retry_comment(tmp_path: Path) -> None
     config = _load(tmp_path)
     now = datetime.now(timezone.utc)
     board_calls: list[tuple[str, str]] = []
-    review_state_port = _fake_review_state_port(status_by_issue={"crew#84": "Backlog"})
-
-    def fake_gh(args):
-        if args[:2] == ["api", "search/issues"]:
-            query = next((arg for arg in args if arg.startswith("q=")), "")
-            return (
-                _search_response(84)
-                if "repo:StartupAI-site/startupai-crew" in query
-                else _empty_search_response()
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#84": "Backlog"},
+        search_results={
+            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+        },
+        comment_bodies_by_issue={
+            ("StartupAI-site/startupai-crew", 84): (
+                f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
             )
-        if args[:2] == ["api", "repos/StartupAI-site/startupai-crew/issues/84/comments"]:
-            return _slurped_comments_response(
-                [
-                    {
-                        "body": f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
-                        "created_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
-                        "updated_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
-                        "user": {"login": "chris00walker"},
-                    }
-                ]
-            )
-        raise AssertionError(f"Unexpected gh call: {args}")
+        },
+        latest_comment_timestamps={
+            ("StartupAI-site/startupai-crew", 84): now - timedelta(minutes=31)
+        },
+    )
 
     counts = reconcile_handoffs(
         config,
@@ -824,7 +802,6 @@ def test_reconcile_handoffs_uses_ports_for_retry_comment(tmp_path: Path) -> None
         ack_timeout_minutes=30,
         review_state_port=review_state_port,
         board_port=_fake_board_port(board_calls),
-        gh_runner=fake_gh,
     )
 
     assert counts["retried"] == 1
@@ -838,29 +815,21 @@ def test_reconcile_escalates_after_retry(tmp_path: Path) -> None:
     config = _load(tmp_path)
     now = datetime.now(timezone.utc)
     blocked: list[str] = []
-
-    def fake_gh(args):
-        if args[:2] == ["api", "search/issues"]:
-            query = next((arg for arg in args if arg.startswith("q=")), "")
-            return (
-                _search_response(84)
-                if "repo:StartupAI-site/startupai-crew" in query
-                else _empty_search_response()
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#84": "Backlog"},
+        search_results={
+            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+        },
+        comment_bodies_by_issue={
+            ("StartupAI-site/startupai-crew", 84): (
+                f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
             )
-        if args[:2] == ["api", "repos/StartupAI-site/startupai-crew/issues/84/comments"]:
-            return _slurped_comments_response(
-                [
-                    {
-                        "body": f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
-                        "created_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
-                        "updated_at": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
-                        "user": {"login": "chris00walker"},
-                    }
-                ]
-            )
-        raise AssertionError(f"Unexpected gh call: {args}")
-
-    with patch.object(automation, "_query_project_item_field", return_value="Backlog"), patch.object(
+        },
+        latest_comment_timestamps={
+            ("StartupAI-site/startupai-crew", 84): now - timedelta(minutes=31)
+        },
+    )
+    with patch.object(
         automation,
         "_set_blocked_with_reason",
         lambda issue_ref, *_a, **_k: blocked.append(issue_ref),
@@ -871,7 +840,8 @@ def test_reconcile_escalates_after_retry(tmp_path: Path) -> None:
             1,
             ack_timeout_minutes=30,
             max_retries=0,
-            gh_runner=fake_gh,
+            review_state_port=review_state_port,
+            board_port=_fake_board_port(),
         )
     assert counts["escalated"] == 1
     assert blocked == ["crew#84"]
@@ -880,11 +850,13 @@ def test_reconcile_escalates_after_retry(tmp_path: Path) -> None:
 def test_reconcile_idempotent_on_escalated(tmp_path: Path) -> None:
     """Existing escalation marker -> no duplicate mutations."""
     config = _load(tmp_path)
+    review_state_port = _fake_review_state_port()
     counts = reconcile_handoffs(
         config,
         "StartupAI-site",
         1,
-        gh_runner=lambda args: _empty_search_response(),
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(),
     )
     assert isinstance(counts, dict)
 
@@ -894,38 +866,28 @@ def test_reconcile_keeps_recent_unacked_handoff_pending(tmp_path: Path) -> None:
     config = _load(tmp_path)
     now = datetime.now(timezone.utc)
     posted: list[str] = []
-
-    def fake_gh(args):
-        if args[:2] == ["api", "search/issues"]:
-            query = next((arg for arg in args if arg.startswith("q=")), "")
-            return (
-                _search_response(84)
-                if "repo:StartupAI-site/startupai-crew" in query
-                else _empty_search_response()
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#84": "Backlog"},
+        search_results={
+            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+        },
+        comment_bodies_by_issue={
+            ("StartupAI-site/startupai-crew", 84): (
+                f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
             )
-        if args[:2] == ["api", "repos/StartupAI-site/startupai-crew/issues/84/comments"]:
-            return _slurped_comments_response(
-                [
-                    {
-                        "body": f"<!-- {automation.MARKER_PREFIX}:handoff:job=crew-84-to-app-149 -->",
-                        "created_at": (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
-                        "updated_at": (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
-                        "user": {"login": "chris00walker"},
-                    }
-                ]
-            )
-        raise AssertionError(f"Unexpected gh call: {args}")
-
-    with patch.object(automation, "_query_project_item_field", return_value="Backlog"), patch.object(
-        automation, "_post_comment", lambda _o, _r, _n, body, **_k: posted.append(body)
-    ):
-        counts = reconcile_handoffs(
-            config,
-            "StartupAI-site",
-            1,
-            ack_timeout_minutes=30,
-            gh_runner=fake_gh,
-        )
+        },
+        latest_comment_timestamps={
+            ("StartupAI-site/startupai-crew", 84): now - timedelta(minutes=5)
+        },
+    )
+    counts = reconcile_handoffs(
+        config,
+        "StartupAI-site",
+        1,
+        ack_timeout_minutes=30,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(posted),
+    )
     assert counts["pending"] == 1
     assert not posted
 

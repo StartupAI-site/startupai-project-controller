@@ -197,6 +197,79 @@ def test_get_issue_context_returns_typed_context(monkeypatch) -> None:
     )
 
 
+def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args, gh_runner=None, operation_type="query"):
+        calls.append(args)
+        return json.dumps({"items": [{"number": 84}, {"number": 85}]})
+
+    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    numbers = adapter.search_open_issue_numbers_with_comment_marker(
+        "StartupAI-site/startupai-crew",
+        "startupai-board-bot:handoff:job=",
+    )
+
+    assert numbers == (84, 85)
+    assert calls[0][0:4] == ["api", "search/issues", "-X", "GET"]
+    assert any(
+        arg == 'q=repo:StartupAI-site/startupai-crew is:issue is:open in:comments "startupai-board-bot:handoff:job="'
+        for arg in calls[0]
+    )
+
+
+def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._query_issue_comments",
+        lambda owner, repo, number, gh_runner=None: [
+            {"body": "first"},
+            {"body": "second"},
+            {"body": ""},
+        ],
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    comments = adapter.list_issue_comment_bodies(
+        "StartupAI-site/startupai-crew",
+        84,
+    )
+
+    assert comments == ("first", "second", "")
+
+
+def test_latest_matching_comment_timestamp_delegates_to_query_helper(monkeypatch) -> None:
+    expected = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+    recorded: list[tuple[str, str, int, tuple[str, ...]]] = []
+
+    def fake_latest_matching(owner, repo, number, markers, gh_runner=None):
+        recorded.append((owner, repo, number, markers))
+        return expected
+
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._query_latest_matching_comment_timestamp",
+        fake_latest_matching,
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    result = adapter.latest_matching_comment_timestamp(
+        "StartupAI-site/startupai-crew",
+        84,
+        ("marker-a", "marker-b"),
+    )
+
+    assert result == expected
+    assert recorded == [
+        (
+            "StartupAI-site",
+            "startupai-crew",
+            84,
+            ("marker-a", "marker-b"),
+        )
+    ]
+
+
 def test_query_issue_body_uses_adapter_owned_query(monkeypatch) -> None:
     monkeypatch.setattr(
         "startupai_controller.adapters.github_cli._run_gh",

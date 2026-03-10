@@ -6,6 +6,7 @@ field IDs, GraphQL queries, and authentication details.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from startupai_controller.domain.models import IssueFields, IssueSnapshot
@@ -24,4 +25,25 @@ class ReviewStatePort(Protocol):
 
     def get_issue_fields(self, issue_ref: str) -> IssueFields:
         """Return the full typed field bundle for an issue."""
+        ...
+
+    def search_open_issue_numbers_with_comment_marker(
+        self, repo: str, marker: str
+    ) -> tuple[int, ...]:
+        """Return open issue numbers in a repo with comments matching a marker."""
+        ...
+
+    def list_issue_comment_bodies(
+        self, repo: str, issue_number: int
+    ) -> tuple[str, ...]:
+        """Return all comment bodies for an issue."""
+        ...
+
+    def latest_matching_comment_timestamp(
+        self,
+        repo: str,
+        issue_number: int,
+        markers: tuple[str, ...],
+    ) -> datetime | None:
+        """Return the latest timestamp for comments containing any marker."""
         ...

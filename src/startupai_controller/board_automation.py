@@ -62,9 +62,7 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     _marker_for,
     _comment_exists,
     _post_comment,
-    _query_issue_comments,
     _comment_activity_timestamp,
-    _query_latest_matching_comment_timestamp,
     _query_latest_non_automation_comment_timestamp,
     _query_latest_marker_timestamp,
     _query_project_item_field,
@@ -857,71 +855,34 @@ def reconcile_handoffs(
         "escalated": 0,
         "pending": 0,
     }
-    use_ports = review_state_port is not None or board_port is not None
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
 
     # Scan all issue prefixes for handoff markers
     for prefix, repo_slug in config.issue_prefixes.items():
-        owner, repo = repo_slug.split("/", maxsplit=1)
-
-        # Search for open issues with handoff markers using the search API
-        search_query = (
-            f"repo:{repo_slug} is:issue is:open "
-            f"in:comments \"{MARKER_PREFIX}:handoff:job=\""
-        )
         try:
-            output = _run_gh(
-                [
-                    "api",
-                    "search/issues",
-                    "-X",
-                    "GET",
-                    "-f",
-                    f"q={search_query}",
-                    "-f",
-                    "per_page=100",
-                ],
-                gh_runner=gh_runner,
+            issue_numbers = review_state_port.search_open_issue_numbers_with_comment_marker(
+                repo_slug,
+                f"{MARKER_PREFIX}:handoff:job=",
             )
         except GhQueryError:
             continue
 
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError:
-            continue
-
-        for item in payload.get("items", []):
-            issue_number = item.get("number")
-            if not issue_number:
-                continue
-
+        for issue_number in issue_numbers:
             issue_ref = f"{prefix}#{issue_number}"
 
             # Check if this issue has been acknowledged (moved past Backlog)
-            if use_ports:
-                current_status = review_state_port.get_issue_status(issue_ref)
-            else:
-                current_status = _query_project_item_field(
-                    issue_ref,
-                    "Status",
-                    config,
-                    project_owner,
-                    project_number,
-                    gh_runner=gh_runner,
-                )
+            current_status = review_state_port.get_issue_status(issue_ref)
 
             ack_statuses = {"Ready", "In Progress", "Review", "Done"}
             if current_status in ack_statuses:
@@ -929,8 +890,9 @@ def reconcile_handoffs(
                 continue
 
             try:
-                comments = _query_issue_comments(
-                    owner, repo, issue_number, gh_runner=gh_runner
+                comments = review_state_port.list_issue_comment_bodies(
+                    repo_slug,
+                    issue_number,
                 )
             except GhQueryError:
                 counters["pending"] += 1
@@ -938,17 +900,17 @@ def reconcile_handoffs(
 
             retry_marker = f"{MARKER_PREFIX}:handoff-retry:{issue_ref}:"
             retry_count = 0
-            for comment in comments:
-                body = str(comment.get("body") or "")
+            for body in comments:
                 if retry_marker in body:
                     retry_count += 1
 
-            latest_signal = _query_latest_handoff_signal_timestamp(
-                owner,
-                repo,
+            latest_signal = review_state_port.latest_matching_comment_timestamp(
+                repo_slug,
                 issue_number,
-                issue_ref,
-                gh_runner=gh_runner,
+                (
+                    f"{MARKER_PREFIX}:handoff:job=",
+                    f"{MARKER_PREFIX}:handoff-retry:{issue_ref}:",
+                ),
             )
             if latest_signal is None or (now - latest_signal) < ack_timeout:
                 counters["pending"] += 1
@@ -966,16 +928,7 @@ def reconcile_handoffs(
                         f"handoff. Retry #{retry_count + 1} of {max_retries}.\n\n"
                         f"Run:\n```\nmake promote-ready ISSUE={issue_ref}\n```"
                     )
-                    if use_ports:
-                        board_port.post_issue_comment(
-                            f"{owner}/{repo}",
-                            issue_number,
-                            body,
-                        )
-                    else:
-                        _post_comment(
-                            owner, repo, issue_number, body, gh_runner=gh_runner
-                        )
+                    board_port.post_issue_comment(repo_slug, issue_number, body)
                 counters["retried"] += 1
             else:
                 if not dry_run:
@@ -1838,27 +1791,6 @@ def admit_backlog_items(
         error=error,
         deep_evaluation_performed=True,
         deep_evaluation_truncated=deep_evaluation_truncated,
-    )
-
-
-def _query_latest_handoff_signal_timestamp(
-    owner: str,
-    repo: str,
-    number: int,
-    issue_ref: str,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> datetime | None:
-    """Return the latest handoff-start or handoff-retry timestamp."""
-    return _query_latest_matching_comment_timestamp(
-        owner,
-        repo,
-        number,
-        (
-            f"{MARKER_PREFIX}:handoff:job=",
-            f"{MARKER_PREFIX}:handoff-retry:{issue_ref}:",
-        ),
-        gh_runner=gh_runner,
     )
 
 
