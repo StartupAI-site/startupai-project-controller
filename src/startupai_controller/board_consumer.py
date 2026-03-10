@@ -6706,6 +6706,282 @@ def _next_available_slots(
     return [slot_id for slot_id in range(1, limit + 1) if slot_id not in occupied]
 
 
+def _log_completed_worker_results(
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+) -> None:
+    """Log and discard completed worker futures."""
+    for future, task in list(active_tasks.items()):
+        if not future.done():
+            continue
+        del active_tasks[future]
+        try:
+            result = future.result()
+            logger.info("Worker result [slot=%s issue=%s]: %s", task.slot_id, task.issue_ref, result)
+        except Exception:
+            logger.exception(
+                "Unhandled worker failure [slot=%s issue=%s]",
+                task.slot_id,
+                task.issue_ref,
+            )
+
+
+def _prepare_multi_worker_cycle(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    *,
+    dry_run: bool,
+    sleeper: Callable[[float], None],
+    di_kwargs: dict[str, Any],
+) -> PreparedCycleContext | None:
+    """Run one bounded preflight pass for the multi-worker daemon."""
+    try:
+        return _prepare_cycle(
+            config,
+            db,
+            dry_run=dry_run,
+            board_info_resolver=di_kwargs.get("board_info_resolver"),
+            board_mutator=di_kwargs.get("board_mutator"),
+            comment_checker=di_kwargs.get("comment_checker"),
+            comment_poster=di_kwargs.get("comment_poster"),
+            gh_runner=di_kwargs.get("gh_runner"),
+        )
+    except ConfigError:
+        logger.exception("Config error during multi-worker cycle")
+    except WorkflowConfigError:
+        logger.exception("Workflow config error during multi-worker cycle")
+    except GhQueryError as err:
+        logger.error("Multi-worker preflight failed: %s", err)
+        _mark_degraded(db, f"control-plane:{gh_reason_code(err)}:{err}")
+    sleeper(config.poll_interval_seconds)
+    return None
+
+
+def _multi_worker_dispatch_state(
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+) -> tuple[list[int], set[str]]:
+    """Compute currently available slots and active issue refs."""
+    reserved_slots = {task.slot_id for task in active_tasks.values()}
+    active_issue_refs = {task.issue_ref for task in active_tasks.values()}
+    active_issue_refs.update(worker.issue_ref for worker in db.active_workers())
+    available_slots = _next_available_slots(
+        db,
+        prepared.global_limit,
+        reserved_slots=reserved_slots,
+    )
+    return available_slots, active_issue_refs
+
+
+def _sleep_for_claim_suppression_if_needed(
+    db: ConsumerDB,
+    config: ConsumerConfig,
+    *,
+    sleeper: Callable[[float], None],
+) -> bool:
+    """Sleep until claim suppression clears, if active."""
+    suppression_state = _claim_suppression_state(db)
+    if suppression_state is None:
+        return False
+    until = _parse_iso8601_timestamp(suppression_state["until"])
+    if until is None:
+        sleeper(config.poll_interval_seconds)
+        return True
+    remaining = max(
+        1.0,
+        (until - datetime.now(timezone.utc)).total_seconds(),
+    )
+    sleeper(min(float(config.poll_interval_seconds), remaining))
+    return True
+
+
+def _prepare_multi_worker_launch_context(
+    candidate: str,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    dry_run: bool,
+    di_kwargs: dict[str, Any],
+) -> tuple[PreparedLaunchContext | None, bool]:
+    """Prepare launch context for one candidate.
+
+    Returns `(launch_context, stop_dispatch)`.
+    """
+    if dry_run:
+        return None, False
+    _record_metric(db, config, "candidate_selected", issue_ref=candidate)
+    try:
+        return (
+            _prepare_launch_candidate(
+                candidate,
+                config=config,
+                prepared=prepared,
+                db=db,
+                subprocess_runner=di_kwargs.get("subprocess_runner"),
+                status_resolver=di_kwargs.get("status_resolver"),
+                board_info_resolver=di_kwargs.get("board_info_resolver"),
+                board_mutator=di_kwargs.get("board_mutator"),
+                gh_runner=di_kwargs.get("gh_runner"),
+            ),
+            False,
+        )
+    except GhQueryError as err:
+        _record_metric(
+            db,
+            config,
+            "context_hydration_failed",
+            issue_ref=candidate,
+            payload={"reason": gh_reason_code(err), "detail": str(err)},
+        )
+        if not _maybe_activate_claim_suppression(
+            db,
+            config,
+            scope="hydration",
+            error=err,
+        ):
+            _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
+        return None, True
+    except WorkflowConfigError as err:
+        _block_prelaunch_issue(
+            candidate,
+            f"workflow-config:{err}",
+            config=config,
+            cp_config=prepared.cp_config,
+            db=db,
+            board_info_resolver=di_kwargs.get("board_info_resolver"),
+            board_mutator=di_kwargs.get("board_mutator"),
+            gh_runner=di_kwargs.get("gh_runner"),
+        )
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": "workflow_config_error", "detail": str(err)},
+        )
+        return None, False
+    except WorktreePrepareError as err:
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": err.reason_code, "detail": err.detail},
+        )
+        return None, False
+    except RuntimeError as err:
+        _block_prelaunch_issue(
+            candidate,
+            f"workflow-hook:{err}",
+            config=config,
+            cp_config=prepared.cp_config,
+            db=db,
+            board_info_resolver=di_kwargs.get("board_info_resolver"),
+            board_mutator=di_kwargs.get("board_mutator"),
+            gh_runner=di_kwargs.get("gh_runner"),
+        )
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": "workflow_hook_error", "detail": str(err)},
+        )
+        return None, False
+
+
+def _submit_multi_worker_task(
+    executor: ThreadPoolExecutor,
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+    *,
+    config: ConsumerConfig,
+    candidate: str,
+    slot_id: int,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext | None,
+    dry_run: bool,
+    di_kwargs: dict[str, Any],
+) -> None:
+    """Submit one prepared candidate to a worker slot."""
+    future = executor.submit(
+        _run_worker_cycle,
+        replace(config),
+        target_issue=candidate,
+        slot_id=slot_id,
+        prepared=prepared,
+        launch_context=launch_context,
+        dry_run=dry_run,
+        di_kwargs=di_kwargs,
+    )
+    active_tasks[future] = ActiveWorkerTask(
+        issue_ref=candidate,
+        slot_id=slot_id,
+        launched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def _dispatch_multi_worker_launches(
+    executor: ThreadPoolExecutor,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    *,
+    prepared: PreparedCycleContext,
+    available_slots: list[int],
+    active_issue_refs: set[str],
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+    dry_run: bool,
+    di_kwargs: dict[str, Any],
+) -> int:
+    """Launch as many ready candidates as the current hydration budget allows."""
+    launched = 0
+    hydration_budget = max(1, config.launch_hydration_concurrency)
+    for slot_id in available_slots:
+        if launched >= hydration_budget and not dry_run:
+            break
+        try:
+            candidate = _select_candidate_for_cycle(
+                config,
+                db,
+                prepared,
+                status_resolver=di_kwargs.get("status_resolver"),
+                gh_runner=di_kwargs.get("gh_runner"),
+                excluded_issue_refs=active_issue_refs,
+            )
+        except GhQueryError as err:
+            logger.error("Ready-item selection failed: %s", err)
+            _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
+            break
+        if not candidate:
+            break
+
+        active_issue_refs.add(candidate)
+        launch_context, stop_dispatch = _prepare_multi_worker_launch_context(
+            candidate,
+            config=config,
+            db=db,
+            prepared=prepared,
+            dry_run=dry_run,
+            di_kwargs=di_kwargs,
+        )
+        if stop_dispatch:
+            break
+
+        _submit_multi_worker_task(
+            executor,
+            active_tasks,
+            config=config,
+            candidate=candidate,
+            slot_id=slot_id,
+            prepared=prepared,
+            launch_context=launch_context,
+            dry_run=dry_run,
+            di_kwargs=di_kwargs,
+        )
+        launched += 1
+    return launched
+
+
 def _run_multi_worker_daemon_loop(
     config: ConsumerConfig,
     db: ConsumerDB,
@@ -6719,19 +6995,7 @@ def _run_multi_worker_daemon_loop(
     active_tasks: dict[Future[CycleResult], ActiveWorkerTask] = {}
     with ThreadPoolExecutor(max_workers=max(1, config.global_concurrency)) as executor:
         while True:
-            for future, task in list(active_tasks.items()):
-                if not future.done():
-                    continue
-                del active_tasks[future]
-                try:
-                    result = future.result()
-                    logger.info("Worker result [slot=%s issue=%s]: %s", task.slot_id, task.issue_ref, result)
-                except Exception:
-                    logger.exception(
-                        "Unhandled worker failure [slot=%s issue=%s]",
-                        task.slot_id,
-                        task.issue_ref,
-                    )
+            _log_completed_worker_results(active_tasks)
 
             if _drain_requested(config.drain_path):
                 if not active_tasks and db.active_lease_count() == 0:
@@ -6743,168 +7007,39 @@ def _run_multi_worker_daemon_loop(
                 sleeper(min(5.0, float(config.poll_interval_seconds)))
                 continue
 
-            try:
-                prepared = _prepare_cycle(
-                    config,
-                    db,
-                    dry_run=dry_run,
-                    board_info_resolver=di_kwargs.get("board_info_resolver"),
-                    board_mutator=di_kwargs.get("board_mutator"),
-                    comment_checker=di_kwargs.get("comment_checker"),
-                    comment_poster=di_kwargs.get("comment_poster"),
-                    gh_runner=di_kwargs.get("gh_runner"),
-                )
-            except ConfigError:
-                logger.exception("Config error during multi-worker cycle")
-                sleeper(config.poll_interval_seconds)
-                continue
-            except WorkflowConfigError:
-                logger.exception("Workflow config error during multi-worker cycle")
-                sleeper(config.poll_interval_seconds)
-                continue
-            except GhQueryError as err:
-                logger.error("Multi-worker preflight failed: %s", err)
-                _mark_degraded(db, f"control-plane:{gh_reason_code(err)}:{err}")
-                sleeper(config.poll_interval_seconds)
-                continue
-
-            reserved_slots = {task.slot_id for task in active_tasks.values()}
-            active_issue_refs = {task.issue_ref for task in active_tasks.values()}
-            active_issue_refs.update(worker.issue_ref for worker in db.active_workers())
-            available_slots = _next_available_slots(
+            prepared = _prepare_multi_worker_cycle(
+                config,
                 db,
-                prepared.global_limit,
-                reserved_slots=reserved_slots,
+                dry_run=dry_run,
+                sleeper=sleeper,
+                di_kwargs=di_kwargs,
             )
-            suppression_state = _claim_suppression_state(db)
-            if suppression_state is not None:
-                until = _parse_iso8601_timestamp(suppression_state["until"])
-                if until is None:
-                    sleeper(config.poll_interval_seconds)
-                else:
-                    remaining = max(
-                        1.0,
-                        (until - datetime.now(timezone.utc)).total_seconds(),
-                    )
-                    sleeper(min(float(config.poll_interval_seconds), remaining))
+            if prepared is None:
                 continue
 
-            launched = 0
-            hydration_budget = max(1, config.launch_hydration_concurrency)
-            for slot_id in available_slots:
-                if launched >= hydration_budget and not dry_run:
-                    break
-                try:
-                    candidate = _select_candidate_for_cycle(
-                        config,
-                        db,
-                        prepared,
-                        status_resolver=di_kwargs.get("status_resolver"),
-                        gh_runner=di_kwargs.get("gh_runner"),
-                        excluded_issue_refs=active_issue_refs,
-                    )
-                except GhQueryError as err:
-                    logger.error("Ready-item selection failed: %s", err)
-                    _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
-                    break
-                if not candidate:
-                    break
+            available_slots, active_issue_refs = _multi_worker_dispatch_state(
+                db,
+                prepared,
+                active_tasks,
+            )
+            if _sleep_for_claim_suppression_if_needed(
+                db,
+                config,
+                sleeper=sleeper,
+            ):
+                continue
 
-                active_issue_refs.add(candidate)
-                launch_context: PreparedLaunchContext | None = None
-                if not dry_run:
-                    _record_metric(db, config, "candidate_selected", issue_ref=candidate)
-                    try:
-                        launch_context = _prepare_launch_candidate(
-                            candidate,
-                            config=config,
-                            prepared=prepared,
-                            db=db,
-                            subprocess_runner=di_kwargs.get("subprocess_runner"),
-                            status_resolver=di_kwargs.get("status_resolver"),
-                            board_info_resolver=di_kwargs.get("board_info_resolver"),
-                            board_mutator=di_kwargs.get("board_mutator"),
-                            gh_runner=di_kwargs.get("gh_runner"),
-                        )
-                    except GhQueryError as err:
-                        _record_metric(
-                            db,
-                            config,
-                            "context_hydration_failed",
-                            issue_ref=candidate,
-                            payload={"reason": gh_reason_code(err), "detail": str(err)},
-                        )
-                        if not _maybe_activate_claim_suppression(
-                            db,
-                            config,
-                            scope="hydration",
-                            error=err,
-                        ):
-                            _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
-                        break
-                    except WorkflowConfigError as err:
-                        _block_prelaunch_issue(
-                            candidate,
-                            f"workflow-config:{err}",
-                            config=config,
-                            cp_config=prepared.cp_config,
-                            db=db,
-                            board_info_resolver=di_kwargs.get("board_info_resolver"),
-                            board_mutator=di_kwargs.get("board_mutator"),
-                            gh_runner=di_kwargs.get("gh_runner"),
-                        )
-                        _record_metric(
-                            db,
-                            config,
-                            "worker_start_failed",
-                            issue_ref=candidate,
-                            payload={"reason": "workflow_config_error", "detail": str(err)},
-                        )
-                        continue
-                    except WorktreePrepareError as err:
-                        _record_metric(
-                            db,
-                            config,
-                            "worker_start_failed",
-                            issue_ref=candidate,
-                            payload={"reason": err.reason_code, "detail": err.detail},
-                        )
-                        continue
-                    except RuntimeError as err:
-                        _block_prelaunch_issue(
-                            candidate,
-                            f"workflow-hook:{err}",
-                            config=config,
-                            cp_config=prepared.cp_config,
-                            db=db,
-                            board_info_resolver=di_kwargs.get("board_info_resolver"),
-                            board_mutator=di_kwargs.get("board_mutator"),
-                            gh_runner=di_kwargs.get("gh_runner"),
-                        )
-                        _record_metric(
-                            db,
-                            config,
-                            "worker_start_failed",
-                            issue_ref=candidate,
-                            payload={"reason": "workflow_hook_error", "detail": str(err)},
-                        )
-                        continue
-                future = executor.submit(
-                    _run_worker_cycle,
-                    replace(config),
-                    target_issue=candidate,
-                    slot_id=slot_id,
-                    prepared=prepared,
-                    launch_context=launch_context,
-                    dry_run=dry_run,
-                    di_kwargs=di_kwargs,
-                )
-                active_tasks[future] = ActiveWorkerTask(
-                    issue_ref=candidate,
-                    slot_id=slot_id,
-                    launched_at=datetime.now(timezone.utc).isoformat(),
-                )
-                launched += 1
+            launched = _dispatch_multi_worker_launches(
+                executor,
+                config,
+                db,
+                prepared=prepared,
+                available_slots=available_slots,
+                active_issue_refs=active_issue_refs,
+                active_tasks=active_tasks,
+                dry_run=dry_run,
+                di_kwargs=di_kwargs,
+            )
 
             sleeper(1.0 if active_tasks or launched else config.poll_interval_seconds)
 
