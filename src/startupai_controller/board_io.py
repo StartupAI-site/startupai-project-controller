@@ -34,6 +34,11 @@ from startupai_controller.promote_ready import (
     _query_status_field_option,
     _set_board_status,
 )
+from startupai_controller.domain.models import (
+    CheckObservation,
+    OpenPullRequest,
+    PrGateStatus,
+)
 from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
 from startupai_controller.github_http import GitHubTransportError, run_github_command
 
@@ -2655,48 +2660,6 @@ class CodexReviewVerdict:
     timestamp: str
     actor: str
     checklist: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class CheckObservation:
-    """Latest observed GitHub check state for one check/context name."""
-
-    name: str
-    result: str  # pass|pending|fail|cancelled
-    status: str
-    conclusion: str
-    details_url: str = ""
-    workflow_name: str = ""
-    run_id: int | None = None
-
-
-@dataclass(frozen=True)
-class PrGateStatus:
-    """Gate readiness snapshot for autonomous merge decisions."""
-
-    required: set[str]
-    passed: set[str]
-    failed: set[str]
-    pending: set[str]
-    cancelled: set[str]
-    merge_state_status: str
-    mergeable: str
-    is_draft: bool
-    state: str
-    auto_merge_enabled: bool
-    checks: dict[str, CheckObservation] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class OpenPullRequest:
-    """Minimal open-PR snapshot used for review reconciliation scans."""
-
-    number: int
-    url: str
-    head_ref_name: str
-    is_draft: bool
-    body: str = ""
-    author: str = ""
 
 
 @dataclass(frozen=True)

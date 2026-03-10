@@ -6,14 +6,12 @@ logic. Imports from domain/verdict_policy.py directly.
 
 from __future__ import annotations
 
-import pytest
-
-from startupai_controller.domain.repair_policy import MARKER_PREFIX
 from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
 from startupai_controller.domain.verdict_policy import (
     is_pre_backfill_eligible,
     is_session_verdict_eligible,
     marker_already_present,
+    parse_verdict_marker,
     verdict_marker_text,
 )
 
@@ -28,15 +26,19 @@ class TestVerdictMarkerFormat:
 
     def test_marker_format(self) -> None:
         session_id = "sess-abc-123"
-        marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session={session_id} -->"
+        marker = verdict_marker_text(session_id)
         assert "startupai-board-bot" in marker
         assert "codex-verdict" in marker
         assert f"session={session_id}" in marker
 
     def test_marker_is_html_comment(self) -> None:
-        marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session=s1 -->"
+        marker = verdict_marker_text("s1")
         assert marker.startswith("<!--")
         assert marker.endswith("-->")
+
+    def test_parse_verdict_marker_roundtrip(self) -> None:
+        marker = verdict_marker_text("sess-42")
+        assert parse_verdict_marker(marker) == "sess-42"
 
 
 # ---------------------------------------------------------------------------
@@ -113,18 +115,32 @@ class TestPreBackfillVerdictEligibility:
             last_result="blocked",
             last_reason="Missing codex verdict marker: no marker found",
         )
-        is_verdict_blocked = (
-            entry.last_result == "blocked"
-            and entry.last_reason is not None
-            and "missing codex verdict marker" in entry.last_reason.lower()
+        session = _make_session(pr_url=entry.pr_url)
+        assert is_pre_backfill_eligible(
+            last_result=entry.last_result,
+            last_reason=entry.last_reason,
         )
-        assert is_verdict_blocked is True
+        assert is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
+        )
 
     def test_newly_seeded_entry_is_eligible(self) -> None:
         """Entry with no last_result (newly seeded) is eligible."""
         entry = _make_review_queue_entry(last_result=None)
-        is_newly_seeded = entry.last_result is None
-        assert is_newly_seeded is True
+        session = _make_session(pr_url=entry.pr_url)
+        assert is_pre_backfill_eligible(
+            last_result=entry.last_result,
+            last_reason=entry.last_reason,
+        )
+        assert is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
+        )
 
     def test_non_verdict_blocked_entry_not_eligible(self) -> None:
         """Entry blocked for other reason is not eligible."""
@@ -132,39 +148,51 @@ class TestPreBackfillVerdictEligibility:
             last_result="blocked",
             last_reason="required checks failed",
         )
-        is_verdict_blocked = (
-            entry.last_result == "blocked"
-            and entry.last_reason is not None
-            and "missing codex verdict marker" in entry.last_reason.lower()
+        assert not is_pre_backfill_eligible(
+            last_result=entry.last_result,
+            last_reason=entry.last_reason,
         )
-        is_newly_seeded = entry.last_result is None
-        assert not is_verdict_blocked and not is_newly_seeded
 
     def test_auto_merge_entry_not_eligible(self) -> None:
         """Entry with auto_merge_enabled result is not eligible."""
         entry = _make_review_queue_entry(last_result="auto_merge_enabled")
-        is_verdict_blocked = (
-            entry.last_result == "blocked"
-            and entry.last_reason is not None
-            and "missing codex verdict marker" in entry.last_reason.lower()
+        assert not is_pre_backfill_eligible(
+            last_result=entry.last_result,
+            last_reason=entry.last_reason,
         )
-        is_newly_seeded = entry.last_result is None
-        assert not is_verdict_blocked and not is_newly_seeded
 
     def test_session_must_be_success(self) -> None:
         """Session with non-success status disqualifies the entry."""
+        entry = _make_review_queue_entry(last_result=None)
         session = _make_session(status="failed")
-        assert session.status != "success"
+        assert not is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
+        )
 
     def test_session_must_be_review_phase(self) -> None:
         """Session with non-review phase disqualifies the entry."""
+        entry = _make_review_queue_entry(last_result=None)
         session = _make_session(phase="execution")
-        assert session.phase != "review"
+        assert not is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
+        )
 
     def test_session_must_have_pr_url(self) -> None:
         """Session without pr_url disqualifies the entry."""
+        entry = _make_review_queue_entry(last_result=None)
         session = _make_session(pr_url=None)
-        assert not session.pr_url
+        assert not is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
+        )
 
     def test_session_pr_url_must_match_entry(self) -> None:
         """Session.pr_url must match entry.pr_url for eligibility."""
@@ -175,7 +203,12 @@ class TestPreBackfillVerdictEligibility:
         session = _make_session(
             pr_url="https://github.com/org/repo/pull/99",
         )
-        assert session.pr_url != entry.pr_url
+        assert not is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -189,28 +222,32 @@ class TestSnapshotBackfillEligibility:
     def test_marker_existence_prevents_duplicate(self) -> None:
         """If the marker already exists in PR comments, no backfill happens."""
         session_id = "sess-abc"
-        marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session={session_id} -->"
+        marker = verdict_marker_text(session_id)
         existing_comments = {f"Some text\n{marker}\nMore text"}
-        has_marker = any(marker in body for body in existing_comments)
-        assert has_marker is True
+        assert marker_already_present(marker, existing_comments)
 
     def test_no_marker_allows_backfill(self) -> None:
         """If the marker does not exist in PR comments, backfill is allowed."""
-        marker = f"<!-- {MARKER_PREFIX}:codex-verdict:session=sess-abc -->"
         existing_comments = {"Some other comment body"}
-        has_marker = any(marker in body for body in existing_comments)
-        assert has_marker is False
+        marker = verdict_marker_text("sess-abc")
+        assert not marker_already_present(marker, existing_comments)
 
     def test_session_status_success_required(self) -> None:
+        entry = _make_review_queue_entry(last_result=None, pr_url="http://x")
         session = _make_session(status="success", phase="review", pr_url="http://x")
-        eligible = (
-            session.status == "success"
-            and session.phase == "review"
-            and bool(session.pr_url)
+        assert is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
         )
-        assert eligible is True
 
     def test_session_failed_not_eligible(self) -> None:
+        entry = _make_review_queue_entry(last_result=None)
         session = _make_session(status="failed")
-        eligible = session.status == "success"
-        assert eligible is False
+        assert not is_session_verdict_eligible(
+            session_status=session.status,
+            session_phase=session.phase,
+            session_pr_url=session.pr_url,
+            entry_pr_url=entry.pr_url,
+        )

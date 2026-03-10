@@ -17,43 +17,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
+
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "startupai" / "consumer.db"
 
 # Valid session statuses (state machine: pending -> running -> success|failed|timeout|aborted)
 # "aborted" = lease conflict or pre-execution cancellation; never counts as a retry.
 VALID_SESSION_STATUSES = {"pending", "running", "success", "failed", "timeout", "aborted"}
 VALID_SESSION_KINDS = {"new_work", "repair"}
-
-
-@dataclass(frozen=True)
-class SessionInfo:
-    """Read-only view of a session record."""
-
-    id: str
-    issue_ref: str
-    repo_prefix: str | None
-    worktree_path: str | None
-    branch_name: str | None
-    executor: str
-    slot_id: int | None
-    status: str
-    phase: str | None
-    started_at: str | None
-    completed_at: str | None
-    outcome_json: str | None
-    failure_reason: str | None
-    retry_count: int
-    pr_url: str | None
-    provenance_id: str | None
-    session_kind: str
-    repair_pr_url: str | None
-    branch_reconcile_state: str | None
-    branch_reconcile_error: str | None
-    resolution_kind: str | None
-    verification_class: str | None
-    resolution_evidence_json: str | None
-    resolution_action: str | None
-    done_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -135,34 +106,6 @@ class MetricEvent:
         if not isinstance(payload, dict):
             return {}
         return payload
-
-
-@dataclass(frozen=True)
-class ReviewQueueEntry:
-    """Persisted review-clearance work item."""
-
-    issue_ref: str
-    pr_url: str
-    pr_repo: str
-    pr_number: int
-    source_session_id: str | None
-    enqueued_at: str
-    updated_at: str
-    next_attempt_at: str
-    last_attempt_at: str | None
-    attempt_count: int
-    last_result: str | None
-    last_reason: str | None
-    last_state_digest: str | None
-    blocked_streak: int = 0
-    blocked_class: str | None = None
-
-    def next_attempt_datetime(self) -> datetime:
-        """Return the next-attempt timestamp normalized to UTC."""
-        parsed = datetime.fromisoformat(self.next_attempt_at)
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
