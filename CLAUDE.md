@@ -4,7 +4,7 @@
 - **Purpose**: GitHub Project board automation across 3 repos (crew, app, site)
 - **Framework**: Pure Python (stdlib + PyYAML)
 - **Deployment**: systemd user unit on DELL (intentionally powered down)
-- **Origin**: Extracted from `startupai-crew/scripts/` — see `docs/adr/001-control-plane-extraction.md`
+- **Origin**: Extracted from `startupai-crew/scripts/` — see `docs/adr/001-architecture.md`
 
 ## Architecture
 
