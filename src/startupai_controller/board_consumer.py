@@ -381,6 +381,33 @@ class ReviewQueueProcessingOutcome:
 
 
 @dataclass(frozen=True)
+class PreparedDueReviewProcessing:
+    """Prepared changed due-review groups ready for rescue processing."""
+
+    due_items: tuple[ReviewQueueEntry, ...]
+    due_pr_groups: tuple[tuple[tuple[str, int], tuple[ReviewQueueEntry, ...]], ...]
+    snapshots: dict[tuple[str, int], ReviewSnapshot]
+    verdict_backfilled: tuple[str, ...]
+    partial_failure: bool
+    error: str | None
+
+
+@dataclass(frozen=True)
+class ReviewGroupProcessingOutcome:
+    """Outcome of processing one due PR group from the review queue."""
+
+    rerun: tuple[str, ...]
+    auto_merge_enabled: tuple[str, ...]
+    requeued: tuple[str, ...]
+    blocked: tuple[str, ...]
+    skipped: tuple[str, ...]
+    escalated: tuple[str, ...]
+    updated_snapshot: CycleBoardSnapshot
+    partial_failure: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class CycleRuntimeContext:
     """Cycle-scoped runtime wiring and configuration."""
 
@@ -2978,20 +3005,17 @@ def _prepare_review_queue_batch(
     )
 
 
-def _process_review_queue_due_groups(
+def _prepare_due_review_processing(
     *,
-    config: ConsumerConfig,
     store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
     automation_config: BoardAutomationConfig,
     pr_port: PullRequestPort,
     prepared_batch: PreparedReviewQueueBatch,
-    board_snapshot: CycleBoardSnapshot,
     now: datetime,
     dry_run: bool,
-    gh_runner: Callable[..., str] | None = None,
-) -> ReviewQueueProcessingOutcome:
-    """Process the due PR groups for a prepared review-queue batch."""
+    gh_runner: Callable[..., str] | None,
+) -> PreparedDueReviewProcessing:
+    """Prepare the changed due-review groups and snapshots for rescue processing."""
     due_items = list(prepared_batch.due_items)
     due_pr_groups = [
         (pr_key, list(entries)) for pr_key, entries in prepared_batch.due_pr_groups
@@ -3008,15 +3032,8 @@ def _process_review_queue_due_groups(
         )
 
     verdict_backfilled: tuple[str, ...] = ()
-    rerun: list[str] = []
-    auto_merge_enabled: list[str] = []
-    requeued: list[str] = []
-    blocked: list[str] = []
-    skipped: list[str] = []
-    escalated: list[str] = []
     partial_failure = False
     error: str | None = None
-    updated_snapshot = board_snapshot
     snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
 
     if due_pr_groups:
@@ -3059,6 +3076,7 @@ def _process_review_queue_due_groups(
         except GhQueryError as err:
             partial_failure = True
             error = str(err)
+
         if not dry_run and not partial_failure:
             secondary_backfilled = _backfill_review_verdicts_from_snapshots(
                 store,
@@ -3071,109 +3089,232 @@ def _process_review_queue_due_groups(
                 dict.fromkeys(pre_backfilled + secondary_backfilled)
             )
 
-    for (pr_repo, pr_number), entries in due_pr_groups:
-        if partial_failure:
-            break
-        snapshot = snapshots.get((pr_repo, pr_number))
-        if snapshot is None:
-            partial_failure = True
-            error = error or f"missing-review-snapshot:{pr_repo}#{pr_number}"
-            break
-        try:
-            result = review_rescue(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                config=critical_path_config,
-                automation_config=automation_config,
-                project_owner=config.project_owner,
-                project_number=config.project_number,
-                dry_run=dry_run,
-                snapshot=snapshot,
-                gh_runner=gh_runner,
-                pr_port=pr_port,
-            )
-        except GhQueryError as err:
-            partial_failure = True
-            error = str(err)
-            break
+    return PreparedDueReviewProcessing(
+        due_items=tuple(due_items),
+        due_pr_groups=tuple(
+            (pr_key, tuple(entries)) for pr_key, entries in due_pr_groups
+        ),
+        snapshots=snapshots,
+        verdict_backfilled=verdict_backfilled,
+        partial_failure=partial_failure,
+        error=error,
+    )
 
-        if not dry_run:
-            state_digest = pr_port.review_state_digests([(pr_repo, pr_number)]).get(
-                (pr_repo, pr_number)
+
+def _process_due_review_group(
+    *,
+    config: ConsumerConfig,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    pr_repo: str,
+    pr_number: int,
+    entries: tuple[ReviewQueueEntry, ...],
+    snapshot: ReviewSnapshot | None,
+    updated_snapshot: CycleBoardSnapshot,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewGroupProcessingOutcome:
+    """Process one due PR group from the review queue."""
+    if snapshot is None:
+        return ReviewGroupProcessingOutcome(
+            rerun=(),
+            auto_merge_enabled=(),
+            requeued=(),
+            blocked=(),
+            skipped=(),
+            escalated=(),
+            updated_snapshot=updated_snapshot,
+            partial_failure=True,
+            error=f"missing-review-snapshot:{pr_repo}#{pr_number}",
+        )
+
+    try:
+        result = review_rescue(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            config=critical_path_config,
+            automation_config=automation_config,
+            project_owner=config.project_owner,
+            project_number=config.project_number,
+            dry_run=dry_run,
+            snapshot=snapshot,
+            gh_runner=gh_runner,
+            pr_port=pr_port,
+        )
+    except GhQueryError as err:
+        return ReviewGroupProcessingOutcome(
+            rerun=(),
+            auto_merge_enabled=(),
+            requeued=(),
+            blocked=(),
+            skipped=(),
+            escalated=(),
+            updated_snapshot=updated_snapshot,
+            partial_failure=True,
+            error=str(err),
+        )
+
+    escalated: list[str] = []
+    requeued: list[str] = []
+    blocked: list[str] = []
+    skipped: list[str] = []
+    rerun: list[str] = []
+    auto_merge_enabled: list[str] = []
+
+    if not dry_run:
+        state_digest = pr_port.review_state_digests([(pr_repo, pr_number)]).get(
+            (pr_repo, pr_number)
+        )
+        for entry in entries:
+            needs_escalation = _apply_review_queue_result(
+                store,
+                entry,
+                result,
+                now=now,
+                last_state_digest=state_digest,
             )
-            for entry in entries:
-                needs_escalation = _apply_review_queue_result(
-                    store,
-                    entry,
-                    result,
-                    now=now,
-                    last_state_digest=state_digest,
+            if needs_escalation:
+                _escalate_to_claude(
+                    entry.issue_ref,
+                    critical_path_config,
+                    config.project_owner,
+                    config.project_number,
+                    reason=f"review queue blocked escalation: {result.blocked_reason}",
+                    gh_runner=gh_runner,
                 )
-                if needs_escalation:
+                store.delete_review_queue_item(entry.issue_ref)
+                escalated.append(entry.issue_ref)
+
+    pr_ref = f"{pr_repo}#{pr_number}"
+    if result.rerun_checks:
+        rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
+    elif result.auto_merge_enabled:
+        auto_merge_enabled.append(pr_ref)
+    elif result.requeued_refs:
+        for issue_ref in result.requeued_refs:
+            entry = next((e for e in entries if e.issue_ref == issue_ref), None)
+            pr_url = entry.pr_url if entry is not None else ""
+            requeue_count, _ = store.get_requeue_state(issue_ref)
+            if _requeue_or_escalate(requeue_count) == "escalate":
+                if not dry_run:
                     _escalate_to_claude(
-                        entry.issue_ref,
+                        issue_ref,
                         critical_path_config,
                         config.project_owner,
                         config.project_number,
-                        reason=f"review queue blocked escalation: {result.blocked_reason}",
+                        reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
+                        f"{result.blocked_reason or 'persistent check failure / conflict'}",
                         gh_runner=gh_runner,
                     )
-                    store.delete_review_queue_item(entry.issue_ref)
-                    escalated.append(entry.issue_ref)
-        pr_ref = f"{pr_repo}#{pr_number}"
-        if result.rerun_checks:
-            rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
-        elif result.auto_merge_enabled:
-            auto_merge_enabled.append(pr_ref)
-        elif result.requeued_refs:
-            for issue_ref in result.requeued_refs:
-                entry = next((e for e in entries if e.issue_ref == issue_ref), None)
-                pr_url = entry.pr_url if entry is not None else ""
-                requeue_count, _ = store.get_requeue_state(issue_ref)
-                if _requeue_or_escalate(requeue_count) == "escalate":
-                    if not dry_run:
-                        _escalate_to_claude(
-                            issue_ref,
-                            critical_path_config,
-                            config.project_owner,
-                            config.project_number,
-                            reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
-                            f"{result.blocked_reason or 'persistent check failure / conflict'}",
-                            gh_runner=gh_runner,
-                        )
-                        store.delete_review_queue_item(issue_ref)
-                    escalated.append(issue_ref)
-                else:
-                    if not dry_run:
-                        store.increment_requeue_count(issue_ref, pr_url)
-                        store.delete_review_queue_item(issue_ref)
-                    requeued.append(issue_ref)
-            requeued_this_group = [
-                ref for ref in result.requeued_refs if ref not in escalated
-            ]
-            if requeued_this_group:
-                updated_snapshot = _update_board_snapshot_statuses(
-                    updated_snapshot,
-                    critical_path_config,
-                    {ref: "Ready" for ref in requeued_this_group},
-                )
-        elif result.blocked_reason:
-            blocked.append(f"{pr_ref}:{result.blocked_reason}")
-        elif result.skipped_reason:
-            skipped.append(f"{pr_ref}:{result.skipped_reason}")
+                    store.delete_review_queue_item(issue_ref)
+                escalated.append(issue_ref)
+            else:
+                if not dry_run:
+                    store.increment_requeue_count(issue_ref, pr_url)
+                    store.delete_review_queue_item(issue_ref)
+                requeued.append(issue_ref)
+        requeued_this_group = [ref for ref in result.requeued_refs if ref not in escalated]
+        if requeued_this_group:
+            updated_snapshot = _update_board_snapshot_statuses(
+                updated_snapshot,
+                critical_path_config,
+                {ref: "Ready" for ref in requeued_this_group},
+            )
+    elif result.blocked_reason:
+        blocked.append(f"{pr_ref}:{result.blocked_reason}")
+    elif result.skipped_reason:
+        skipped.append(f"{pr_ref}:{result.skipped_reason}")
+
+    return ReviewGroupProcessingOutcome(
+        rerun=tuple(rerun),
+        auto_merge_enabled=tuple(auto_merge_enabled),
+        requeued=tuple(requeued),
+        blocked=tuple(blocked),
+        skipped=tuple(skipped),
+        escalated=tuple(escalated),
+        updated_snapshot=updated_snapshot,
+    )
+
+
+def _process_review_queue_due_groups(
+    *,
+    config: ConsumerConfig,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    prepared_batch: PreparedReviewQueueBatch,
+    board_snapshot: CycleBoardSnapshot,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None = None,
+) -> ReviewQueueProcessingOutcome:
+    """Process the due PR groups for a prepared review-queue batch."""
+    prepared_due_processing = _prepare_due_review_processing(
+        store=store,
+        automation_config=automation_config,
+        pr_port=pr_port,
+        prepared_batch=prepared_batch,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+
+    rerun: list[str] = []
+    auto_merge_enabled: list[str] = []
+    requeued: list[str] = []
+    blocked: list[str] = []
+    skipped: list[str] = []
+    escalated: list[str] = []
+    partial_failure = prepared_due_processing.partial_failure
+    error = prepared_due_processing.error
+    updated_snapshot = board_snapshot
+
+    for (pr_repo, pr_number), entries in prepared_due_processing.due_pr_groups:
+        if partial_failure:
+            break
+        group_outcome = _process_due_review_group(
+            config=config,
+            store=store,
+            critical_path_config=critical_path_config,
+            automation_config=automation_config,
+            pr_port=pr_port,
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            entries=entries,
+            snapshot=prepared_due_processing.snapshots.get((pr_repo, pr_number)),
+            updated_snapshot=updated_snapshot,
+            now=now,
+            dry_run=dry_run,
+            gh_runner=gh_runner,
+        )
+        if group_outcome.partial_failure:
+            partial_failure = True
+            error = group_outcome.error
+            break
+        rerun.extend(group_outcome.rerun)
+        auto_merge_enabled.extend(group_outcome.auto_merge_enabled)
+        requeued.extend(group_outcome.requeued)
+        blocked.extend(group_outcome.blocked)
+        skipped.extend(group_outcome.skipped)
+        escalated.extend(group_outcome.escalated)
+        updated_snapshot = group_outcome.updated_snapshot
 
     if partial_failure and not dry_run:
         _apply_review_queue_partial_failure(
             store,
-            due_items,
+            list(prepared_due_processing.due_items),
             config=config,
             error=error,
             now=now,
         )
 
     return ReviewQueueProcessingOutcome(
-        due_count=len(due_items),
-        verdict_backfilled=verdict_backfilled,
+        due_count=len(prepared_due_processing.due_items),
+        verdict_backfilled=prepared_due_processing.verdict_backfilled,
         rerun=tuple(rerun),
         auto_merge_enabled=tuple(auto_merge_enabled),
         requeued=tuple(requeued),
