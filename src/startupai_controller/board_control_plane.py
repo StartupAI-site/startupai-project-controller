@@ -44,17 +44,17 @@ from startupai_controller.board_consumer import (
     _replay_deferred_actions,
     _drain_review_queue,
 )
-from startupai_controller.consumer_db import ConsumerDB
-from startupai_controller.consumer_workflow import default_repo_roots
-from startupai_controller.board_io import (
+from startupai_controller.adapters.github_cli import (
     CycleBoardSnapshot,
     CycleGitHubMemo,
     _list_project_items_by_status,
     _snapshot_to_issue_ref,
     build_cycle_board_snapshot,
-    gh_reason_code,
 )
-from startupai_controller.github_http import begin_request_stats, end_request_stats
+from startupai_controller.adapters.github_http_adapter import begin_request_stats, end_request_stats
+from startupai_controller.adapters.github_transport import gh_reason_code
+from startupai_controller.adapters.sqlite_store import ConsumerDB
+from startupai_controller.consumer_workflow import default_repo_roots
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     GhQueryError,

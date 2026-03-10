@@ -13,6 +13,7 @@ import subprocess
 import pytest
 
 import startupai_controller.board_io as board_io
+import startupai_controller.adapters.github_transport as github_transport
 from startupai_controller.board_io import (
     LinkedIssue,
     _marker_for,
@@ -490,8 +491,8 @@ def test_run_gh_retries_transient_connection_error(
             )
         return '{"ok": true}'
 
-    monkeypatch.setattr(board_io.subprocess, "check_output", fake_check_output)
-    monkeypatch.setattr(board_io.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(github_transport.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(github_transport.time, "sleep", lambda *_: None)
 
     result = board_io._run_gh(["unsupported", "command"])
 
@@ -510,14 +511,14 @@ def test_run_gh_fails_fast_on_timeout_expired(
         calls["timeout"] = timeout
         raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
 
-    monkeypatch.setattr(board_io.subprocess, "check_output", fake_check_output)
-    monkeypatch.setattr(board_io.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(github_transport.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(github_transport.time, "sleep", lambda *_: None)
 
     with pytest.raises(board_io.GhCommandError, match="timed out after"):
         board_io._run_gh(["unsupported", "command"])
 
     assert calls["count"] == 1
-    assert calls["timeout"] == board_io._GH_COMMAND_TIMEOUT_SECONDS
+    assert calls["timeout"] == github_transport._GH_COMMAND_TIMEOUT_SECONDS
 
 
 def test_query_required_status_checks_uses_ttl_cache(

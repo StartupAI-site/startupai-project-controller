@@ -10,14 +10,11 @@ board_mutator callables).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
 import re
-import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -36,8 +33,21 @@ from startupai_controller.domain.models import (
     OpenPullRequest,
     PrGateStatus,
 )
-from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
-from startupai_controller.github_http import GitHubTransportError, run_github_command
+from startupai_controller.adapters.github_transport import (
+    GhCommandError,
+    _run_gh,
+    gh_reason_code,
+)
+from startupai_controller.adapters.github_types import (
+    COPILOT_CODING_AGENT_LOGINS,
+    CycleBoardSnapshot,
+    CycleGitHubMemo,
+    CodexReviewVerdict,
+    LinkedIssue,
+    PullRequestStateProbe,
+    PullRequestViewPayload,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -48,26 +58,6 @@ from startupai_controller.domain.scheduling_policy import (  # noqa: E402
     VALID_EXECUTORS,
     priority_rank as _priority_rank,  # re-export (compat)
 )
-COPILOT_CODING_AGENT_LOGINS = {
-    "app/copilot-swe-agent",
-    "copilot-swe-agent[bot]",
-    "copilot",
-}
-_GH_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
-_GH_RETRYABLE_ERROR_MARKERS = (
-    "error connecting to api.github.com",
-    "connection reset by peer",
-    "tls handshake timeout",
-    "i/o timeout",
-    "timeout awaiting response headers",
-    "timed out after",
-    "temporary failure in name resolution",
-)
-_GH_RATE_LIMIT_ERROR_MARKERS = (
-    "api rate limit exceeded",
-    "secondary rate limit",
-)
-_GH_COMMAND_TIMEOUT_SECONDS = gh_command_timeout_seconds()
 _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS = 900
 _required_status_checks_ttl_cache: dict[
     tuple[str, str],
@@ -78,151 +68,6 @@ _cycle_board_snapshot_cache: dict[
     tuple[str, int],
     tuple[float, "CycleBoardSnapshot"],
 ] = {}
-
-
-class GhCommandError(GhQueryError):
-    """Structured GitHub CLI failure with normalized operation and kind."""
-
-    def __init__(
-        self,
-        *,
-        operation_type: str,
-        failure_kind: str,
-        command_excerpt: str,
-        detail: str,
-        rate_limit_reset_at: int | None = None,
-    ) -> None:
-        self.operation_type = operation_type
-        self.failure_kind = failure_kind
-        self.command_excerpt = command_excerpt
-        self.detail = detail
-        self.rate_limit_reset_at = rate_limit_reset_at
-        super().__init__(
-            f"{operation_type}:{failure_kind}:Failed running gh "
-            f"{command_excerpt}: {detail}"
-        )
-
-
-def _classify_gh_failure_kind(detail: str) -> str:
-    """Normalize GitHub CLI failure text into a stable reason code."""
-    text = detail.strip().lower()
-    if any(marker in text for marker in _GH_RATE_LIMIT_ERROR_MARKERS):
-        return "rate_limit"
-    if any(marker in text for marker in _GH_RETRYABLE_ERROR_MARKERS):
-        return "network"
-    if "authentication failed" in text or "http 401" in text or "must authenticate" in text:
-        return "auth"
-    if "http 403" in text and "rate limit" not in text:
-        return "auth"
-    if "http 5" in text or "server error" in text or "bad gateway" in text:
-        return "github_outage"
-    if "invalid character" in text or "unexpected token" in text:
-        return "invalid_response"
-    return "query_failed"
-
-
-def _gh_error(
-    args: Sequence[str],
-    *,
-    operation_type: str,
-    detail: str,
-) -> GhCommandError:
-    """Build a structured GitHub command error."""
-    return GhCommandError(
-        operation_type=operation_type,
-        failure_kind=_classify_gh_failure_kind(detail),
-        command_excerpt=" ".join(args[:3]),
-        detail=detail.strip() or "unknown-gh-error",
-        rate_limit_reset_at=None,
-    )
-
-
-def gh_reason_code(error: Exception) -> str:
-    """Return a stable machine-readable reason code for GitHub failures."""
-    if isinstance(error, GhCommandError):
-        return error.failure_kind
-    return _classify_gh_failure_kind(str(error))
-
-# ---------------------------------------------------------------------------
-# Low-level helpers
-# ---------------------------------------------------------------------------
-
-
-def _run_gh(
-    args: list[str],
-    *,
-    gh_runner: Callable[..., str] | None = None,
-    operation_type: str = "query",
-) -> str:
-    """Run a gh CLI command and return stdout. DI point: gh_runner."""
-    if gh_runner is not None:
-        try:
-            return gh_runner(args)
-        except GhQueryError:
-            raise
-        except subprocess.CalledProcessError as error:
-            detail = (error.output or "").strip() or str(error)
-            raise _gh_error(
-                args,
-                operation_type=operation_type,
-                detail=detail,
-            ) from error
-
-    try:
-        http_output = run_github_command(
-            args,
-            operation_type=operation_type,
-            timeout_seconds=_GH_COMMAND_TIMEOUT_SECONDS,
-            retry_delays=_GH_RETRY_DELAYS_SECONDS,
-        )
-        if http_output is not None:
-            return http_output
-    except GitHubTransportError as error:
-        raise GhCommandError(
-            operation_type=error.operation_type,
-            failure_kind=error.failure_kind,
-            command_excerpt=error.command_excerpt,
-            detail=error.detail,
-            rate_limit_reset_at=error.rate_limit_reset_at,
-        ) from error
-
-    gh_command = ["gh"] + args
-    for attempt in range(len(_GH_RETRY_DELAYS_SECONDS) + 1):
-        try:
-            return subprocess.check_output(
-                gh_command,
-                text=True,
-                stderr=subprocess.STDOUT,
-                timeout=_GH_COMMAND_TIMEOUT_SECONDS,
-            )
-        except OSError as error:
-            raise GhCommandError(
-                operation_type=operation_type,
-                failure_kind="network",
-                command_excerpt=" ".join(args[:3]),
-                detail=str(error),
-            ) from error
-        except subprocess.TimeoutExpired as error:
-            detail = f"timed out after {_GH_COMMAND_TIMEOUT_SECONDS:.1f}s"
-            raise GhCommandError(
-                operation_type=operation_type,
-                failure_kind="network",
-                command_excerpt=" ".join(args[:3]),
-                detail=detail,
-            ) from error
-        except subprocess.CalledProcessError as error:
-            output = error.output.strip()
-            failure_kind = _classify_gh_failure_kind(output)
-            is_retryable = failure_kind in {"network", "rate_limit", "github_outage"}
-            if is_retryable and attempt < len(_GH_RETRY_DELAYS_SECONDS):
-                time.sleep(_GH_RETRY_DELAYS_SECONDS[attempt])
-                continue
-            raise GhCommandError(
-                operation_type=operation_type,
-                failure_kind=failure_kind,
-                command_excerpt=" ".join(args[:3]),
-                detail=output,
-            ) from error
 
 
 def rerun_actions_run(
@@ -611,30 +456,15 @@ def _query_failed_check_runs(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str] | None:
-    """Query check runs for a commit and return names of failed ones.
+    """Compatibility wrapper for adapter-owned failed-check queries."""
+    from startupai_controller.adapters.github_cli import _query_failed_check_runs as _adapter_query_failed_check_runs
 
-    Returns None on API failure (caller should treat as "unknown").
-    """
-    try:
-        output = _run_gh(
-            ["api", f"repos/{owner}/{repo}/commits/{head_sha}/check-runs"],
-            gh_runner=gh_runner,
-        )
-    except GhQueryError:
-        return None
-
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError:
-        return None
-
-    failed: list[str] = []
-    for run in data.get("check_runs", []):
-        if isinstance(run, dict) and run.get("conclusion") == "failure":
-            name = run.get("name", "")
-            if name:
-                failed.append(name)
-    return failed
+    return _adapter_query_failed_check_runs(
+        owner,
+        repo,
+        head_sha,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_pr_head_sha(
@@ -644,21 +474,15 @@ def _query_pr_head_sha(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str | None:
-    """Get the head SHA of a PR. Returns None on failure."""
-    try:
-        output = _run_gh(
-            ["api", f"repos/{owner}/{repo}/pulls/{pr_number}"],
-            gh_runner=gh_runner,
-        )
-    except GhQueryError:
-        return None
+    """Compatibility wrapper for adapter-owned PR head SHA queries."""
+    from startupai_controller.adapters.github_cli import _query_pr_head_sha as _adapter_query_pr_head_sha
 
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError:
-        return None
-
-    return data.get("head", {}).get("sha")
+    return _adapter_query_pr_head_sha(
+        owner,
+        repo,
+        pr_number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -883,20 +707,15 @@ def _is_pr_open(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
-    """Return True when PR exists and is open."""
-    try:
-        state = _run_gh(
-            [
-                "api",
-                f"repos/{owner}/{repo}/pulls/{pr_number}",
-                "-q",
-                ".state",
-            ],
-            gh_runner=gh_runner,
-        ).strip()
-    except GhQueryError:
-        return False
-    return state.upper() == "OPEN"
+    """Compatibility wrapper for adapter-owned PR-open queries."""
+    from startupai_controller.adapters.github_cli import _is_pr_open as _adapter_is_pr_open
+
+    return _adapter_is_pr_open(
+        owner,
+        repo,
+        pr_number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_open_pr_updated_at(
@@ -1330,18 +1149,15 @@ def query_issue_body(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
-    """Return the raw issue body."""
-    output = _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}",
-            "--jq",
-            ".body",
-        ],
-        gh_runner=gh_runner,
-        operation_type="query",
+    """Compatibility wrapper for adapter-owned issue-body queries."""
+    from startupai_controller.adapters.github_cli import query_issue_body as _adapter_query_issue_body
+
+    return _adapter_query_issue_body(
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
     )
-    return str(output or "")
 
 
 def memoized_query_issue_body(
@@ -1352,14 +1168,16 @@ def memoized_query_issue_body(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
-    """Return issue body using a cycle-local cache."""
-    key = (owner, repo, number)
-    cached = memo.issue_bodies.get(key)
-    if cached is not None:
-        return cached
-    body = query_issue_body(owner, repo, number, gh_runner=gh_runner)
-    memo.issue_bodies[key] = body
-    return body
+    """Compatibility wrapper for adapter-owned memoized issue-body queries."""
+    from startupai_controller.adapters.github_cli import memoized_query_issue_body as _adapter_memoized_query_issue_body
+
+    return _adapter_memoized_query_issue_body(
+        memo,
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_latest_wip_activity_timestamp(
@@ -1427,66 +1245,6 @@ def _set_issue_assignees(
     )
 
 
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _ProjectItemSnapshot:
-    """A single project board item with key field values."""
-
-    issue_ref: str
-    status: str
-    executor: str
-    handoff_to: str
-    priority: str = ""
-    item_id: str = ""
-    project_id: str = ""
-    sprint: str = ""
-    agent: str = ""
-    owner_field: str = ""
-    title: str = ""
-    body: str = ""
-    repo_slug: str = ""
-    repo_name: str = ""
-    repo_owner: str = ""
-    issue_number: int = 0
-    issue_updated_at: str = ""
-
-
-@dataclass(frozen=True)
-class CycleBoardSnapshot:
-    """Thin per-cycle view of board items reused across hot-path phases."""
-
-    items: tuple[_ProjectItemSnapshot, ...]
-    by_status: dict[str, tuple[_ProjectItemSnapshot, ...]] = field(default_factory=dict)
-
-    def items_with_status(self, status: str) -> tuple[_ProjectItemSnapshot, ...]:
-        """Return cached items in the given status."""
-        return self.by_status.get(status, ())
-
-
-@dataclass
-class CycleGitHubMemo:
-    """Cycle-local memoization for expensive GitHub reads."""
-
-    issue_bodies: dict[tuple[str, str, int], str] = field(default_factory=dict)
-    issue_comment_bodies: dict[tuple[str, str, int], list[str]] = field(default_factory=dict)
-    open_pull_requests: dict[str, list["OpenPullRequest"]] = field(default_factory=dict)
-    dependency_ready: dict[str, bool] = field(default_factory=dict)
-    review_pull_requests: dict[tuple[str, int], PullRequestViewPayload] = field(
-        default_factory=dict
-    )
-    review_state_probes: dict[tuple[str, int], PullRequestStateProbe] = field(
-        default_factory=dict
-    )
-    required_status_checks: dict[tuple[str, str], set[str]] = field(
-        default_factory=dict
-    )
-
-
-
 # _priority_rank re-exported from domain.scheduling_policy (M5)
 
 
@@ -1549,19 +1307,6 @@ def _list_project_items(
     )
 
 
-# ---------------------------------------------------------------------------
-# Closing issues query
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class LinkedIssue:
-    owner: str
-    repo: str
-    number: int
-    ref: str  # e.g., "crew#88"
-
-
 def query_closing_issues(
     pr_owner: str,
     pr_repo: str,
@@ -1580,61 +1325,6 @@ def query_closing_issues(
         config,
         gh_runner=gh_runner or _run_gh,
     )
-
-
-# ---------------------------------------------------------------------------
-# Codex / gate queries
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CodexReviewVerdict:
-    """Parsed codex review verdict marker from PR comments/reviews."""
-
-    decision: str  # pass|fail
-    route: str  # none|codex|executor|claude|human
-    source: str  # comment|review
-    timestamp: str
-    actor: str
-    checklist: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class PullRequestViewPayload:
-    """Expanded PR payload used to make one review decision without requerying."""
-
-    pr_repo: str
-    pr_number: int
-    author: str
-    body: str
-    state: str
-    is_draft: bool
-    merge_state_status: str
-    mergeable: str
-    base_ref_name: str
-    auto_merge_enabled: bool
-    comments: tuple[dict[str, Any], ...] = ()
-    reviews: tuple[dict[str, Any], ...] = ()
-    status_check_rollup: tuple[dict[str, Any], ...] = ()
-
-
-@dataclass(frozen=True)
-class PullRequestStateProbe:
-    """Lightweight PR state used to avoid rehydrating unchanged review items."""
-
-    pr_repo: str
-    pr_number: int
-    state: str
-    is_draft: bool
-    merge_state_status: str
-    mergeable: str
-    base_ref_name: str
-    auto_merge_enabled: bool
-    head_ref_oid: str
-    updated_at: str
-    latest_comment_at: str
-    latest_review_at: str
-    status_check_rollup: tuple[dict[str, Any], ...] = ()
 
 
 def _parse_codex_verdict_from_text(

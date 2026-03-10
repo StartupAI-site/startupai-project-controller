@@ -27,31 +27,26 @@ from startupai_controller.domain.verdict_policy import (
 from startupai_controller.domain.repair_policy import MARKER_PREFIX
 from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
     CriticalPathConfig,
     GhQueryError,
     parse_issue_ref,
 )
-from startupai_controller.board_io import (  # noqa: F401
+from startupai_controller.adapters.github_transport import (
+    _run_gh,
+    gh_reason_code,
+)
+from startupai_controller.adapters.github_types import (
     COPILOT_CODING_AGENT_LOGINS,
     CycleBoardSnapshot,
     CycleGitHubMemo,
+    CodexReviewVerdict,
     LinkedIssue,
     PullRequestViewPayload,
-    _ProjectItemSnapshot,
-    _is_automation_login,
-    _is_copilot_coding_agent_actor,
-    _is_pr_open,
-    _issue_ref_to_repo_parts,
-    _marker_for,
-    _parse_github_timestamp,
-    _parse_pr_url,
-    _query_failed_check_runs,
-    _query_pr_head_sha,
-    _run_gh,
-    _snapshot_to_issue_ref,
-    gh_reason_code,
-    memoized_query_issue_body,
+    PullRequestStateProbe as _PullRequestStateProbe,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
 )
+from startupai_controller.domain.repair_policy import parse_pr_url as _parse_pr_url
 
 
 @dataclass(frozen=True)
@@ -75,37 +70,6 @@ class _PullRequestListItem:
     author: str
 
 
-@dataclass(frozen=True)
-class CodexReviewVerdict:
-    """Adapter-local codex verdict extracted from PR comments/reviews."""
-
-    decision: str
-    route: str
-    source: str
-    timestamp: str
-    actor: str
-    checklist: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class _PullRequestStateProbe:
-    """Adapter-local lightweight PR state for digest scheduling."""
-
-    pr_repo: str
-    pr_number: int
-    state: str
-    is_draft: bool
-    merge_state_status: str
-    mergeable: str
-    base_ref_name: str
-    auto_merge_enabled: bool
-    head_ref_oid: str
-    updated_at: str
-    latest_comment_at: str
-    latest_review_at: str
-    status_check_rollup: tuple[dict[str, Any], ...] = ()
-
-
 _BOARD_SNAPSHOT_CACHE_TTL_SECONDS = 15
 _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS = 900
 _cycle_board_snapshot_cache: dict[
@@ -116,6 +80,41 @@ _required_status_checks_ttl_cache: dict[
     tuple[str, str],
     tuple[float, set[str]],
 ] = {}
+
+
+def _is_copilot_coding_agent_actor(login: str) -> bool:
+    """Return True when actor is a Copilot coding-agent identity."""
+    normalized = login.strip().lower()
+    return normalized in COPILOT_CODING_AGENT_LOGINS
+
+
+def _is_automation_login(login: str) -> bool:
+    """Return True when a login belongs to automation."""
+    normalized = login.strip().lower()
+    if not normalized:
+        return False
+    return (
+        normalized.endswith("[bot]")
+        or normalized.startswith("app/")
+        or normalized in COPILOT_CODING_AGENT_LOGINS
+        or normalized in {"codex-bot", "codex", "claude"}
+    )
+
+
+def _parse_github_timestamp(raw: str) -> datetime | None:
+    """Parse an ISO timestamp returned by GitHub payloads."""
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _marker_for(kind: str, ref: str) -> str:
+    """Generate the canonical HTML marker for one comment type/ref pair."""
+    return f"<!-- {MARKER_PREFIX}:{kind}:{ref} -->"
 
 
 def _query_project_item_field(
@@ -524,6 +523,45 @@ def _query_issue_updated_at(
         ) from error
 
 
+def query_issue_body(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Return the raw issue body."""
+    output = _run_gh(
+        [
+            "api",
+            f"repos/{owner}/{repo}/issues/{number}",
+            "--jq",
+            ".body",
+        ],
+        gh_runner=gh_runner,
+        operation_type="query",
+    )
+    return str(output or "")
+
+
+def memoized_query_issue_body(
+    memo: CycleGitHubMemo,
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Return an issue body using the cycle-local cache."""
+    key = (owner, repo, number)
+    cached = memo.issue_bodies.get(key)
+    if cached is not None:
+        return cached
+    body = query_issue_body(owner, repo, number, gh_runner=gh_runner)
+    memo.issue_bodies[key] = body
+    return body
+
+
 def _query_open_pr_updated_at(
     owner: str,
     repo: str,
@@ -553,6 +591,83 @@ def _query_open_pr_updated_at(
     if str(payload.get("state") or "").upper() != "OPEN":
         return None
     return _parse_github_timestamp(str(payload.get("updated_at") or ""))
+
+
+def _is_pr_open(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> bool:
+    """Return True when a PR exists and is open."""
+    try:
+        state = _run_gh(
+            [
+                "api",
+                f"repos/{owner}/{repo}/pulls/{pr_number}",
+                "-q",
+                ".state",
+            ],
+            gh_runner=gh_runner,
+        ).strip()
+    except GhQueryError:
+        return False
+    return state.upper() == "OPEN"
+
+
+def _query_failed_check_runs(
+    owner: str,
+    repo: str,
+    head_sha: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[str] | None:
+    """Query failed check-run names for one commit head SHA."""
+    try:
+        output = _run_gh(
+            ["api", f"repos/{owner}/{repo}/commits/{head_sha}/check-runs"],
+            gh_runner=gh_runner,
+        )
+    except GhQueryError:
+        return None
+
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+
+    failed: list[str] = []
+    for run in data.get("check_runs", []):
+        if isinstance(run, dict) and run.get("conclusion") == "failure":
+            name = run.get("name", "")
+            if name:
+                failed.append(name)
+    return failed
+
+
+def _query_pr_head_sha(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> str | None:
+    """Get the head SHA for one PR, or None on failure."""
+    try:
+        output = _run_gh(
+            ["api", f"repos/{owner}/{repo}/pulls/{pr_number}"],
+            gh_runner=gh_runner,
+        )
+    except GhQueryError:
+        return None
+
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+
+    return data.get("head", {}).get("sha")
 
 
 def _query_latest_wip_activity_timestamp(
@@ -767,6 +882,34 @@ def _repo_to_prefix(
 ) -> str | None:
     """Compatibility helper returning the configured prefix for one repo slug."""
     return _repo_prefix_for_slug(full_repo, config)
+
+
+def _issue_ref_to_repo_parts(
+    issue_ref: str,
+    config: CriticalPathConfig,
+) -> tuple[str, str, int]:
+    """Parse issue_ref and return owner, repo, and number."""
+    parsed = parse_issue_ref(issue_ref)
+    repo_slug = config.issue_prefixes.get(parsed.prefix)
+    if not repo_slug:
+        raise ConfigError(f"Missing repo mapping for prefix '{parsed.prefix}'.")
+    owner, repo = repo_slug.split("/", maxsplit=1)
+    return owner, repo, parsed.number
+
+
+def _snapshot_to_issue_ref(
+    snapshot: _ProjectItemSnapshot,
+    config: CriticalPathConfig,
+) -> str | None:
+    """Convert owner/repo#number snapshot refs to config-prefix issue refs."""
+    parts = snapshot.issue_ref.split("#", maxsplit=1)
+    if len(parts) != 2:
+        return None
+    full_repo, number = parts
+    prefix = _repo_to_prefix(full_repo, config)
+    if prefix is None:
+        return None
+    return f"{prefix}#{number}"
 
 
 def latest_codex_verdict_from_payload(

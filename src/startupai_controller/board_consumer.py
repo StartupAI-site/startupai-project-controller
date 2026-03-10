@@ -78,15 +78,14 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     _list_project_items_by_status,
     _marker_for,
     _post_comment,
-    _run_gh,
     _set_status_if_changed,
     _snapshot_to_issue_ref,
     clear_cycle_board_snapshot_cache,
     close_issue,
     enable_pull_request_automerge,
-    gh_reason_code,
     rerun_actions_run,
 )
+from startupai_controller.adapters.github_transport import _run_gh, gh_reason_code
 from startupai_controller.adapters.github_http_adapter import (  # canonical: transport stats
     begin_request_stats,
     end_request_stats,

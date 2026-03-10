@@ -53,7 +53,6 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     LinkedIssue,
     CodexReviewVerdict,
     PullRequestViewPayload,
-    _run_gh,
     _parse_github_timestamp,
     _is_automation_login,
     _is_copilot_coding_agent_actor,
@@ -99,6 +98,7 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     memoized_query_issue_body,
     rerun_actions_run,
 )
+from startupai_controller.adapters.github_transport import _run_gh
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,

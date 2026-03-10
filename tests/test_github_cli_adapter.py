@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from startupai_controller.adapters.github_cli import (
+    CycleGitHubMemo,
     GitHubCliAdapter,
+    _is_pr_open,
+    _query_failed_check_runs,
+    _query_pr_head_sha,
     _query_issue_board_info,
     _query_latest_non_automation_comment_timestamp,
     _query_latest_wip_activity_timestamp,
@@ -13,6 +17,7 @@ from startupai_controller.adapters.github_cli import (
     _query_project_item_field,
     _query_status_field_option,
     _set_board_status,
+    query_issue_body,
     _query_single_select_field_option,
     _set_issue_assignees,
     _set_single_select_field,
@@ -20,6 +25,7 @@ from startupai_controller.adapters.github_cli import (
     _set_text_field,
     build_cycle_board_snapshot,
     clear_cycle_board_snapshot_cache,
+    memoized_query_issue_body,
 )
 from startupai_controller.domain.models import IssueContext, IssueSnapshot
 
@@ -189,6 +195,73 @@ def test_get_issue_context_returns_typed_context(monkeypatch) -> None:
         labels=("bug", "urgent"),
         updated_at="2026-03-10T12:00:00+00:00",
     )
+
+
+def test_query_issue_body_uses_adapter_owned_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._run_gh",
+        lambda args, gh_runner=None, operation_type="query": "Issue body",
+    )
+
+    assert query_issue_body("StartupAI-site", "startupai-crew", 42) == "Issue body"
+
+
+def test_memoized_query_issue_body_uses_cycle_cache(monkeypatch) -> None:
+    memo = CycleGitHubMemo()
+    calls = {"count": 0}
+
+    def fake_run_gh(args, gh_runner=None, operation_type="query"):
+        calls["count"] += 1
+        return "Cached body"
+
+    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
+
+    first = memoized_query_issue_body(memo, "StartupAI-site", "startupai-crew", 42)
+    second = memoized_query_issue_body(memo, "StartupAI-site", "startupai-crew", 42)
+
+    assert first == "Cached body"
+    assert second == "Cached body"
+    assert calls["count"] == 1
+
+
+def test_query_pr_head_sha_returns_sha_from_adapter_owned_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._run_gh",
+        lambda args, gh_runner=None, operation_type="query": json.dumps(
+            {"head": {"sha": "abc123"}}
+        ),
+    )
+
+    assert _query_pr_head_sha("StartupAI-site", "startupai-crew", 42) == "abc123"
+
+
+def test_query_failed_check_runs_returns_failed_names(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._run_gh",
+        lambda args, gh_runner=None, operation_type="query": json.dumps(
+            {
+                "check_runs": [
+                    {"name": "ci", "conclusion": "failure"},
+                    {"name": "lint", "conclusion": "success"},
+                    {"name": "build", "conclusion": "failure"},
+                ]
+            }
+        ),
+    )
+
+    assert _query_failed_check_runs("StartupAI-site", "startupai-crew", "abc123") == [
+        "ci",
+        "build",
+    ]
+
+
+def test_is_pr_open_uses_adapter_owned_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._run_gh",
+        lambda args, gh_runner=None, operation_type="query": "open\n",
+    )
+
+    assert _is_pr_open("StartupAI-site", "startupai-crew", 42) is True
 
 
 def test_query_project_item_field_uses_adapter_owned_query(monkeypatch) -> None:

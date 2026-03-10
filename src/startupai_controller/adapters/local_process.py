@@ -339,7 +339,7 @@ class LocalProcessAdapter:
 
     def run_gh(self, args: list[str], *, check: bool = True) -> str:
         """Execute a gh CLI command and return stdout."""
-        from startupai_controller.board_io import _run_gh
+        from startupai_controller.adapters.github_transport import _run_gh
 
         runner = self._gh_runner or _run_gh
         if self._gh_runner is not None:
