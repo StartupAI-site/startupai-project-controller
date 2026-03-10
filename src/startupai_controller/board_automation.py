@@ -2539,6 +2539,200 @@ def schedule_ready_items(
     return decision
 
 
+def _load_claim_ready_state(
+    *,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    automation_config: BoardAutomationConfig | None,
+    this_repo_prefix: str | None,
+    all_prefixes: bool,
+    review_state_port: _ReviewStatePort | None,
+    board_port: _BoardMutationPort | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[
+    bool,
+    dict[str, object],
+    dict[str, int],
+    dict[tuple[str, str], int],
+]:
+    """Load Ready items and current WIP state for one claim attempt."""
+    use_ports = (
+        board_info_resolver is None
+        and board_mutator is None
+    ) or review_state_port is not None or board_port is not None
+    if use_ports:
+        state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        wip_items = state_port.list_issues_by_status("In Progress")
+        ready_items = state_port.list_issues_by_status("Ready")
+        wip_counts: dict[str, int] = {}
+        lane_wip_counts: dict[tuple[str, str], int] = {}
+        for item in wip_items:
+            item_executor = item.executor.strip().lower()
+            if item_executor not in VALID_EXECUTORS:
+                continue
+            lane = parse_issue_ref(item.issue_ref).prefix
+            wip_counts[item_executor] = wip_counts.get(item_executor, 0) + 1
+            lane_wip_counts[(item_executor, lane)] = (
+                lane_wip_counts.get((item_executor, lane), 0) + 1
+            )
+    else:
+        ready_items = _list_project_items_by_status(
+            "Ready", project_owner, project_number, gh_runner=gh_runner
+        )
+        wip_counts = _count_wip_by_executor(
+            project_owner, project_number, gh_runner=gh_runner
+        )
+        lane_wip_counts = {}
+        if automation_config is not None:
+            lane_wip_counts = _count_wip_by_executor_lane(
+                config,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            )
+
+    ready_by_ref: dict[str, object] = {}
+    for snapshot in ready_items:
+        ref = snapshot.issue_ref if use_ports else _snapshot_to_issue_ref(snapshot, config)
+        if ref is None:
+            continue
+        if not all_prefixes and this_repo_prefix:
+            parsed = parse_issue_ref(ref)
+            if parsed.prefix != this_repo_prefix:
+                continue
+        ready_by_ref[ref] = snapshot
+    return use_ports, ready_by_ref, wip_counts, lane_wip_counts
+
+
+def _claim_ready_candidates(
+    ready_by_ref: dict[str, object],
+    *,
+    norm_executor: str,
+    issue_ref: str | None,
+    next_issue: bool,
+) -> tuple[list[str], ClaimReadyResult | None]:
+    """Resolve the candidate issue refs for one claim request."""
+    if issue_ref:
+        return [issue_ref], None
+    if not next_issue:
+        return [], ClaimReadyResult(reason="missing-target")
+    candidates = sorted(
+        [
+            ref
+            for ref, snapshot in ready_by_ref.items()
+            if snapshot.executor.strip().lower() == norm_executor
+        ],
+        key=_issue_sort_key,
+    )
+    if not candidates:
+        return [], ClaimReadyResult(reason="no-ready-for-executor")
+    return candidates, None
+
+
+def _attempt_claim_ready_candidate(
+    ref: str,
+    snapshot: object,
+    *,
+    issue_ref: str | None,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    status_resolver: Callable[..., str] | None,
+    per_executor_wip_limit: int,
+    automation_config: BoardAutomationConfig | None,
+    dry_run: bool,
+    review_state_port: _ReviewStatePort | None,
+    board_port: _BoardMutationPort | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    norm_executor: str,
+    lane_wip_counts: dict[tuple[str, str], int],
+    wip_counts: dict[str, int],
+) -> ClaimReadyResult | None:
+    """Attempt to claim one Ready candidate for the executor."""
+    item_executor = snapshot.executor.strip().lower()
+    if item_executor != norm_executor:
+        if issue_ref:
+            return ClaimReadyResult(
+                reason=f"executor-mismatch:{item_executor or 'unset'}"
+            )
+        return None
+
+    if in_any_critical_path(config, ref):
+        val_code, _val_output = evaluate_ready_promotion(
+            issue_ref=ref,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            status_resolver=status_resolver,
+            require_in_graph=True,
+        )
+        if val_code != 0:
+            if issue_ref:
+                return ClaimReadyResult(reason="dependency-unmet")
+            return None
+
+    lane = parse_issue_ref(ref).prefix
+    if automation_config is not None:
+        current_wip = lane_wip_counts.get((norm_executor, lane), 0)
+        lane_limit = _wip_limit_for_lane(
+            automation_config,
+            norm_executor,
+            lane,
+            fallback=per_executor_wip_limit,
+        )
+    else:
+        current_wip = wip_counts.get(norm_executor, 0)
+        lane_limit = per_executor_wip_limit
+
+    if current_wip >= lane_limit:
+        return ClaimReadyResult(reason="wip-limit")
+
+    changed, old_status = _transition_issue_status(
+        ref,
+        {"Ready"},
+        "In Progress",
+        config,
+        project_owner,
+        project_number,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    if not changed:
+        return ClaimReadyResult(reason=f"status-not-ready:{old_status}")
+
+    if not dry_run:
+        try:
+            _post_claim_comment(
+                ref,
+                norm_executor,
+                config,
+                board_port=board_port,
+                comment_checker=comment_checker,
+                comment_poster=comment_poster,
+                gh_runner=gh_runner,
+            )
+        except GhQueryError:
+            pass
+
+    return ClaimReadyResult(claimed=ref)
+
+
 def claim_ready_issue(
     config: CriticalPathConfig,
     project_owner: str,
@@ -2566,10 +2760,19 @@ def claim_ready_issue(
     if norm_executor not in VALID_EXECUTORS:
         return ClaimReadyResult(reason=f"invalid-executor:{executor}")
 
-    use_ports = (
-        board_info_resolver is None
-        and board_mutator is None
-    ) or review_state_port is not None or board_port is not None
+    use_ports, ready_by_ref, wip_counts, lane_wip_counts = _load_claim_ready_state(
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        automation_config=automation_config,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
     if use_ports:
         review_state_port = review_state_port or _default_review_state_port(
             project_owner,
@@ -2577,66 +2780,15 @@ def claim_ready_issue(
             config,
             gh_runner=gh_runner,
         )
-        wip_items = review_state_port.list_issues_by_status("In Progress")
-        wip_counts: dict[str, int] = {}
-        lane_wip_counts: dict[tuple[str, str], int] = {}
-        for item in wip_items:
-            item_executor = item.executor.strip().lower()
-            if item_executor not in VALID_EXECUTORS:
-                continue
-            lane = parse_issue_ref(item.issue_ref).prefix
-            wip_counts[item_executor] = wip_counts.get(item_executor, 0) + 1
-            lane_wip_counts[(item_executor, lane)] = (
-                lane_wip_counts.get((item_executor, lane), 0) + 1
-            )
-        ready_items = review_state_port.list_issues_by_status("Ready")
-    else:
-        ready_items = _list_project_items_by_status(
-            "Ready", project_owner, project_number, gh_runner=gh_runner
-        )
-        wip_counts = _count_wip_by_executor(
-            project_owner, project_number, gh_runner=gh_runner
-        )
-        lane_wip_counts: dict[tuple[str, str], int] = {}
-        if automation_config is not None:
-            lane_wip_counts = _count_wip_by_executor_lane(
-                config,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
 
-    ready_by_ref: dict[str, object] = {}
-    for snapshot in ready_items:
-        if use_ports:
-            ref = snapshot.issue_ref
-        else:
-            ref = _snapshot_to_issue_ref(snapshot, config)
-            if ref is None:
-                continue
-        if not all_prefixes and this_repo_prefix:
-            parsed = parse_issue_ref(ref)
-            if parsed.prefix != this_repo_prefix:
-                continue
-        ready_by_ref[ref] = snapshot
-
-    candidates: list[str] = []
-    if issue_ref:
-        candidates = [issue_ref]
-    elif next_issue:
-        candidates = sorted(
-            [
-                ref
-                for ref, snapshot in ready_by_ref.items()
-                if snapshot.executor.strip().lower() == norm_executor
-            ],
-            key=_issue_sort_key,
-        )
-    else:
-        return ClaimReadyResult(reason="missing-target")
-
-    if not candidates:
-        return ClaimReadyResult(reason="no-ready-for-executor")
+    candidates, early_result = _claim_ready_candidates(
+        ready_by_ref,
+        norm_executor=norm_executor,
+        issue_ref=issue_ref,
+        next_issue=next_issue,
+    )
+    if early_result is not None:
+        return early_result
 
     for ref in candidates:
         snapshot = ready_by_ref.get(ref)
@@ -2645,77 +2797,31 @@ def claim_ready_issue(
                 return ClaimReadyResult(reason="issue-not-ready")
             continue
 
-        item_executor = snapshot.executor.strip().lower()
-        if item_executor != norm_executor:
-            if issue_ref:
-                return ClaimReadyResult(
-                    reason=f"executor-mismatch:{item_executor or 'unset'}"
-                )
-            continue
-
-        if in_any_critical_path(config, ref):
-            val_code, _val_output = evaluate_ready_promotion(
-                issue_ref=ref,
-                config=config,
-                project_owner=project_owner,
-                project_number=project_number,
-                status_resolver=status_resolver,
-                require_in_graph=True,
-            )
-            if val_code != 0:
-                if issue_ref:
-                    return ClaimReadyResult(reason="dependency-unmet")
-                continue
-
-        lane = parse_issue_ref(ref).prefix
-        if automation_config is not None:
-            current_wip = lane_wip_counts.get((norm_executor, lane), 0)
-            lane_limit = _wip_limit_for_lane(
-                automation_config,
-                norm_executor,
-                lane,
-                fallback=per_executor_wip_limit,
-            )
-        else:
-            current_wip = wip_counts.get(norm_executor, 0)
-            lane_limit = per_executor_wip_limit
-
-        if current_wip >= lane_limit:
-            return ClaimReadyResult(reason="wip-limit")
-
-        changed, old_status = _transition_issue_status(
+        result = _attempt_claim_ready_candidate(
             ref,
-            {"Ready"},
-            "In Progress",
-            config,
-            project_owner,
-            project_number,
+            snapshot,
+            issue_ref=issue_ref,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            status_resolver=status_resolver,
+            per_executor_wip_limit=per_executor_wip_limit,
+            automation_config=automation_config,
             dry_run=dry_run,
             review_state_port=review_state_port,
             board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
             gh_runner=gh_runner,
+            norm_executor=norm_executor,
+            lane_wip_counts=lane_wip_counts,
+            wip_counts=wip_counts,
         )
-        if not changed:
-            return ClaimReadyResult(reason=f"status-not-ready:{old_status}")
-
-        if not dry_run:
-            try:
-                _post_claim_comment(
-                    ref,
-                    norm_executor,
-                    config,
-                    board_port=board_port,
-                    comment_checker=comment_checker,
-                    comment_poster=comment_poster,
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError:
-                # Comment delivery failure should not roll back claim mutation.
-                pass
-
-        return ClaimReadyResult(claimed=ref)
+        if result is None:
+            continue
+        return result
 
     return ClaimReadyResult(reason="no-eligible-ready")
 
