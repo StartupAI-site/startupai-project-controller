@@ -370,6 +370,22 @@ class ReviewQueueProcessingOutcome:
     updated_snapshot: CycleBoardSnapshot
 
 
+@dataclass(frozen=True)
+class CycleRuntimeContext:
+    """Cycle-scoped runtime wiring and configuration."""
+
+    session_store: SessionStorePort
+    cp_config: CriticalPathConfig
+    auto_config: BoardAutomationConfig | None
+    main_workflows: dict[str, WorkflowDefinition]
+    workflow_statuses: dict[str, Any]
+    dispatchable_repo_prefixes: tuple[str, ...]
+    effective_interval: int
+    global_limit: int
+    github_memo: CycleGitHubMemo
+    pr_port: PullRequestPort
+
+
 # RepairBranchReconcileOutcome: re-exported from domain.models
 # ResolutionEvaluation: re-exported from domain.models
 
@@ -3693,26 +3709,14 @@ def _recover_interrupted_sessions(
     return recovered
 
 
-def _prepare_cycle(
+def _initialize_cycle_runtime(
     config: ConsumerConfig,
     db: ConsumerDB,
     *,
-    dry_run: bool = False,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
-) -> PreparedCycleContext:
-    """Run control-plane preflight once for a daemon tick."""
-    # Composition root: construct port instances for this cycle
+) -> CycleRuntimeContext:
+    """Build cycle-scoped runtime wiring and effective config."""
     session_store = SqliteSessionStore(db)
-
-    request_stats_token = begin_request_stats()
-    timings_ms: dict[str, int] = {}
-    expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
-    if expired:
-        logger.info("Expired stale leases: %s", expired)
 
     cp_config = load_config(config.critical_paths_path)
     try:
@@ -3739,16 +3743,50 @@ def _prepare_cycle(
         github_memo=github_memo,
         gh_runner=gh_runner,
     )
+    global_limit = (
+        auto_config.global_concurrency
+        if auto_config is not None
+        else config.global_concurrency
+    )
+
+    return CycleRuntimeContext(
+        session_store=session_store,
+        cp_config=cp_config,
+        auto_config=auto_config,
+        main_workflows=main_workflows,
+        workflow_statuses=workflow_statuses,
+        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
+        effective_interval=effective_interval,
+        global_limit=global_limit,
+        github_memo=github_memo,
+        pr_port=pr_port,
+    )
+
+
+def _execute_prepare_cycle_phases(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    dry_run: bool = False,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[CycleBoardSnapshot, ReviewQueueDrainSummary, dict[str, Any], dict[str, int]]:
+    """Execute the preflight phases for one cycle."""
+    timings_ms: dict[str, int] = {}
 
     if config.deferred_replay_enabled and not dry_run:
         phase_started = time.monotonic()
         replayed_actions = _replay_deferred_actions(
             db,
             config,
-            cp_config,
-            pr_port=pr_port,
-            review_state_port=pr_port,
-            board_port=pr_port,
+            runtime.cp_config,
+            pr_port=runtime.pr_port,
+            review_state_port=runtime.pr_port,
+            board_port=runtime.pr_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_checker=comment_checker,
@@ -3769,8 +3807,8 @@ def _prepare_cycle(
 
     phase_started = time.monotonic()
     routing_decision = route_protected_queue_executors(
-        cp_config,
-        auto_config,
+        runtime.cp_config,
+        runtime.auto_config,
         config.project_owner,
         config.project_number,
         dry_run=dry_run,
@@ -3789,13 +3827,13 @@ def _prepare_cycle(
     phase_started = time.monotonic()
     reconciliation = _reconcile_board_truth(
         config,
-        cp_config,
-        auto_config,
+        runtime.cp_config,
+        runtime.auto_config,
         db,
-        session_store=session_store,
-        pr_port=pr_port,
-        review_state_port=pr_port,
-        board_port=pr_port,
+        session_store=runtime.session_store,
+        pr_port=runtime.pr_port,
+        review_state_port=runtime.pr_port,
+        board_port=runtime.pr_port,
         board_snapshot=board_snapshot,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
@@ -3809,20 +3847,20 @@ def _prepare_cycle(
         or reconciliation.moved_in_progress
         or reconciliation.moved_review
         or reconciliation.moved_blocked
-        ):
+    ):
         logger.info("Board reconciliation: %s", reconciliation)
 
     phase_started = time.monotonic()
     review_queue_summary, board_snapshot = _drain_review_queue(
         config,
         db,
-        cp_config,
-        auto_config,
-        pr_port=pr_port,
-        session_store=session_store,
+        runtime.cp_config,
+        runtime.auto_config,
+        pr_port=runtime.pr_port,
+        session_store=runtime.session_store,
         board_snapshot=board_snapshot,
         dry_run=dry_run,
-        github_memo=github_memo,
+        github_memo=runtime.github_memo,
         gh_runner=gh_runner,
     )
     timings_ms["review_queue"] = int((time.monotonic() - phase_started) * 1000)
@@ -3847,21 +3885,23 @@ def _prepare_cycle(
 
     phase_started = time.monotonic()
     admission_decision = admit_backlog_items(
-        cp_config,
-        auto_config,
+        runtime.cp_config,
+        runtime.auto_config,
         config.project_owner,
         config.project_number,
-        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
+        dispatchable_repo_prefixes=runtime.dispatchable_repo_prefixes,
         active_lease_issue_refs=tuple(db.active_lease_issue_refs()),
         dry_run=dry_run,
         board_snapshot=board_snapshot,
-        github_memo=github_memo,
+        github_memo=runtime.github_memo,
         gh_runner=gh_runner,
     )
     timings_ms["admission"] = int((time.monotonic() - phase_started) * 1000)
     admission_summary = admission_summary_payload(
         admission_decision,
-        enabled=bool(auto_config is not None and auto_config.admission.enabled),
+        enabled=bool(
+            runtime.auto_config is not None and runtime.auto_config.admission.enabled
+        ),
     )
     if admission_decision.admitted:
         if not dry_run:
@@ -3872,9 +3912,48 @@ def _prepare_cycle(
     if not dry_run:
         _persist_admission_summary(db, admission_summary)
 
-    global_limit = (
-        auto_config.global_concurrency if auto_config is not None else config.global_concurrency
+    return board_snapshot, review_queue_summary, admission_summary, timings_ms
+
+
+def _prepare_cycle(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    *,
+    dry_run: bool = False,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> PreparedCycleContext:
+    """Run control-plane preflight once for a daemon tick."""
+    request_stats_token = begin_request_stats()
+    expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
+    if expired:
+        logger.info("Expired stale leases: %s", expired)
+
+    runtime = _initialize_cycle_runtime(
+        config,
+        db,
+        gh_runner=gh_runner,
     )
+    (
+        board_snapshot,
+        review_queue_summary,
+        admission_summary,
+        timings_ms,
+    ) = _execute_prepare_cycle_phases(
+        config,
+        db,
+        runtime,
+        dry_run=dry_run,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+
     request_stats = end_request_stats(request_stats_token)
     github_request_counts = {
         "graphql": request_stats.graphql,
@@ -3892,10 +3971,13 @@ def _prepare_cycle(
         for snapshot in board_snapshot.items_with_status("Ready"):
             if snapshot.executor.strip().lower() != config.executor:
                 continue
-            issue_ref = _snapshot_to_issue_ref(snapshot, cp_config)
+            issue_ref = _snapshot_to_issue_ref(snapshot, runtime.cp_config)
             if issue_ref is None:
                 continue
-            if parse_issue_ref(issue_ref).prefix not in dispatchable_repo_prefixes:
+            if (
+                parse_issue_ref(issue_ref).prefix
+                not in runtime.dispatchable_repo_prefixes
+            ):
                 continue
             ready_for_executor += 1
         _record_metric(
@@ -3905,21 +3987,21 @@ def _prepare_cycle(
             payload={
                 "ready_for_executor": ready_for_executor,
                 "active_leases": db.active_lease_count(),
-                "global_limit": global_limit,
+                "global_limit": runtime.global_limit,
                 "degraded": db.get_control_value(CONTROL_KEY_DEGRADED) == "true",
             },
         )
 
     return PreparedCycleContext(
-        cp_config=cp_config,
-        auto_config=auto_config,
-        main_workflows=main_workflows,
-        workflow_statuses=workflow_statuses,
-        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
-        effective_interval=effective_interval,
-        global_limit=global_limit,
+        cp_config=runtime.cp_config,
+        auto_config=runtime.auto_config,
+        main_workflows=runtime.main_workflows,
+        workflow_statuses=runtime.workflow_statuses,
+        dispatchable_repo_prefixes=runtime.dispatchable_repo_prefixes,
+        effective_interval=runtime.effective_interval,
+        global_limit=runtime.global_limit,
         board_snapshot=board_snapshot,
-        github_memo=github_memo,
+        github_memo=runtime.github_memo,
         admission_summary=admission_summary,
         review_queue_summary=review_queue_summary,
         timings_ms=timings_ms,
