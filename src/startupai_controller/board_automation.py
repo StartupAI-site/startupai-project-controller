@@ -36,9 +36,13 @@ import sys
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
+    from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
     from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
+    from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
 else:
+    _BoardMutationPort = None  # runtime: structural typing, no import needed
     _PullRequestPort = None  # runtime: structural typing, no import needed
+    _ReviewStatePort = None  # runtime: structural typing, no import needed
 
 
 from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
@@ -167,6 +171,7 @@ from startupai_controller.domain.models import (
 def _default_pr_port(
     project_owner: str,
     project_number: int,
+    config: CriticalPathConfig | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> _PullRequestPort:
     """Construct a default PullRequestPort adapter from context params."""
@@ -175,7 +180,42 @@ def _default_pr_port(
     return GitHubCliAdapter(
         project_owner=project_owner,
         project_number=project_number,
+        config=config,
         gh_runner=gh_runner,
+    )
+
+
+def _default_review_state_port(
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    gh_runner: Callable[..., str] | None = None,
+) -> _ReviewStatePort:
+    """Construct a default ReviewStatePort adapter from context params."""
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter
+
+    return GitHubCliAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        gh_runner=gh_runner,
+    )
+
+
+def _default_board_mutation_port(
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    gh_runner: Callable[..., str] | None = None,
+) -> _BoardMutationPort:
+    """Construct a default BoardMutationPort adapter from context params."""
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter
+
+    return GitHubCliAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        gh_runner=gh_runner,
+        config=config,
     )
 
 
@@ -3389,44 +3429,48 @@ def _rerun_check_observation(
     return True
 
 
+def _set_issue_status_if_matches(
+    issue_ref: str,
+    from_statuses: set[str],
+    to_status: str,
+    *,
+    review_state_port: _ReviewStatePort,
+    board_port: _BoardMutationPort,
+    dry_run: bool = False,
+) -> tuple[bool, str | None]:
+    """Set one issue status through ports when the current status matches."""
+    current_status = review_state_port.get_issue_status(issue_ref)
+    if current_status not in from_statuses:
+        return False, current_status
+    if dry_run:
+        return True, current_status
+    if current_status != to_status:
+        board_port.set_issue_status(issue_ref, to_status)
+    return True, current_status
+
+
 def _requeue_local_review_failures(
     pr_repo: str,
     pr_number: int,
     review_refs: tuple[str, ...],
-    config: CriticalPathConfig,
     automation_config: BoardAutomationConfig,
-    project_owner: str,
-    project_number: int,
     *,
     dry_run: bool = False,
     pr_author: str | None = None,
     pr_body: str | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    pr_port: _PullRequestPort,
+    review_state_port: _ReviewStatePort,
+    board_port: _BoardMutationPort,
 ) -> tuple[str, ...]:
     """Return linked review refs to Ready when a local PR needs another coding pass."""
     actor = (pr_author or "").strip().lower()
     body = pr_body or ""
     if not actor and not body:
-        pr_output = _run_gh(
-            [
-                "pr",
-                "view",
-                str(pr_number),
-                "--repo",
-                pr_repo,
-                "--json",
-                "author,body",
-            ],
-            gh_runner=gh_runner,
-        )
-        try:
-            pr_data = json.loads(pr_output)
-        except json.JSONDecodeError as error:
-            raise GhQueryError(
-                f"Failed parsing PR payload for {pr_repo}#{pr_number}."
-            ) from error
-        actor = ((pr_data.get("author") or {}).get("login") or "").strip().lower()
-        body = str(pr_data.get("body") or "")
+        pr_view = pr_port.get_pull_request(pr_repo, pr_number)
+        if pr_view is None:
+            return ()
+        actor = (pr_view.author or "").strip().lower()
+        body = pr_view.body or ""
     if actor not in automation_config.trusted_local_authors:
         return ()
 
@@ -3441,16 +3485,13 @@ def _requeue_local_review_failures(
     if issue_ref not in review_refs:
         return ()
 
-    noop_mutator = lambda *a: None  # noqa: E731
-    changed, _old_status = _set_status_if_changed(
+    changed, _old_status = _set_issue_status_if_matches(
         issue_ref,
         {"Review"},
         "Ready",
-        config,
-        project_owner,
-        project_number,
-        board_mutator=noop_mutator if dry_run else None,
-        gh_runner=gh_runner,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        dry_run=dry_run,
     )
     return (issue_ref,) if changed or dry_run else ()
 
@@ -3467,10 +3508,26 @@ def review_rescue(
     snapshot: ReviewSnapshot | None = None,
     gh_runner: Callable[..., str] | None = None,
     pr_port: _PullRequestPort | None = None,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
 ) -> ReviewRescueResult:
     """Reconcile one PR in Review back toward self-healing merge flow."""
     if pr_port is None:
-        pr_port = _default_pr_port(project_owner, project_number, gh_runner)
+        pr_port = _default_pr_port(project_owner, project_number, config, gh_runner)
+    if review_state_port is None:
+        review_state_port = _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner,
+        )
+    if board_port is None:
+        board_port = _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner,
+        )
 
     if snapshot is None:
         snapshot = _build_review_snapshot(
@@ -3539,14 +3596,13 @@ def review_rescue(
             pr_repo=pr_repo,
             pr_number=pr_number,
             review_refs=snapshot.review_refs,
-            config=config,
             automation_config=automation_config,
-            project_owner=project_owner,
-            project_number=project_number,
             dry_run=dry_run,
             pr_author=snapshot.pr_author,
             pr_body=snapshot.pr_body,
-            gh_runner=gh_runner,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
         )
         if requeued_refs:
             return ReviewRescueResult(
@@ -3572,6 +3628,7 @@ def review_rescue(
             snapshot=snapshot,
             gh_runner=gh_runner,
             pr_port=pr_port,
+            review_state_port=review_state_port,
         )
         return ReviewRescueResult(
             pr_repo=pr_repo,
@@ -3610,10 +3667,26 @@ def review_rescue_all(
     dry_run: bool = False,
     gh_runner: Callable[..., str] | None = None,
     pr_port: _PullRequestPort | None = None,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
 ) -> ReviewRescueSweep:
     """Run review rescue across all governed repos."""
     if pr_port is None:
-        pr_port = _default_pr_port(project_owner, project_number, gh_runner)
+        pr_port = _default_pr_port(project_owner, project_number, config, gh_runner)
+    if review_state_port is None:
+        review_state_port = _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner,
+        )
+    if board_port is None:
+        board_port = _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner,
+        )
     repos = _execution_authority_repo_slugs(config, automation_config)
     rerun: list[str] = []
     auto_merge_enabled: list[str] = []
@@ -3623,7 +3696,7 @@ def review_rescue_all(
     scanned_prs = 0
 
     for pr_repo in repos:
-        for pr in query_open_pull_requests(pr_repo, gh_runner=gh_runner):
+        for pr in pr_port.list_open_prs(pr_repo):
             scanned_prs += 1
             result = review_rescue(
                 pr_repo=pr_repo,
@@ -3635,6 +3708,8 @@ def review_rescue_all(
                 dry_run=dry_run,
                 gh_runner=gh_runner,
                 pr_port=pr_port,
+                review_state_port=review_state_port,
+                board_port=board_port,
             )
             ref = f"{pr_repo}#{pr.number}"
             if result.rerun_checks:
@@ -3678,10 +3753,18 @@ def automerge_review(
     snapshot: ReviewSnapshot | None = None,
     gh_runner: Callable[..., str] | None = None,
     pr_port: _PullRequestPort | None = None,
+    review_state_port: _ReviewStatePort | None = None,
 ) -> tuple[int, str]:
     """Auto-merge PR when codex gate + required checks pass."""
     if pr_port is None:
-        pr_port = _default_pr_port(project_owner, project_number, gh_runner)
+        pr_port = _default_pr_port(project_owner, project_number, config, gh_runner)
+    if review_state_port is None:
+        review_state_port = _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner,
+        )
 
     if snapshot is not None:
         review_refs = list(snapshot.review_refs)
@@ -3690,28 +3773,18 @@ def automerge_review(
         gate_msg = snapshot.codex_gate_message
         status = snapshot.gate_status
     else:
-        linked = query_closing_issues(
-            *pr_repo.split("/", maxsplit=1),
-            pr_number,
-            config,
-            gh_runner=gh_runner,
-        )
         review_refs = []
-        for issue in linked:
-            info = _query_issue_board_info(
-                issue.ref, config, project_owner, project_number
-            )
-            if info.status == "Review":
-                review_refs.append(issue.ref)
+        for issue_ref in pr_port.linked_issue_refs(pr_repo, pr_number):
+            if review_state_port.get_issue_status(issue_ref) == "Review":
+                review_refs.append(issue_ref)
         if not review_refs:
             return 2, (
                 f"{pr_repo}#{pr_number}: not in board Review scope; "
                 "automerge controller no-op"
             )
-        copilot_review_present = _has_copilot_review_signal(
+        copilot_review_present = pr_port.has_copilot_review_signal(
             pr_repo,
             pr_number,
-            gh_runner=gh_runner,
         )
         gate_code, gate_msg = codex_review_gate(
             pr_repo=pr_repo,

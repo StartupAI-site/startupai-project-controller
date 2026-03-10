@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 
 import pytest
@@ -126,6 +127,46 @@ def _automation_config() -> automation.BoardAutomationConfig:
                 "codex-review-gate",
             )
         },
+    )
+
+
+def _fake_pr_port(**overrides):
+    defaults = {
+        "list_open_prs": lambda repo: [],
+        "get_pull_request": lambda repo, number: None,
+        "linked_issue_refs": lambda pr_repo, pr_number: (),
+        "has_copilot_review_signal": lambda pr_repo, pr_number: False,
+        "get_gate_status": lambda pr_repo, pr_number: PrGateStatus(
+            required=set(),
+            passed=set(),
+            failed=set(),
+            pending=set(),
+            cancelled=set(),
+            merge_state_status="CLEAN",
+            mergeable="MERGEABLE",
+            is_draft=False,
+            state="OPEN",
+            auto_merge_enabled=False,
+        ),
+        "enable_automerge": lambda pr_repo, pr_number, delete_branch=False: "confirmed",
+        "rerun_failed_check": lambda pr_repo, check_name, run_id: True,
+        "update_branch": lambda pr_repo, pr_number: None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _fake_review_state_port(*, status_by_issue: dict[str, str] | None = None):
+    statuses = status_by_issue or {}
+    return SimpleNamespace(
+        get_issue_status=lambda issue_ref: statuses.get(issue_ref),
+    )
+
+
+def _fake_board_port(calls: list[tuple[str, str]] | None = None):
+    bucket = calls if calls is not None else []
+    return SimpleNamespace(
+        set_issue_status=lambda issue_ref, status: bucket.append((issue_ref, status))
     )
 
 
@@ -2571,28 +2612,13 @@ def test_automerge_review_blocks_on_pending_required_checks(
     policy = _automation_config()
     monkeypatch.setattr(
         automation,
-        "query_closing_issues",
-        lambda *a, **k: [LinkedIssue("StartupAI-site", "app.startupai-site", 110, "app#110")],
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("Review"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_has_copilot_review_signal",
-        lambda *a, **k: True,
-    )
-    monkeypatch.setattr(
-        automation,
         "codex_review_gate",
         lambda *a, **k: (0, "pass"),
     )
-    monkeypatch.setattr(
-        board_io_mod,
-        "_query_pr_gate_status",
-        lambda *a, **k: PrGateStatus(
+    pr_port = _fake_pr_port(
+        linked_issue_refs=lambda pr_repo, pr_number: ("app#110",),
+        has_copilot_review_signal=lambda pr_repo, pr_number: True,
+        get_gate_status=lambda pr_repo, pr_number: PrGateStatus(
             required={"ci", "db-test-gate"},
             passed={"ci"},
             failed=set(),
@@ -2605,6 +2631,7 @@ def test_automerge_review_blocks_on_pending_required_checks(
             auto_merge_enabled=False,
         ),
     )
+    review_state_port = _fake_review_state_port(status_by_issue={"app#110": "Review"})
     code, msg = automerge_review(
         "StartupAI-site/app.startupai-site",
         158,
@@ -2612,6 +2639,8 @@ def test_automerge_review_blocks_on_pending_required_checks(
         policy,
         "StartupAI-site",
         1,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
     )
     assert code == 2
     assert "pending" in msg
@@ -2625,28 +2654,13 @@ def test_automerge_review_dry_run_success(
     policy = _automation_config()
     monkeypatch.setattr(
         automation,
-        "query_closing_issues",
-        lambda *a, **k: [LinkedIssue("StartupAI-site", "app.startupai-site", 110, "app#110")],
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("Review"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_has_copilot_review_signal",
-        lambda *a, **k: True,
-    )
-    monkeypatch.setattr(
-        automation,
         "codex_review_gate",
         lambda *a, **k: (0, "pass"),
     )
-    monkeypatch.setattr(
-        board_io_mod,
-        "_query_pr_gate_status",
-        lambda *a, **k: PrGateStatus(
+    pr_port = _fake_pr_port(
+        linked_issue_refs=lambda pr_repo, pr_number: ("app#110",),
+        has_copilot_review_signal=lambda pr_repo, pr_number: True,
+        get_gate_status=lambda pr_repo, pr_number: PrGateStatus(
             required={"ci"},
             passed={"ci"},
             failed=set(),
@@ -2659,6 +2673,7 @@ def test_automerge_review_dry_run_success(
             auto_merge_enabled=False,
         ),
     )
+    review_state_port = _fake_review_state_port(status_by_issue={"app#110": "Review"})
     code, msg = automerge_review(
         "StartupAI-site/app.startupai-site",
         158,
@@ -2667,6 +2682,8 @@ def test_automerge_review_dry_run_success(
         "StartupAI-site",
         1,
         dry_run=True,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
     )
     assert code == 0
     assert "would enable auto-merge" in msg
@@ -2680,28 +2697,13 @@ def test_automerge_review_updates_branch_then_merges(
     policy = _automation_config()
     monkeypatch.setattr(
         automation,
-        "query_closing_issues",
-        lambda *a, **k: [LinkedIssue("StartupAI-site", "app.startupai-site", 110, "app#110")],
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("Review"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_has_copilot_review_signal",
-        lambda *a, **k: True,
-    )
-    monkeypatch.setattr(
-        automation,
         "codex_review_gate",
         lambda *a, **k: (0, "pass"),
     )
-    monkeypatch.setattr(
-        board_io_mod,
-        "_query_pr_gate_status",
-        lambda *a, **k: PrGateStatus(
+    pr_port = _fake_pr_port(
+        linked_issue_refs=lambda pr_repo, pr_number: ("app#110",),
+        has_copilot_review_signal=lambda pr_repo, pr_number: True,
+        get_gate_status=lambda pr_repo, pr_number: PrGateStatus(
             required={"ci"},
             passed={"ci"},
             failed=set(),
@@ -2713,23 +2715,13 @@ def test_automerge_review_updates_branch_then_merges(
             state="open",
             auto_merge_enabled=False,
         ),
+        update_branch=lambda pr_repo, pr_number: calls.append(("update", pr_number)),
+        enable_automerge=lambda pr_repo, pr_number, delete_branch=False: (
+            calls.append(("merge", pr_number)) or "confirmed"
+        ),
     )
 
     calls: list[tuple[str, int]] = []
-    monkeypatch.setattr(
-        board_io_mod,
-        "update_pull_request_branch",
-        lambda pr_repo, pr_number, **kwargs: calls.append(("update", pr_number)),
-    )
-    def _mock_enable(pr_repo, pr_number, **kwargs):
-        calls.append(("merge", pr_number))
-        return "confirmed"
-
-    monkeypatch.setattr(
-        board_io_mod,
-        "enable_pull_request_automerge",
-        _mock_enable,
-    )
 
     code, _msg = automerge_review(
         "StartupAI-site/app.startupai-site",
@@ -2739,6 +2731,8 @@ def test_automerge_review_updates_branch_then_merges(
         "StartupAI-site",
         1,
         dry_run=False,
+        pr_port=pr_port,
+        review_state_port=_fake_review_state_port(status_by_issue={"app#110": "Review"}),
     )
     assert code == 0
     assert ("update", 158) in calls
@@ -2751,16 +2745,6 @@ def test_automerge_review_noop_when_not_in_review_scope(
     """Automerge should no-op for PRs not linked to Review issues."""
     config = _load(tmp_path)
     policy = _automation_config()
-    monkeypatch.setattr(
-        automation,
-        "query_closing_issues",
-        lambda *a, **k: [LinkedIssue("StartupAI-site", "app.startupai-site", 110, "app#110")],
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("In Progress"),
-    )
     code, msg = automerge_review(
         "StartupAI-site/app.startupai-site",
         158,
@@ -2769,6 +2753,8 @@ def test_automerge_review_noop_when_not_in_review_scope(
         "StartupAI-site",
         1,
         dry_run=True,
+        pr_port=_fake_pr_port(linked_issue_refs=lambda pr_repo, pr_number: ("app#110",)),
+        review_state_port=_fake_review_state_port(status_by_issue={"app#110": "In Progress"}),
     )
     assert code == 2
     assert "no-op" in msg
@@ -2782,28 +2768,13 @@ def test_automerge_review_noops_when_auto_merge_already_enabled(
     policy = _automation_config()
     monkeypatch.setattr(
         automation,
-        "query_closing_issues",
-        lambda *a, **k: [LinkedIssue("StartupAI-site", "app.startupai-site", 110, "app#110")],
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("Review"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_has_copilot_review_signal",
-        lambda *a, **k: True,
-    )
-    monkeypatch.setattr(
-        automation,
         "codex_review_gate",
         lambda *a, **k: (0, "pass"),
     )
-    monkeypatch.setattr(
-        board_io_mod,
-        "_query_pr_gate_status",
-        lambda *a, **k: PrGateStatus(
+    pr_port = _fake_pr_port(
+        linked_issue_refs=lambda pr_repo, pr_number: ("app#110",),
+        has_copilot_review_signal=lambda pr_repo, pr_number: True,
+        get_gate_status=lambda pr_repo, pr_number: PrGateStatus(
             required={"ci"},
             passed={"ci"},
             failed=set(),
@@ -2823,6 +2794,8 @@ def test_automerge_review_noops_when_auto_merge_already_enabled(
         policy,
         "StartupAI-site",
         1,
+        pr_port=pr_port,
+        review_state_port=_fake_review_state_port(status_by_issue={"app#110": "Review"}),
     )
     assert code == 0
     assert "already enabled" in msg
@@ -3040,16 +3013,7 @@ def test_review_rescue_requeues_valid_local_pr_when_required_checks_fail(
         rescue_passed={"ci"},
         rescue_failed={"db-test-gate"},
     )
-    monkeypatch.setattr(
-        automation,
-        "_set_status_if_changed",
-        lambda issue_ref, from_statuses, to_status, *a, **k: (
-            issue_ref == "app#71"
-            and from_statuses == {"Review"}
-            and to_status == "Ready",
-            "Review",
-        ),
-    )
+    requeue_calls: list[tuple[str, str]] = []
 
     result = review_rescue(
         "StartupAI-site/app.startupai-site",
@@ -3059,10 +3023,14 @@ def test_review_rescue_requeues_valid_local_pr_when_required_checks_fail(
         "StartupAI-site",
         1,
         snapshot=snapshot,
+        pr_port=_fake_pr_port(),
+        review_state_port=_fake_review_state_port(status_by_issue={"app#71": "Review"}),
+        board_port=_fake_board_port(requeue_calls),
     )
 
     assert result.requeued_refs == ("app#71",)
     assert result.blocked_reason is None
+    assert requeue_calls == [("app#71", "Ready")]
 
 
 def test_review_rescue_does_not_skip_when_auto_merge_is_enabled_but_checks_pending(
@@ -3170,16 +3138,7 @@ def test_review_rescue_requeues_conflicting_local_pr_before_pending_checks(
         rescue_checks=("ci", "db-test-gate"),
         rescue_pending={"ci", "db-test-gate"},
     )
-    monkeypatch.setattr(
-        automation,
-        "_set_status_if_changed",
-        lambda issue_ref, from_statuses, to_status, *a, **k: (
-            issue_ref == "app#97"
-            and from_statuses == {"Review"}
-            and to_status == "Ready",
-            "Review",
-        ),
-    )
+    requeue_calls: list[tuple[str, str]] = []
 
     result = review_rescue(
         "StartupAI-site/app.startupai-site",
@@ -3189,10 +3148,14 @@ def test_review_rescue_requeues_conflicting_local_pr_before_pending_checks(
         "StartupAI-site",
         1,
         snapshot=snapshot,
+        pr_port=_fake_pr_port(),
+        review_state_port=_fake_review_state_port(status_by_issue={"app#97": "Review"}),
+        board_port=_fake_board_port(requeue_calls),
     )
 
     assert result.requeued_refs == ("app#97",)
     assert result.blocked_reason is None
+    assert requeue_calls == [("app#97", "Ready")]
 
 
 def test_review_rescue_all_scans_execution_authority_repos(
@@ -3201,15 +3164,6 @@ def test_review_rescue_all_scans_execution_authority_repos(
     """Cross-repo rescue sweep should scan every governed repo."""
     config = _load(tmp_path)
     policy = _automation_config()
-    monkeypatch.setattr(
-        automation,
-        "query_open_pull_requests",
-        lambda repo, **k: (
-            [OpenPullRequest(number=10, url=f"https://example.com/{repo}/10", head_ref_name="head", is_draft=False)]
-            if repo == "StartupAI-site/app.startupai-site"
-            else []
-        ),
-    )
     monkeypatch.setattr(
         automation,
         "review_rescue",
@@ -3226,6 +3180,13 @@ def test_review_rescue_all_scans_execution_authority_repos(
         "StartupAI-site",
         1,
         dry_run=True,
+        pr_port=_fake_pr_port(
+            list_open_prs=lambda repo: (
+                [OpenPullRequest(number=10, url=f"https://example.com/{repo}/10", head_ref_name="head", is_draft=False)]
+                if repo == "StartupAI-site/app.startupai-site"
+                else []
+            )
+        ),
     )
     assert sweep.scanned_repos == (
         "StartupAI-site/app.startupai-site",
@@ -3244,15 +3205,6 @@ def test_review_rescue_all_reports_requeued_refs(
     policy = _automation_config()
     monkeypatch.setattr(
         automation,
-        "query_open_pull_requests",
-        lambda repo, **k: (
-            [OpenPullRequest(number=177, url=f"https://example.com/{repo}/177", head_ref_name="head", is_draft=False)]
-            if repo == "StartupAI-site/app.startupai-site"
-            else []
-        ),
-    )
-    monkeypatch.setattr(
-        automation,
         "review_rescue",
         lambda pr_repo, pr_number, *a, **k: automation.ReviewRescueResult(
             pr_repo=pr_repo,
@@ -3267,6 +3219,13 @@ def test_review_rescue_all_reports_requeued_refs(
         "StartupAI-site",
         1,
         dry_run=True,
+        pr_port=_fake_pr_port(
+            list_open_prs=lambda repo: (
+                [OpenPullRequest(number=177, url=f"https://example.com/{repo}/177", head_ref_name="head", is_draft=False)]
+                if repo == "StartupAI-site/app.startupai-site"
+                else []
+            )
+        ),
     )
 
     assert sweep.requeued == ("app#71",)
@@ -4086,10 +4045,8 @@ def test_automerge_review_returns_blocked_for_pending(
         ),
     )
 
-    monkeypatch.setattr(
-        board_io_mod,
-        "enable_pull_request_automerge",
-        lambda *a, **k: "pending",
+    pr_port = _fake_pr_port(
+        enable_automerge=lambda *a, **k: "pending",
     )
 
     code, msg = automerge_review(
@@ -4100,6 +4057,7 @@ def test_automerge_review_returns_blocked_for_pending(
         "StartupAI-site",
         1,
         snapshot=snapshot,
+        pr_port=pr_port,
     )
     assert code == 2
     assert "pending verification" in msg

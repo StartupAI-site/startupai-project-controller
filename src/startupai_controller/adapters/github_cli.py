@@ -119,6 +119,47 @@ class GitHubCliAdapter:
 
     # -- PullRequestPort methods --
 
+    def list_open_prs(self, repo: str) -> list[OpenPullRequest]:
+        return query_open_pull_requests(repo, gh_runner=self._gh_runner)
+
+    def get_pull_request(self, repo: str, number: int) -> OpenPullRequest | None:
+        try:
+            payload = query_pull_request_view_payload(
+                repo,
+                number,
+                gh_runner=self._gh_runner,
+            )
+        except Exception:
+            return None
+        return OpenPullRequest(
+            number=number,
+            url=payload.url,
+            head_ref_name=payload.head_ref_name,
+            is_draft=payload.is_draft,
+            body=payload.body,
+            author=payload.author,
+        )
+
+    def linked_issue_refs(self, pr_repo: str, pr_number: int) -> tuple[str, ...]:
+        config = self._require_config()
+        owner, repo = pr_repo.split("/", maxsplit=1)
+        linked = query_closing_issues(
+            owner,
+            repo,
+            pr_number,
+            config,
+            gh_runner=self._gh_runner,
+        )
+        return tuple(issue.ref for issue in linked)
+
+    def has_copilot_review_signal(self, pr_repo: str, pr_number: int) -> bool:
+        payload = query_pull_request_view_payload(
+            pr_repo,
+            pr_number,
+            gh_runner=self._gh_runner,
+        )
+        return has_copilot_review_signal_from_payload(payload)
+
     def get_gate_status(self, pr_repo: str, pr_number: int) -> PrGateStatus:
         from startupai_controller.board_io import _query_pr_gate_status
 

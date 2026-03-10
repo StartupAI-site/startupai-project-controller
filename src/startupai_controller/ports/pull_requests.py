@@ -14,6 +14,22 @@ from startupai_controller.domain.models import OpenPullRequest, PrGateStatus
 class PullRequestPort(Protocol):
     """Pull request read and write operations."""
 
+    def list_open_prs(self, repo: str) -> list[OpenPullRequest]:
+        """Return open PRs for a repository."""
+        ...
+
+    def get_pull_request(self, repo: str, number: int) -> OpenPullRequest | None:
+        """Return one PR snapshot, or None if not found."""
+        ...
+
+    def linked_issue_refs(self, pr_repo: str, pr_number: int) -> tuple[str, ...]:
+        """Return linked issue refs referenced by a PR body."""
+        ...
+
+    def has_copilot_review_signal(self, pr_repo: str, pr_number: int) -> bool:
+        """Return True when Copilot review signal is present for the PR."""
+        ...
+
     def get_gate_status(self, pr_repo: str, pr_number: int) -> PrGateStatus:
         """Return the gate readiness snapshot for a PR."""
         ...

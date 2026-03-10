@@ -50,6 +50,68 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
     assert prs[0].author == "codex"
 
 
+def test_list_open_prs_delegates_to_query_open_pull_requests(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.query_open_pull_requests",
+        lambda repo, gh_runner=None: [
+            SimpleNamespace(
+                number=11,
+                url=f"https://example.com/{repo}/11",
+                head_ref_name="feat/example",
+                is_draft=False,
+                body="Closes #11",
+                author="codex",
+            )
+        ],
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    prs = adapter.list_open_prs("StartupAI-site/startupai-crew")
+
+    assert len(prs) == 1
+    assert prs[0].number == 11
+    assert prs[0].author == "codex"
+
+
+def test_linked_issue_refs_uses_configured_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.query_closing_issues",
+        lambda owner, repo, pr_number, config, gh_runner=None: [
+            SimpleNamespace(ref="crew#42"),
+            SimpleNamespace(ref="crew#43"),
+        ],
+    )
+    adapter = GitHubCliAdapter(
+        project_owner="StartupAI-site",
+        project_number=1,
+        config=_config(),
+    )
+
+    refs = adapter.linked_issue_refs("StartupAI-site/startupai-crew", 42)
+
+    assert refs == ("crew#42", "crew#43")
+
+
+def test_has_copilot_review_signal_uses_payload_projection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.query_pull_request_view_payload",
+        lambda repo, number, gh_runner=None: {"number": number},
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.has_copilot_review_signal_from_payload",
+        lambda payload: payload == {"number": 42},
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    assert (
+        adapter.has_copilot_review_signal(
+            "StartupAI-site/startupai-crew",
+            42,
+        )
+        is True
+    )
+
+
 def test_set_issue_status_uses_board_info_and_field_option(monkeypatch) -> None:
     board_info = BoardInfo(status="Ready", item_id="ITEM", project_id="PROJ")
     field_calls: list[tuple[str, str]] = []
