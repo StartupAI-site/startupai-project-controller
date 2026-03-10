@@ -2113,6 +2113,8 @@ def schedule_ready_items(
     automation_config: BoardAutomationConfig | None = None,
     missing_executor_block_cap: int = DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
@@ -2130,32 +2132,68 @@ def schedule_ready_items(
 
     decision = SchedulingDecision()
 
-    # Get current WIP counts (global or per-lane policy)
-    wip_counts = _count_wip_by_executor(
-        project_owner, project_number, gh_runner=gh_runner
-    )
-    lane_wip_counts: dict[tuple[str, str], int] = {}
-    if automation_config is not None:
-        lane_wip_counts = _count_wip_by_executor_lane(
-            config,
+    use_ports = (
+        board_info_resolver is None
+        and board_mutator is None
+    ) or review_state_port is not None or board_port is not None
+    if use_ports:
+        review_state_port = review_state_port or _default_review_state_port(
             project_owner,
             project_number,
+            config,
             gh_runner=gh_runner,
         )
+        wip_items = review_state_port.list_issues_by_status("In Progress")
+        wip_counts: dict[str, int] = {}
+        lane_wip_counts: dict[tuple[str, str], int] = {}
+        for item in wip_items:
+            executor = item.executor.strip().lower()
+            if executor not in VALID_EXECUTORS:
+                continue
+            lane = parse_issue_ref(item.issue_ref).prefix
+            wip_counts[executor] = wip_counts.get(executor, 0) + 1
+            lane_wip_counts[(executor, lane)] = (
+                lane_wip_counts.get((executor, lane), 0) + 1
+            )
+        ready_items = review_state_port.list_issues_by_status("Ready")
+        ready_items = sorted(
+            ready_items,
+            key=lambda snapshot: (
+                0 if in_any_critical_path(config, snapshot.issue_ref) else 1,
+                _priority_rank(snapshot.priority),
+                parse_issue_ref(snapshot.issue_ref).number,
+            ),
+        )
+    else:
+        # Get current WIP counts (global or per-lane policy)
+        wip_counts = _count_wip_by_executor(
+            project_owner, project_number, gh_runner=gh_runner
+        )
+        lane_wip_counts: dict[tuple[str, str], int] = {}
+        if automation_config is not None:
+            lane_wip_counts = _count_wip_by_executor_lane(
+                config,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            )
 
-    # List Ready items
-    ready_items = _list_project_items_by_status(
-        "Ready", project_owner, project_number, gh_runner=gh_runner
-    )
-    ready_items = sorted(
-        ready_items,
-        key=lambda snapshot: _ready_snapshot_rank(snapshot, config),
-    )
+        # List Ready items
+        ready_items = _list_project_items_by_status(
+            "Ready", project_owner, project_number, gh_runner=gh_runner
+        )
+        ready_items = sorted(
+            ready_items,
+            key=lambda snapshot: _ready_snapshot_rank(snapshot, config),
+        )
 
     for snapshot in ready_items:
-        ref = _snapshot_to_issue_ref(snapshot, config)
-        if ref is None:
-            continue
+        if use_ports:
+            ref = snapshot.issue_ref
+        else:
+            ref = _snapshot_to_issue_ref(snapshot, config)
+            if ref is None:
+                continue
 
         # Filter by prefix if not all_prefixes
         if not all_prefixes and this_repo_prefix:
@@ -2249,20 +2287,22 @@ def schedule_ready_items(
             continue
 
         if mode == "claim":
-            if not dry_run:
-                changed, _old = _set_status_if_changed(
-                    ref,
-                    {"Ready"},
-                    "In Progress",
-                    config,
-                    project_owner,
-                    project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-                if not changed:
-                    continue
+            changed, _old = _transition_issue_status(
+                ref,
+                {"Ready"},
+                "In Progress",
+                config,
+                project_owner,
+                project_number,
+                dry_run=dry_run,
+                review_state_port=review_state_port,
+                board_port=board_port,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                gh_runner=gh_runner,
+            )
+            if not changed:
+                continue
 
             decision.claimed.append(ref)
         else:
@@ -2290,6 +2330,8 @@ def claim_ready_issue(
     per_executor_wip_limit: int = 3,
     automation_config: BoardAutomationConfig | None = None,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
@@ -2302,26 +2344,54 @@ def claim_ready_issue(
     if norm_executor not in VALID_EXECUTORS:
         return ClaimReadyResult(reason=f"invalid-executor:{executor}")
 
-    ready_items = _list_project_items_by_status(
-        "Ready", project_owner, project_number, gh_runner=gh_runner
-    )
-    wip_counts = _count_wip_by_executor(
-        project_owner, project_number, gh_runner=gh_runner
-    )
-    lane_wip_counts: dict[tuple[str, str], int] = {}
-    if automation_config is not None:
-        lane_wip_counts = _count_wip_by_executor_lane(
-            config,
+    use_ports = (
+        board_info_resolver is None
+        and board_mutator is None
+    ) or review_state_port is not None or board_port is not None
+    if use_ports:
+        review_state_port = review_state_port or _default_review_state_port(
             project_owner,
             project_number,
+            config,
             gh_runner=gh_runner,
         )
+        wip_items = review_state_port.list_issues_by_status("In Progress")
+        wip_counts: dict[str, int] = {}
+        lane_wip_counts: dict[tuple[str, str], int] = {}
+        for item in wip_items:
+            item_executor = item.executor.strip().lower()
+            if item_executor not in VALID_EXECUTORS:
+                continue
+            lane = parse_issue_ref(item.issue_ref).prefix
+            wip_counts[item_executor] = wip_counts.get(item_executor, 0) + 1
+            lane_wip_counts[(item_executor, lane)] = (
+                lane_wip_counts.get((item_executor, lane), 0) + 1
+            )
+        ready_items = review_state_port.list_issues_by_status("Ready")
+    else:
+        ready_items = _list_project_items_by_status(
+            "Ready", project_owner, project_number, gh_runner=gh_runner
+        )
+        wip_counts = _count_wip_by_executor(
+            project_owner, project_number, gh_runner=gh_runner
+        )
+        lane_wip_counts: dict[tuple[str, str], int] = {}
+        if automation_config is not None:
+            lane_wip_counts = _count_wip_by_executor_lane(
+                config,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            )
 
-    ready_by_ref: dict[str, _ProjectItemSnapshot] = {}
+    ready_by_ref: dict[str, object] = {}
     for snapshot in ready_items:
-        ref = _snapshot_to_issue_ref(snapshot, config)
-        if ref is None:
-            continue
+        if use_ports:
+            ref = snapshot.issue_ref
+        else:
+            ref = _snapshot_to_issue_ref(snapshot, config)
+            if ref is None:
+                continue
         if not all_prefixes and this_repo_prefix:
             parsed = parse_issue_ref(ref)
             if parsed.prefix != this_repo_prefix:
@@ -2391,26 +2461,30 @@ def claim_ready_issue(
         if current_wip >= lane_limit:
             return ClaimReadyResult(reason="wip-limit")
 
-        if not dry_run:
-            changed, old_status = _set_status_if_changed(
-                ref,
-                {"Ready"},
-                "In Progress",
-                config,
-                project_owner,
-                project_number,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            if not changed:
-                return ClaimReadyResult(reason=f"status-not-ready:{old_status}")
+        changed, old_status = _transition_issue_status(
+            ref,
+            {"Ready"},
+            "In Progress",
+            config,
+            project_owner,
+            project_number,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        if not changed:
+            return ClaimReadyResult(reason=f"status-not-ready:{old_status}")
 
+        if not dry_run:
             try:
                 _post_claim_comment(
                     ref,
                     norm_executor,
                     config,
+                    board_port=board_port,
                     comment_checker=comment_checker,
                     comment_poster=comment_poster,
                     gh_runner=gh_runner,
@@ -2484,6 +2558,8 @@ def audit_in_progress(
     this_repo_prefix: str | None = None,
     all_prefixes: bool = False,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
@@ -2493,17 +2569,37 @@ def audit_in_progress(
     now = datetime.now(timezone.utc)
     stale_refs: list[str] = []
 
-    in_progress_items = _list_project_items_by_status(
-        "In Progress", project_owner, project_number, gh_runner=gh_runner
-    )
+    use_ports = (
+        board_info_resolver is None
+    ) or review_state_port is not None or board_port is not None
+    if use_ports:
+        review_state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        in_progress_items = review_state_port.list_issues_by_status("In Progress")
+    else:
+        in_progress_items = _list_project_items_by_status(
+            "In Progress", project_owner, project_number, gh_runner=gh_runner
+        )
     checker = comment_checker or _comment_exists
-    poster = comment_poster or _post_comment
     resolve_info = board_info_resolver or _query_issue_board_info
 
     for snapshot in in_progress_items:
-        ref = _snapshot_to_issue_ref(snapshot, config)
-        if ref is None:
-            continue
+        if use_ports:
+            ref = snapshot.issue_ref
+        else:
+            ref = _snapshot_to_issue_ref(snapshot, config)
+            if ref is None:
+                continue
         if not all_prefixes and this_repo_prefix:
             parsed = parse_issue_ref(ref)
             if parsed.prefix != this_repo_prefix:
@@ -2533,21 +2629,30 @@ def audit_in_progress(
             continue
 
         marker = _marker_for("stale-in-progress", ref)
-        info = resolve_info(ref, config, project_owner, project_number)
-        if info.status == "NOT_ON_BOARD":
-            continue
+        if use_ports:
+            current_status = review_state_port.get_issue_status(ref)
+            if current_status in {None, "NOT_ON_BOARD"}:
+                continue
+            try:
+                board_port.set_issue_field(ref, "Handoff To", "claude")
+            except GhQueryError:
+                pass
+        else:
+            info = resolve_info(ref, config, project_owner, project_number)
+            if info.status == "NOT_ON_BOARD":
+                continue
 
-        # Escalation signal for orchestrator reassignment
-        try:
-            _set_single_select_field(
-                info.project_id,
-                info.item_id,
-                "Handoff To",
-                "claude",
-                gh_runner=gh_runner,
-            )
-        except GhQueryError:
-            pass
+            # Escalation signal for orchestrator reassignment
+            try:
+                _set_single_select_field(
+                    info.project_id,
+                    info.item_id,
+                    "Handoff To",
+                    "claude",
+                    gh_runner=gh_runner,
+                )
+            except GhQueryError:
+                pass
 
         if not checker(owner, repo, number, marker, gh_runner=gh_runner):
             body = (
@@ -2556,7 +2661,16 @@ def audit_in_progress(
                 "Escalating handoff to `claude` (board field `Handoff To` updated)."
             )
             try:
-                poster(owner, repo, number, body, gh_runner=gh_runner)
+                if comment_poster is not None:
+                    comment_poster(owner, repo, number, body, gh_runner=gh_runner)
+                else:
+                    board_port = board_port or _default_board_mutation_port(
+                        project_owner,
+                        project_number,
+                        config,
+                        gh_runner=gh_runner,
+                    )
+                    board_port.post_issue_comment(f"{owner}/{repo}", number, body)
             except GhQueryError:
                 pass
 
@@ -2583,6 +2697,8 @@ def dispatch_agent(
     project_number: int,
     *,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -2591,27 +2707,47 @@ def dispatch_agent(
     result = DispatchResult()
 
     target = automation_config.dispatch_target
+    use_ports = (board_info_resolver is None) or review_state_port is not None or board_port is not None
 
     for issue_ref in issue_refs:
         owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-        info = _query_issue_board_info(
-            issue_ref,
-            config,
-            project_owner,
-            project_number,
-        )
-        if info.status != "In Progress":
-            result.skipped.append((issue_ref, f"status={info.status}"))
+        if use_ports:
+            review_state_port = review_state_port or _default_review_state_port(
+                project_owner,
+                project_number,
+                config,
+                gh_runner=gh_runner,
+            )
+            board_port = board_port or _default_board_mutation_port(
+                project_owner,
+                project_number,
+                config,
+                gh_runner=gh_runner,
+            )
+            status = review_state_port.get_issue_status(issue_ref)
+        else:
+            info = _query_issue_board_info(
+                issue_ref,
+                config,
+                project_owner,
+                project_number,
+            )
+            status = info.status
+        if status != "In Progress":
+            result.skipped.append((issue_ref, f"status={status or 'unknown'}"))
             continue
 
-        executor = _query_project_item_field(
-            issue_ref,
-            "Executor",
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        ).strip().lower()
+        if use_ports:
+            executor = review_state_port.get_issue_fields(issue_ref).executor.strip().lower()
+        else:
+            executor = _query_project_item_field(
+                issue_ref,
+                "Executor",
+                config,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            ).strip().lower()
         if executor not in VALID_EXECUTORS:
             result.skipped.append((issue_ref, f"executor={executor or 'unset'}"))
             continue
@@ -2632,7 +2768,13 @@ def dispatch_agent(
                 "Execution is handled by the assigned local agent lane."
             )
             try:
-                _post_comment(owner, repo, number, body, gh_runner=gh_runner)
+                board_port = board_port or _default_board_mutation_port(
+                    project_owner,
+                    project_number,
+                    config,
+                    gh_runner=gh_runner,
+                )
+                board_port.post_issue_comment(f"{owner}/{repo}", number, body)
                 result.dispatched.append(issue_ref)
             except GhQueryError as error:
                 reason_code = "comment-api-error"
@@ -2680,6 +2822,8 @@ def rebalance_wip(
     all_prefixes: bool = False,
     cycle_minutes: int = DEFAULT_REBALANCE_CYCLE_MINUTES,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     status_resolver: Callable[..., str] | None = None,
@@ -2693,18 +2837,40 @@ def rebalance_wip(
     )
     decision = RebalanceDecision()
 
-    in_progress = _list_project_items_by_status(
-        "In Progress",
-        project_owner,
-        project_number,
-        gh_runner=gh_runner,
-    )
+    use_ports = (
+        board_info_resolver is None
+        and board_mutator is None
+    ) or review_state_port is not None or board_port is not None
+    if use_ports:
+        review_state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        in_progress = review_state_port.list_issues_by_status("In Progress")
+    else:
+        in_progress = _list_project_items_by_status(
+            "In Progress",
+            project_owner,
+            project_number,
+            gh_runner=gh_runner,
+        )
     lane_buckets: dict[tuple[str, str], list[_WipCandidate]] = {}
 
     for snapshot in in_progress:
-        ref = _snapshot_to_issue_ref(snapshot, config)
-        if ref is None:
-            continue
+        if use_ports:
+            ref = snapshot.issue_ref
+        else:
+            ref = _snapshot_to_issue_ref(snapshot, config)
+            if ref is None:
+                continue
         parsed = parse_issue_ref(ref)
         if not all_prefixes and this_repo_prefix and parsed.prefix != this_repo_prefix:
             continue
@@ -2734,24 +2900,22 @@ def rebalance_wip(
                         config,
                         project_owner,
                         project_number,
+                        review_state_port=review_state_port,
+                        board_port=board_port,
                         board_info_resolver=board_info_resolver,
                         board_mutator=board_mutator,
                         gh_runner=gh_runner,
                     )
-                    info = _query_issue_board_info(
-                        ref, config, project_owner, project_number
+                    _set_handoff_target(
+                        ref,
+                        "claude",
+                        config,
+                        project_owner,
+                        project_number,
+                        review_state_port=review_state_port,
+                        board_port=board_port,
+                        gh_runner=gh_runner,
                     )
-                    if info.status != "NOT_ON_BOARD":
-                        try:
-                            _set_single_select_field(
-                                info.project_id,
-                                info.item_id,
-                                "Handoff To",
-                                "claude",
-                                gh_runner=gh_runner,
-                            )
-                        except GhQueryError:
-                            pass
                 decision.moved_blocked.append(ref)
                 continue
 
@@ -2806,42 +2970,56 @@ def rebalance_wip(
                     if not _comment_exists(
                         owner, repo, number, stale_marker, gh_runner=gh_runner
                     ):
-                        _post_comment(
-                            owner,
-                            repo,
-                            number,
-                            f"{stale_marker}\nStale candidate detected; will demote on next cycle if still inactive.",
+                        board_port = board_port or _default_board_mutation_port(
+                            project_owner,
+                            project_number,
+                            config,
                             gh_runner=gh_runner,
+                        )
+                        board_port.post_issue_comment(
+                            f"{owner}/{repo}",
+                            number,
+                            (
+                                f"{stale_marker}\n"
+                                "Stale candidate detected; will demote on next cycle if still inactive."
+                            ),
                         )
                 continue
 
             # Confirmed stale across at least one full cycle window.
-            if not dry_run:
-                _set_status_if_changed(
-                    ref,
-                    {"In Progress"},
-                    "Ready",
-                    config,
-                    project_owner,
-                    project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
+            changed, _old = _transition_issue_status(
+                ref,
+                {"In Progress"},
+                "Ready",
+                config,
+                project_owner,
+                project_number,
+                dry_run=dry_run,
+                review_state_port=review_state_port,
+                board_port=board_port,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                gh_runner=gh_runner,
+            )
+            if changed and not dry_run:
                 demote_marker = _marker_for("stale-demote", ref)
                 if not _comment_exists(
                     owner, repo, number, demote_marker, gh_runner=gh_runner
                 ):
-                    _post_comment(
-                        owner,
-                        repo,
+                    board_port = board_port or _default_board_mutation_port(
+                        project_owner,
+                        project_number,
+                        config,
+                        gh_runner=gh_runner,
+                    )
+                    board_port.post_issue_comment(
+                        f"{owner}/{repo}",
                         number,
                         (
                             f"{demote_marker}\n"
                             "Moved back to `Ready` after consecutive stale cycles "
                             "with no PR and no fresh activity."
                         ),
-                        gh_runner=gh_runner,
                     )
             decision.moved_ready.append(ref)
             continue
@@ -2878,28 +3056,35 @@ def rebalance_wip(
         overflow = ranked[limit:]
         decision.kept.extend(item.ref for item in keep)
         for item in overflow:
-            if not dry_run:
-                _set_status_if_changed(
-                    item.ref,
-                    {"In Progress"},
-                    "Ready",
-                    config,
-                    project_owner,
-                    project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
+            changed, _old = _transition_issue_status(
+                item.ref,
+                {"In Progress"},
+                "Ready",
+                config,
+                project_owner,
+                project_number,
+                dry_run=dry_run,
+                review_state_port=review_state_port,
+                board_port=board_port,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                gh_runner=gh_runner,
+            )
+            if changed and not dry_run:
                 marker = _marker_for("wip-rebalance", item.ref)
                 if not _comment_exists(
                     item.owner, item.repo, item.number, marker, gh_runner=gh_runner
                 ):
-                    _post_comment(
-                        item.owner,
-                        item.repo,
+                    board_port = board_port or _default_board_mutation_port(
+                        project_owner,
+                        project_number,
+                        config,
+                        gh_runner=gh_runner,
+                    )
+                    board_port.post_issue_comment(
+                        f"{item.owner}/{item.repo}",
                         item.number,
                         f"{marker}\nMoved back to `Ready` by lane WIP rebalance (limit={limit}).",
-                        gh_runner=gh_runner,
                     )
             decision.moved_ready.append(item.ref)
 

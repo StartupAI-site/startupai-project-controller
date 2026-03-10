@@ -157,19 +157,31 @@ def _fake_pr_port(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def _fake_review_state_port(*, status_by_issue: dict[str, str] | None = None):
+def _fake_review_state_port(
+    *,
+    status_by_issue: dict[str, str] | None = None,
+    snapshots_by_status: dict[str, list[SimpleNamespace]] | None = None,
+    fields_by_issue: dict[str, SimpleNamespace] | None = None,
+):
     statuses = status_by_issue or {}
+    snapshots = snapshots_by_status or {}
+    fields = fields_by_issue or {}
+
+    def _field(issue_ref: str, name: str, default: str) -> str:
+        return getattr(fields.get(issue_ref, SimpleNamespace()), name, default)
+
     return SimpleNamespace(
         get_issue_status=lambda issue_ref: statuses.get(issue_ref),
+        list_issues_by_status=lambda status: list(snapshots.get(status, [])),
         get_issue_fields=lambda issue_ref: SimpleNamespace(
             issue_ref=issue_ref,
-            status=statuses.get(issue_ref, ""),
-            priority="P1",
-            sprint="Sprint 1",
-            executor="codex",
-            owner="codex:local-consumer",
-            handoff_to="none",
-            blocked_reason="",
+            status=_field(issue_ref, "status", statuses.get(issue_ref, "")),
+            priority=_field(issue_ref, "priority", "P1"),
+            sprint=_field(issue_ref, "sprint", "Sprint 1"),
+            executor=_field(issue_ref, "executor", "codex"),
+            owner=_field(issue_ref, "owner", "codex:local-consumer"),
+            handoff_to=_field(issue_ref, "handoff_to", "none"),
+            blocked_reason=_field(issue_ref, "blocked_reason", ""),
         ),
     )
 
@@ -1494,6 +1506,45 @@ def test_schedule_claim_mode_mutates_status_for_claimable_item(
     mutator.assert_called_once()
 
 
+def test_schedule_claim_mode_uses_ports_for_status_transition(
+    tmp_path: Path,
+) -> None:
+    """Claim mode can transition status through ReviewStatePort + BoardMutationPort."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        snapshots_by_status={
+            "Ready": [
+                SimpleNamespace(
+                    issue_ref="crew#999",
+                    status="Ready",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 999",
+                    item_id="item-999",
+                    project_id="proj-1",
+                )
+            ],
+            "In Progress": [],
+        },
+        status_by_issue={"crew#999": "Ready"},
+    )
+
+    decision = schedule_ready_items(
+        config,
+        "StartupAI-site",
+        1,
+        all_prefixes=True,
+        mode="claim",
+        status_resolver=lambda *_: "Done",
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+    )
+
+    assert decision.claimed == ["crew#999"]
+    assert board_calls == [("crew#999", "In Progress")]
+
+
 def test_schedule_blocks_missing_executor_with_cap(tmp_path: Path) -> None:
     """Missing executor items are auto-blocked up to the configured cap."""
     config = _load(tmp_path)
@@ -1586,6 +1637,47 @@ def test_claim_ready_next_claims_first_eligible(tmp_path: Path) -> None:
     assert result.reason == ""
     mutator.assert_called_once()
     poster.assert_called_once()
+
+
+def test_claim_ready_uses_ports_for_status_and_comment(tmp_path: Path) -> None:
+    """claim-ready can claim through ports without legacy mutators."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        snapshots_by_status={
+            "Ready": [
+                SimpleNamespace(
+                    issue_ref="crew#87",
+                    status="Ready",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 87",
+                    item_id="item-87",
+                    project_id="proj-1",
+                )
+            ],
+            "In Progress": [],
+        },
+        status_by_issue={"crew#87": "Ready"},
+    )
+
+    result = claim_ready_issue(
+        config,
+        "StartupAI-site",
+        1,
+        executor="codex",
+        next_issue=True,
+        all_prefixes=True,
+        status_resolver=lambda *_: "Done",
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+        comment_checker=lambda *_, **__: False,
+    )
+
+    assert result.claimed == "crew#87"
+    assert board_calls[0] == ("crew#87", "In Progress")
+    assert board_calls[1][0] == "StartupAI-site/startupai-crew#87"
+    assert "Claimed for execution" in board_calls[1][1]
 
 
 def test_claim_ready_rejects_executor_mismatch(tmp_path: Path) -> None:
@@ -1694,6 +1786,52 @@ def test_audit_in_progress_escalates_stale_without_pr(tmp_path: Path) -> None:
     assert result == ["crew#88"]
     handoff_set.assert_called_once()
     poster.assert_called_once()
+
+
+def test_audit_in_progress_uses_ports_for_handoff_and_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stale audit can route through ports for handoff + comment mutation."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        snapshots_by_status={
+            "In Progress": [
+                SimpleNamespace(
+                    issue_ref="crew#88",
+                    status="In Progress",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 88",
+                    item_id="item-88",
+                    project_id="proj-1",
+                )
+            ]
+        },
+        status_by_issue={"crew#88": "In Progress"},
+    )
+    monkeypatch.setattr(automation, "_query_project_item_field", lambda *a, **k: "n/a")
+    monkeypatch.setattr(
+        automation,
+        "_query_issue_updated_at",
+        lambda *a, **k: automation.datetime(2000, 1, 1, tzinfo=automation.timezone.utc),
+    )
+    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
+
+    result = audit_in_progress(
+        config,
+        "StartupAI-site",
+        1,
+        all_prefixes=True,
+        max_age_hours=24,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+    )
+
+    assert result == ["crew#88"]
+    assert board_calls[0] == ("crew#88", "Handoff To=claude")
+    assert board_calls[1][0] == "StartupAI-site/startupai-crew#88"
+    assert "Stale `In Progress`" in board_calls[1][1]
 
 
 # -- enforce-ready-dependencies tests -----------------------------------------
@@ -3398,27 +3536,12 @@ def test_dispatch_agent_posts_executor_lane_comment(
     """dispatch-agent should post deterministic executor-lane dispatch comment."""
     config = _load(tmp_path)
     policy = _automation_config()
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("In Progress"),
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#88": "In Progress"},
+        fields_by_issue={"crew#88": SimpleNamespace(executor="codex")},
     )
-    monkeypatch.setattr(
-        automation,
-        "_query_project_item_field",
-        lambda *a, **k: "codex",
-    )
-    posted: list[str] = []
-    monkeypatch.setattr(
-        automation,
-        "_post_comment",
-        lambda _o, _r, _n, body, **_k: posted.append(body),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_comment_exists",
-        lambda *a, **k: False,
-    )
+    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
 
     result = automation.dispatch_agent(
         issue_refs=["crew#88"],
@@ -3426,12 +3549,40 @@ def test_dispatch_agent_posts_executor_lane_comment(
         automation_config=policy,
         project_owner="StartupAI-site",
         project_number=1,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
     )
     assert result.dispatched == ["crew#88"]
     assert not result.failed
-    assert posted
-    assert "Executor=codex" in posted[0]
-    assert "@copilot" not in posted[0]
+    assert board_calls
+    assert "Executor=codex" in board_calls[0][1]
+    assert "@copilot" not in board_calls[0][1]
+
+
+def test_dispatch_agent_uses_ports_for_status_and_comment(tmp_path: Path) -> None:
+    """dispatch-agent can operate through ReviewStatePort + BoardMutationPort."""
+    config = _load(tmp_path)
+    policy = _automation_config()
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#88": "In Progress"},
+        fields_by_issue={"crew#88": SimpleNamespace(executor="codex")},
+    )
+    with patch.object(automation, "_comment_exists", return_value=False):
+        result = automation.dispatch_agent(
+            ["crew#88"],
+            config,
+            policy,
+            "StartupAI-site",
+            1,
+            review_state_port=review_state_port,
+            board_port=_fake_board_port(board_calls),
+            gh_runner=lambda args: "",
+        )
+
+    assert result.dispatched == ["crew#88"]
+    assert board_calls[0][0] == "StartupAI-site/startupai-crew#88"
+    assert "Dispatch acknowledged" in board_calls[0][1]
 
 
 def test_dispatch_agent_rejects_non_executor_dispatch_target(
@@ -3447,21 +3598,11 @@ def test_dispatch_agent_rejects_non_executor_dispatch_target(
         dispatch_target="copilot",
         canary_thresholds={},
     )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("In Progress"),
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#88": "In Progress"},
+        fields_by_issue={"crew#88": SimpleNamespace(executor="codex")},
     )
-    monkeypatch.setattr(
-        automation,
-        "_query_project_item_field",
-        lambda *a, **k: "codex",
-    )
-    monkeypatch.setattr(
-        automation,
-        "_comment_exists",
-        lambda *a, **k: False,
-    )
+    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
 
     result = automation.dispatch_agent(
         issue_refs=["crew#88"],
@@ -3469,6 +3610,8 @@ def test_dispatch_agent_rejects_non_executor_dispatch_target(
         automation_config=policy,
         project_owner="StartupAI-site",
         project_number=1,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port([]),
     )
     assert not result.dispatched
     assert result.failed
@@ -3482,38 +3625,14 @@ def test_dispatch_agent_comment_failure_fails_open(
     """dispatch-agent comment failure should not mutate board state."""
     config = _load(tmp_path)
     policy = _automation_config()
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("In Progress"),
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#89": "In Progress"},
+        fields_by_issue={"crew#89": SimpleNamespace(executor="codex")},
     )
-    monkeypatch.setattr(
-        automation,
-        "_query_project_item_field",
-        lambda *a, **k: "codex",
+    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
+    board_port = SimpleNamespace(
+        post_issue_comment=lambda *a, **k: (_ for _ in ()).throw(automation.GhQueryError("boom"))
     )
-    monkeypatch.setattr(
-        automation,
-        "_comment_exists",
-        lambda *a, **k: False,
-    )
-    post_calls = {"count": 0}
-    def flaky_post_comment(*_a, **_k):
-        post_calls["count"] += 1
-        if post_calls["count"] == 1:
-            raise automation.GhQueryError("boom")
-
-    monkeypatch.setattr(
-        automation,
-        "_post_comment",
-        flaky_post_comment,
-    )
-    routed = MagicMock()
-    set_text = MagicMock()
-    set_select = MagicMock()
-    monkeypatch.setattr(automation, "_set_status_if_changed", routed)
-    monkeypatch.setattr(automation, "_set_text_field", set_text)
-    monkeypatch.setattr(automation, "_set_single_select_field", set_select)
 
     result = automation.dispatch_agent(
         issue_refs=["crew#89"],
@@ -3521,11 +3640,10 @@ def test_dispatch_agent_comment_failure_fails_open(
         automation_config=policy,
         project_owner="StartupAI-site",
         project_number=1,
+        review_state_port=review_state_port,
+        board_port=board_port,
     )
     assert result.failed
-    routed.assert_not_called()
-    set_text.assert_not_called()
-    set_select.assert_not_called()
 
 
 def test_enforce_execution_policy_skips_non_copilot_actor(
@@ -3640,16 +3758,21 @@ def test_rebalance_wip_marks_stale_then_demotes(
     """First stale cycle marks candidate; second eligible cycle demotes."""
     config = _load(tmp_path)
     policy = _automation_config()
-    snapshot = automation._ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#88",
-        status="In Progress",
-        executor="codex",
-        handoff_to="none",
-    )
-    monkeypatch.setattr(
-        automation,
-        "_list_project_items_by_status",
-        lambda status, *a, **k: [snapshot] if status == "In Progress" else [],
+    review_state_port = _fake_review_state_port(
+        snapshots_by_status={
+            "In Progress": [
+                SimpleNamespace(
+                    issue_ref="crew#88",
+                    status="In Progress",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 88",
+                    item_id="item-88",
+                    project_id="proj-1",
+                )
+            ]
+        },
+        status_by_issue={"crew#88": "In Progress"},
     )
     monkeypatch.setattr(automation, "in_any_critical_path", lambda *a, **k: False)
     now = datetime(2026, 3, 5, 12, 0, 0, tzinfo=timezone.utc)
@@ -3664,12 +3787,7 @@ def test_rebalance_wip_marks_stale_then_demotes(
         lambda *a, **k: "codex" if a[1] == "Executor" else "",
     )
     monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
-    posted: list[str] = []
-    monkeypatch.setattr(
-        automation,
-        "_post_comment",
-        lambda _o, _r, _n, body, **_k: posted.append(body),
-    )
+    board_calls: list[tuple[str, str]] = []
     monkeypatch.setattr(automation, "_query_latest_marker_timestamp", lambda *a, **k: None)
 
     decision_1 = automation.rebalance_wip(
@@ -3679,6 +3797,8 @@ def test_rebalance_wip_marks_stale_then_demotes(
         project_number=1,
         all_prefixes=True,
         dry_run=False,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
     )
     assert "crew#88" in decision_1.marked_stale
 
@@ -3688,12 +3808,6 @@ def test_rebalance_wip_marks_stale_then_demotes(
         "_query_latest_marker_timestamp",
         lambda *a, **k: marker_time,
     )
-    moved: list[str] = []
-    monkeypatch.setattr(
-        automation,
-        "_set_status_if_changed",
-        lambda issue_ref, *a, **k: (moved.append(issue_ref) or True, "In Progress"),
-    )
     decision_2 = automation.rebalance_wip(
         config=config,
         automation_config=policy,
@@ -3701,9 +3815,74 @@ def test_rebalance_wip_marks_stale_then_demotes(
         project_number=1,
         all_prefixes=True,
         dry_run=False,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
     )
     assert "crew#88" in decision_2.moved_ready
-    assert moved == ["crew#88"]
+    assert ("crew#88", "Ready") in board_calls
+
+
+def test_rebalance_wip_uses_ports_for_ready_demote_and_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lane overflow demotion can flow through ports."""
+    config = _load(tmp_path)
+    policy = _automation_config()
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        snapshots_by_status={
+            "In Progress": [
+                SimpleNamespace(
+                    issue_ref="crew#88",
+                    status="In Progress",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 88",
+                    item_id="item-88",
+                    project_id="proj-1",
+                ),
+                SimpleNamespace(
+                    issue_ref="crew#89",
+                    status="In Progress",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 89",
+                    item_id="item-89",
+                    project_id="proj-1",
+                ),
+            ]
+        },
+        status_by_issue={"crew#88": "In Progress", "crew#89": "In Progress"},
+    )
+    monkeypatch.setattr(automation, "_query_project_item_field", lambda *a, **k: "n/a")
+    monkeypatch.setattr(automation, "_query_open_pr_updated_at", lambda *a, **k: None)
+    monkeypatch.setattr(automation, "in_any_critical_path", lambda *a, **k: False)
+    monkeypatch.setattr(
+        automation,
+        "_query_latest_wip_activity_timestamp",
+        lambda ref, *a, **k: (
+            automation.datetime(2026, 3, 10, 12, 0, tzinfo=automation.timezone.utc)
+            if ref == "crew#88"
+            else automation.datetime(2026, 3, 10, 11, 0, tzinfo=automation.timezone.utc)
+        ),
+    )
+    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
+
+    decision = automation.rebalance_wip(
+        config,
+        policy,
+        "StartupAI-site",
+        1,
+        all_prefixes=True,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+    )
+
+    assert decision.kept == ["crew#88"]
+    assert decision.moved_ready == ["crew#89"]
+    assert board_calls[0] == ("crew#89", "Ready")
+    assert board_calls[1][0] == "StartupAI-site/startupai-crew#89"
+    assert "Moved back to `Ready` by lane WIP rebalance" in board_calls[1][1]
 
 
 def test_rebalance_wip_ignores_issue_updated_at_for_freshness(
@@ -3712,16 +3891,21 @@ def test_rebalance_wip_ignores_issue_updated_at_for_freshness(
     """Issue.updated_at must not keep WIP alive once execution activity is stale."""
     config = _load(tmp_path)
     policy = _automation_config()
-    snapshot = automation._ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#88",
-        status="In Progress",
-        executor="codex",
-        handoff_to="none",
-    )
-    monkeypatch.setattr(
-        automation,
-        "_list_project_items_by_status",
-        lambda status, *a, **k: [snapshot] if status == "In Progress" else [],
+    review_state_port = _fake_review_state_port(
+        snapshots_by_status={
+            "In Progress": [
+                SimpleNamespace(
+                    issue_ref="crew#88",
+                    status="In Progress",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 88",
+                    item_id="item-88",
+                    project_id="proj-1",
+                )
+            ]
+        },
+        status_by_issue={"crew#88": "In Progress"},
     )
     monkeypatch.setattr(automation, "in_any_critical_path", lambda *a, **k: False)
     now = datetime.now(timezone.utc)
@@ -3741,7 +3925,7 @@ def test_rebalance_wip_ignores_issue_updated_at_for_freshness(
         lambda *a, **k: "codex" if a[1] == "Executor" else "",
     )
     monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
-    monkeypatch.setattr(automation, "_post_comment", lambda *a, **k: None)
+    board_calls: list[tuple[str, str]] = []
     monkeypatch.setattr(automation, "_query_latest_marker_timestamp", lambda *a, **k: None)
 
     decision = automation.rebalance_wip(
@@ -3751,6 +3935,8 @@ def test_rebalance_wip_ignores_issue_updated_at_for_freshness(
         project_number=1,
         all_prefixes=True,
         dry_run=False,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
     )
     assert "crew#88" in decision.marked_stale
 
