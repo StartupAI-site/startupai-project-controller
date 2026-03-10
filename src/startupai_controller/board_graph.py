@@ -1,13 +1,13 @@
 """Board graph: selection, dependency reasoning, ranking, and WIP accounting.
 
 Extracted from board_automation.py (ADR-018 step 4). Contains graph-level
-helpers that read board state via board_io but never mutate it.
+helpers that read board state through the canonical adapter surface but never
+mutate it directly.
 
 Dependency direction (no cycles):
-    validate_critical_path_promotion <- board_io <- board_graph <- board_automation
+    validate_critical_path_promotion <- adapters <- board_graph <- board_automation
 
-This module imports from board_io and validate_critical_path_promotion only.
-It must NEVER import from board_automation or promote_ready.
+This module must NEVER import from board_automation or promote_ready.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 
-from startupai_controller.board_io import (  # transitional: non-adapted mechanism functions (ADR-002)
+from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     _ProjectItemSnapshot,  # adapter-internal type — port migration pending
     _list_project_items_by_status,  # partial adapter coverage via ReviewStatePort
     _snapshot_to_issue_ref,  # helper — port migration pending

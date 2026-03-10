@@ -68,7 +68,7 @@ from startupai_controller.consumer_workflow import (
     workflow_status_payload,
     write_workflow_snapshot,
 )
-from startupai_controller.board_io import (  # transitional: non-adapted mechanism functions (ADR-002)
+from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     CycleBoardSnapshot,
     CycleGitHubMemo,
     LinkedIssue,
@@ -96,7 +96,7 @@ from startupai_controller.adapters.github_http_adapter import (  # canonical: tr
     begin_request_stats,
     end_request_stats,
 )
-from startupai_controller.consumer_db import ConsumerDB  # transitional: concrete DB (full port migration pending)
+from startupai_controller.adapters.sqlite_store import ConsumerDB
 from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-internal types
     MetricEvent,
     RecoveredLease,
@@ -1074,7 +1074,7 @@ def _set_issue_handoff_target(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    from startupai_controller.board_io import _set_single_select_field  # transitional
+    from startupai_controller.adapters.github_cli import _set_single_select_field
     from startupai_controller.promote_ready import _query_issue_board_info
 
     resolve_info = board_info_resolver or _query_issue_board_info
@@ -4016,7 +4016,7 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    from startupai_controller.board_io import _set_single_select_field  # transitional
+    from startupai_controller.adapters.github_cli import _set_single_select_field
     from startupai_controller.promote_ready import _query_issue_board_info
 
     marker = _marker_for("consumer-escalation", issue_ref)

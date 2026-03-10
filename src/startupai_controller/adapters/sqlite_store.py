@@ -7,15 +7,13 @@ and the existing SQLite access layer.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
 
-if TYPE_CHECKING:
-    from startupai_controller.consumer_db import ConsumerDB
-
 # Adapter-internal types re-exported for canonical import paths.
 from startupai_controller.consumer_db import (  # noqa: F401
+    ConsumerDB,
     MetricEvent,
     RecoveredLease,
 )
@@ -34,7 +32,7 @@ class SqliteSessionStore:
         return self._db.get_review_queue_item(issue_ref)
 
     def list_due_review_items(self, now: datetime) -> list[ReviewQueueEntry]:
-        return self._db.list_due_review_queue_items(now)
+        return self._db.list_due_review_queue_items(now=now)
 
     def enqueue_review_item(
         self,
@@ -51,7 +49,7 @@ class SqliteSessionStore:
             pr_repo=pr_repo,
             pr_number=pr_number,
             source_session_id=source_session_id,
-            next_attempt_at=next_attempt_at,
+            next_attempt_at=next_attempt_at.isoformat(),
         )
 
     def latest_session_for_issue(self, issue_ref: str) -> SessionInfo | None:

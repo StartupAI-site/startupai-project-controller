@@ -41,7 +41,7 @@ else:
     _PullRequestPort = None  # runtime: structural typing, no import needed
 
 
-from startupai_controller.board_io import (  # transitional: non-adapted mechanism functions (ADR-002)
+from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     COPILOT_CODING_AGENT_LOGINS,
     CycleBoardSnapshot,
     CycleGitHubMemo,

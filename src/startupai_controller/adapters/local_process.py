@@ -63,4 +63,6 @@ class LocalProcessAdapter:
         from startupai_controller.board_io import _run_gh
 
         runner = self._gh_runner or _run_gh
-        return runner(*args)
+        if self._gh_runner is not None:
+            return runner(args, check=check)
+        return runner(args)
