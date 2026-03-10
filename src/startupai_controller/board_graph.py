@@ -17,10 +17,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 
-from startupai_controller.board_io import (  # transitional: board query mechanism
-    _ProjectItemSnapshot,
-    _list_project_items_by_status,
-    _snapshot_to_issue_ref,
+from startupai_controller.board_io import (  # transitional: non-adapted mechanism functions (ADR-002)
+    _ProjectItemSnapshot,  # adapter-internal type — port migration pending
+    _list_project_items_by_status,  # partial adapter coverage via ReviewStatePort
+    _snapshot_to_issue_ref,  # helper — port migration pending
 )
 from startupai_controller.domain.models import (
     AdmissionCandidate,

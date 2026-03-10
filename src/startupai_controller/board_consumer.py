@@ -68,7 +68,7 @@ from startupai_controller.consumer_workflow import (
     workflow_status_payload,
     write_workflow_snapshot,
 )
-from startupai_controller.board_io import (  # transitional: mechanism access (see ADR-002)
+from startupai_controller.board_io import (  # transitional: non-adapted mechanism functions (ADR-002)
     CycleBoardSnapshot,
     CycleGitHubMemo,
     LinkedIssue,
@@ -92,9 +92,12 @@ from startupai_controller.board_io import (  # transitional: mechanism access (s
     review_state_digest_from_payload,
     review_state_digest_from_probe,
 )
-from startupai_controller.github_http import begin_request_stats, end_request_stats  # transitional: transport stats
-from startupai_controller.consumer_db import (  # transitional: concrete DB + adapter-internal types
-    ConsumerDB,
+from startupai_controller.adapters.github_http_adapter import (  # canonical: transport stats
+    begin_request_stats,
+    end_request_stats,
+)
+from startupai_controller.consumer_db import ConsumerDB  # transitional: concrete DB (full port migration pending)
+from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-internal types
     MetricEvent,
     RecoveredLease,
 )
@@ -3165,10 +3168,11 @@ def _drain_review_queue(
     existing_refs = {entry.issue_ref for entry in existing_entries}
 
     # Phase 1: Prune stale entries, seed new ones, reconcile identity
-    removed = _prune_stale_review_entries(db, review_refs, existing_entries, dry_run=dry_run)
-    seeded = _seed_new_review_entries(db, review_refs, existing_refs, dry_run=dry_run, now=now)
+    # Helpers accept ConsumerDB | SqliteSessionStore (duck typing on shared methods)
+    removed = _prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
+    seeded = _seed_new_review_entries(store, review_refs, existing_refs, dry_run=dry_run, now=now)
     if not dry_run:
-        _reconcile_review_queue_identity(db, review_refs, now=now)
+        _reconcile_review_queue_identity(store, review_refs, now=now)
 
     queue_items = [
         entry for entry in store.list_review_queue_items() if entry.issue_ref in review_refs
@@ -3283,6 +3287,13 @@ def _drain_review_queue(
                 dict.fromkeys(pre_backfilled + secondary_backfilled)
             )
 
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter as _GhCliAdapter
+
+    _drain_pr_port = _GhCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        gh_runner=gh_runner,
+    )
     for (pr_repo, pr_number), entries in due_pr_groups:
         if partial_failure:
             break
@@ -3302,6 +3313,7 @@ def _drain_review_queue(
                 dry_run=dry_run,
                 snapshot=snapshot,
                 gh_runner=gh_runner,
+                pr_port=_drain_pr_port,
             )
         except GhQueryError as err:
             partial_failure = True
@@ -3321,7 +3333,7 @@ def _drain_review_queue(
                 )
             for entry in entries:
                 needs_escalation = _apply_review_queue_result(
-                    db,
+                    store,
                     entry,
                     result,
                     now=now,
@@ -3381,7 +3393,7 @@ def _drain_review_queue(
 
     if partial_failure and not dry_run:
         _apply_review_queue_partial_failure(
-            db,
+            store,
             due_items,
             config=config,
             error=error,

@@ -33,10 +33,15 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
+else:
+    _PullRequestPort = None  # runtime: structural typing, no import needed
 
 
-from startupai_controller.board_io import (  # transitional: mechanism access (see ADR-002)
+from startupai_controller.board_io import (  # transitional: non-adapted mechanism functions (ADR-002)
     COPILOT_CODING_AGENT_LOGINS,
     CycleBoardSnapshot,
     CycleGitHubMemo,
@@ -82,16 +87,13 @@ from startupai_controller.board_io import (  # transitional: mechanism access (s
     query_required_status_checks,
     query_pull_request_view_payload,
     query_latest_codex_verdict,
-    _query_pr_gate_status,
     _query_failed_check_runs,
     _query_pr_head_sha,
     close_issue,
     close_pull_request,
-    enable_pull_request_automerge,
     list_issue_comment_bodies,
     memoized_query_issue_body,
     rerun_actions_run,
-    update_pull_request_branch,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -156,6 +158,26 @@ from startupai_controller.domain.models import (
     ReviewSnapshot,
     SchedulingDecision,
 )
+
+# ---------------------------------------------------------------------------
+# Port wiring helpers
+# ---------------------------------------------------------------------------
+
+
+def _default_pr_port(
+    project_owner: str,
+    project_number: int,
+    gh_runner: Callable[..., str] | None = None,
+) -> _PullRequestPort:
+    """Construct a default PullRequestPort adapter from context params."""
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter
+
+    return GitHubCliAdapter(
+        project_owner=project_owner,
+        project_number=project_number,
+        gh_runner=gh_runner,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -3354,12 +3376,15 @@ def _rerun_check_observation(
     *,
     dry_run: bool = False,
     gh_runner: Callable[..., str] | None = None,
+    pr_port: _PullRequestPort | None = None,
 ) -> bool:
     """Rerun a GitHub Actions-backed check when possible."""
     if observation.run_id is None:
         return False
     if dry_run:
         return True
+    if pr_port is not None:
+        return pr_port.rerun_failed_check(pr_repo, observation.name, observation.run_id)
     rerun_actions_run(pr_repo, observation.run_id, gh_runner=gh_runner)
     return True
 
@@ -3441,8 +3466,12 @@ def review_rescue(
     dry_run: bool = False,
     snapshot: ReviewSnapshot | None = None,
     gh_runner: Callable[..., str] | None = None,
+    pr_port: _PullRequestPort | None = None,
 ) -> ReviewRescueResult:
     """Reconcile one PR in Review back toward self-healing merge flow."""
+    if pr_port is None:
+        pr_port = _default_pr_port(project_owner, project_number, gh_runner)
+
     if snapshot is None:
         snapshot = _build_review_snapshot(
             pr_repo=pr_repo,
@@ -3454,7 +3483,7 @@ def review_rescue(
             dry_run=dry_run,
             gh_runner=gh_runner,
         )
-    # Phase 1: Handle cancelled checks (side-effect attempt before policy)
+    # Phase 1: Handle cancelled checks via port
     rerun_checks: list[str] = []
     if snapshot.rescue_cancelled:
         for check_name in sorted(snapshot.rescue_cancelled):
@@ -3462,7 +3491,7 @@ def review_rescue(
             if observation is None:
                 continue
             if _rerun_check_observation(
-                pr_repo, observation, dry_run=dry_run, gh_runner=gh_runner
+                pr_repo, observation, dry_run=dry_run, pr_port=pr_port
             ):
                 rerun_checks.append(check_name)
         if rerun_checks:
@@ -3490,7 +3519,7 @@ def review_rescue(
         auto_merge_enabled=snapshot.gate_status.auto_merge_enabled,
     )
 
-    # Phase 3: Execute the decision
+    # Phase 3: Execute the decision via ports
     if action == "skipped":
         return ReviewRescueResult(
             pr_repo=pr_repo,
@@ -3542,6 +3571,7 @@ def review_rescue(
             dry_run=dry_run,
             snapshot=snapshot,
             gh_runner=gh_runner,
+            pr_port=pr_port,
         )
         return ReviewRescueResult(
             pr_repo=pr_repo,
@@ -3579,8 +3609,11 @@ def review_rescue_all(
     *,
     dry_run: bool = False,
     gh_runner: Callable[..., str] | None = None,
+    pr_port: _PullRequestPort | None = None,
 ) -> ReviewRescueSweep:
     """Run review rescue across all governed repos."""
+    if pr_port is None:
+        pr_port = _default_pr_port(project_owner, project_number, gh_runner)
     repos = _execution_authority_repo_slugs(config, automation_config)
     rerun: list[str] = []
     auto_merge_enabled: list[str] = []
@@ -3601,6 +3634,7 @@ def review_rescue_all(
                 project_number=project_number,
                 dry_run=dry_run,
                 gh_runner=gh_runner,
+                pr_port=pr_port,
             )
             ref = f"{pr_repo}#{pr.number}"
             if result.rerun_checks:
@@ -3643,8 +3677,12 @@ def automerge_review(
     delete_branch: bool = True,
     snapshot: ReviewSnapshot | None = None,
     gh_runner: Callable[..., str] | None = None,
+    pr_port: _PullRequestPort | None = None,
 ) -> tuple[int, str]:
     """Auto-merge PR when codex gate + required checks pass."""
+    if pr_port is None:
+        pr_port = _default_pr_port(project_owner, project_number, gh_runner)
+
     if snapshot is not None:
         review_refs = list(snapshot.review_refs)
         copilot_review_present = snapshot.copilot_review_present
@@ -3686,7 +3724,7 @@ def automerge_review(
             apply_fail_routing=True,
             gh_runner=gh_runner,
         )
-        status = _query_pr_gate_status(pr_repo, pr_number, gh_runner=gh_runner)
+        status = pr_port.get_gate_status(pr_repo, pr_number)
 
     # Domain policy decision
     code, msg, action = automerge_gate_decision(
@@ -3708,11 +3746,11 @@ def automerge_review(
     if action in ("no_op", "already_enabled"):
         return code, msg
 
-    # Execute branch update if needed
+    # Execute branch update via port
     if action == "update_branch_then_enable" and update_branch:
         if dry_run:
             return code, msg
-        update_pull_request_branch(pr_repo, pr_number, gh_runner=gh_runner)
+        pr_port.update_branch(pr_repo, pr_number)
 
     # Post-update mergeable guard (preserves original fallthrough behavior)
     if status.mergeable not in {"MERGEABLE", "UNKNOWN"}:
@@ -3727,11 +3765,11 @@ def automerge_review(
             "(squash, strict gates)"
         )
 
-    merge_status = enable_pull_request_automerge(
+    # Execute automerge via port
+    merge_status = pr_port.enable_automerge(
         pr_repo,
         pr_number,
         delete_branch=delete_branch,
-        gh_runner=gh_runner,
     )
     if merge_status == "confirmed":
         return 0, f"{pr_repo}#{pr_number}: auto-merge enabled (verified)"

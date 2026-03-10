@@ -11,5 +11,7 @@ from __future__ import annotations
 # The actual implementation stays in github_http.py.
 from startupai_controller.github_http import (  # noqa: F401
     GitHubTransportError,
+    begin_request_stats,
+    end_request_stats,
     run_github_command,
 )

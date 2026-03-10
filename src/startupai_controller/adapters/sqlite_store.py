@@ -14,6 +14,12 @@ from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
 if TYPE_CHECKING:
     from startupai_controller.consumer_db import ConsumerDB
 
+# Adapter-internal types re-exported for canonical import paths.
+from startupai_controller.consumer_db import (  # noqa: F401
+    MetricEvent,
+    RecoveredLease,
+)
+
 
 class SqliteSessionStore:
     """Adapter wrapping ConsumerDB behind SessionStorePort.

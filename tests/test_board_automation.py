@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 import startupai_controller.board_automation as automation
+import startupai_controller.board_io as board_io_mod
 from startupai_controller.board_automation import (
     ExecutorRoutingDecision,
     PromotionResult,
@@ -2589,7 +2590,7 @@ def test_automerge_review_blocks_on_pending_required_checks(
         lambda *a, **k: (0, "pass"),
     )
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "_query_pr_gate_status",
         lambda *a, **k: PrGateStatus(
             required={"ci", "db-test-gate"},
@@ -2643,7 +2644,7 @@ def test_automerge_review_dry_run_success(
         lambda *a, **k: (0, "pass"),
     )
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "_query_pr_gate_status",
         lambda *a, **k: PrGateStatus(
             required={"ci"},
@@ -2698,7 +2699,7 @@ def test_automerge_review_updates_branch_then_merges(
         lambda *a, **k: (0, "pass"),
     )
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "_query_pr_gate_status",
         lambda *a, **k: PrGateStatus(
             required={"ci"},
@@ -2716,7 +2717,7 @@ def test_automerge_review_updates_branch_then_merges(
 
     calls: list[tuple[str, int]] = []
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "update_pull_request_branch",
         lambda pr_repo, pr_number, **kwargs: calls.append(("update", pr_number)),
     )
@@ -2725,7 +2726,7 @@ def test_automerge_review_updates_branch_then_merges(
         return "confirmed"
 
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "enable_pull_request_automerge",
         _mock_enable,
     )
@@ -2800,7 +2801,7 @@ def test_automerge_review_noops_when_auto_merge_already_enabled(
         lambda *a, **k: (0, "pass"),
     )
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "_query_pr_gate_status",
         lambda *a, **k: PrGateStatus(
             required={"ci"},
@@ -2890,7 +2891,7 @@ def test_review_rescue_reruns_cancelled_repo_specific_check(
     )
     reruns: list[tuple[str, int]] = []
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "rerun_actions_run",
         lambda pr_repo, run_id, **kwargs: reruns.append((pr_repo, run_id)),
     )
@@ -4086,7 +4087,7 @@ def test_automerge_review_returns_blocked_for_pending(
     )
 
     monkeypatch.setattr(
-        automation,
+        board_io_mod,
         "enable_pull_request_automerge",
         lambda *a, **k: "pending",
     )
