@@ -39,3 +39,13 @@ class PullRequestPort(Protocol):
     def update_branch(self, pr_repo: str, pr_number: int) -> None:
         """Update a PR branch to the latest base branch."""
         ...
+
+    def review_state_digests(
+        self, pr_refs: list[tuple[str, int]]
+    ) -> dict[tuple[str, int], str]:
+        """Return lightweight review-state digests keyed by (repo, pr_number)."""
+        ...
+
+    def post_codex_verdict_if_missing(self, pr_url: str, session_id: str) -> bool:
+        """Post the trusted codex verdict marker if it is not already present."""
+        ...

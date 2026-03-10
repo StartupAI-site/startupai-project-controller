@@ -76,7 +76,6 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     _comment_exists,
     build_cycle_board_snapshot,
     memoized_query_pull_request_view_payloads,
-    memoized_query_pull_request_state_probes,
     memoized_query_required_status_checks,
     _list_project_items_by_status,
     _marker_for,
@@ -89,8 +88,6 @@ from startupai_controller.adapters.github_cli import (  # canonical adapter surf
     enable_pull_request_automerge,
     gh_reason_code,
     rerun_actions_run,
-    review_state_digest_from_payload,
-    review_state_digest_from_probe,
 )
 from startupai_controller.adapters.github_http_adapter import (  # canonical: transport stats
     begin_request_stats,
@@ -101,6 +98,9 @@ from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-i
     MetricEvent,
     RecoveredLease,
 )
+from startupai_controller.adapters.sqlite_store import SqliteSessionStore
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     build_resolution_comment,
@@ -123,7 +123,6 @@ from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
     parse_pr_url as _parse_pr_url,
 )
-from startupai_controller.adapters.sqlite_store import SqliteSessionStore
 from startupai_controller.domain.review_queue_policy import (
     DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
     DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
@@ -2526,7 +2525,7 @@ def _group_review_queue_entries_by_pr(
 
 
 def _repark_unchanged_review_queue_entries(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     *,
     now: datetime,
@@ -2544,7 +2543,7 @@ def _repark_unchanged_review_queue_entries(
         if entry.last_result == "partial_failure":
             retry_seconds = max(DEFAULT_REVIEW_QUEUE_RETRY_SECONDS, retry_seconds)
         _apply_review_queue_result(
-            db,
+            store,
             entry,
             synthetic_result,
             now=now,
@@ -2566,8 +2565,7 @@ def _review_queue_state_probe_candidates(
 def _partition_review_queue_entries_by_probe_change(
     entries: list[ReviewQueueEntry],
     *,
-    github_memo: CycleGitHubMemo,
-    gh_runner: Callable[..., str] | None = None,
+    pr_port: PullRequestPort,
 ) -> tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]:
     """Split queued review entries into changed vs unchanged probe state."""
     unchanged: list[ReviewQueueEntry] = []
@@ -2581,16 +2579,13 @@ def _partition_review_queue_entries_by_probe_change(
             continue
         numbers_by_repo.setdefault(entry.pr_repo, []).append(entry.pr_number)
 
-    digests: dict[tuple[str, int], str] = {}
-    for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
-        probes = memoized_query_pull_request_state_probes(
-            github_memo,
-            pr_repo,
-            tuple(sorted(set(pr_numbers))),
-            gh_runner=gh_runner,
-        )
-        for pr_number, probe in probes.items():
-            digests[(pr_repo, pr_number)] = review_state_digest_from_probe(probe)
+    digests = pr_port.review_state_digests(
+        [
+            (pr_repo, pr_number)
+            for pr_repo, pr_numbers in sorted(numbers_by_repo.items())
+            for pr_number in sorted(set(pr_numbers))
+        ]
+    )
 
     for entry in entries:
         if not (
@@ -2611,12 +2606,11 @@ def _partition_review_queue_entries_by_probe_change(
 
 
 def _wakeup_changed_review_queue_entries(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     *,
     now: datetime,
-    github_memo: CycleGitHubMemo,
-    gh_runner: Callable[..., str] | None = None,
+    pr_port: PullRequestPort,
     dry_run: bool = False,
 ) -> tuple[str, ...]:
     """Promote parked review entries whose lightweight PR state has changed."""
@@ -2629,15 +2623,14 @@ def _wakeup_changed_review_queue_entries(
         return ()
     changed, _unchanged = _partition_review_queue_entries_by_probe_change(
         candidates,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
+        pr_port=pr_port,
     )
     if not changed:
         return ()
     if not dry_run:
         next_attempt_at = now.isoformat()
         for entry in changed:
-            db.reschedule_review_queue_item(
+            store.reschedule_review_queue_item(
                 entry.issue_ref,
                 next_attempt_at=next_attempt_at,
                 now=now,
@@ -2700,10 +2693,11 @@ def _build_review_snapshots_for_queue_entries(
 
 
 def _backfill_review_verdicts_from_snapshots(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     snapshots: dict[tuple[str, int], ReviewSnapshot],
     *,
+    pr_port: PullRequestPort,
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
@@ -2715,9 +2709,9 @@ def _backfill_review_verdicts_from_snapshots(
         if snapshot is None:
             continue
         session = (
-            db.get_session(entry.source_session_id)
+            store.get_session(entry.source_session_id)
             if entry.source_session_id
-            else db.latest_session_for_issue(entry.issue_ref)
+            else store.latest_session_for_issue(entry.issue_ref)
         )
         if session is None:
             continue
@@ -2739,13 +2733,19 @@ def _backfill_review_verdicts_from_snapshots(
         if _marker_already_present(marker, seen_markers):
             continue
         try:
-            posted = _post_pr_codex_verdict(
-                session.pr_url,
-                session.id,
-                comment_checker=lambda *args, **kwargs: False,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
+            if comment_poster is None and gh_runner is None:
+                posted = pr_port.post_codex_verdict_if_missing(
+                    session.pr_url,
+                    session.id,
+                )
+            else:
+                posted = _post_pr_codex_verdict(
+                    session.pr_url,
+                    session.id,
+                    comment_checker=lambda *args, **kwargs: False,
+                    comment_poster=comment_poster,
+                    gh_runner=gh_runner,
+                )
         except (GhQueryError, Exception) as err:
             logger.warning(
                 "Review verdict backfill failed for %s (%s): %s",
@@ -2761,9 +2761,10 @@ def _backfill_review_verdicts_from_snapshots(
 
 
 def _pre_backfill_verdicts_for_due_prs(
-    db: ConsumerDB,
+    store: SessionStorePort,
     due_items: list[ReviewQueueEntry],
     *,
+    pr_port: PullRequestPort | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -2778,9 +2779,9 @@ def _pre_backfill_verdicts_for_due_prs(
             continue
         try:
             session = (
-                db.get_session(entry.source_session_id)
+                store.get_session(entry.source_session_id)
                 if entry.source_session_id
-                else db.latest_session_for_issue(entry.issue_ref)
+                else store.latest_session_for_issue(entry.issue_ref)
             )
             if session is None:
                 continue
@@ -2791,13 +2792,24 @@ def _pre_backfill_verdicts_for_due_prs(
                 entry_pr_url=entry.pr_url,
             ):
                 continue
-            posted = _post_pr_codex_verdict(
-                session.pr_url,
-                session.id,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
+            if (
+                pr_port is not None
+                and comment_checker is None
+                and comment_poster is None
+                and gh_runner is None
+            ):
+                posted = pr_port.post_codex_verdict_if_missing(
+                    session.pr_url,
+                    session.id,
+                )
+            else:
+                posted = _post_pr_codex_verdict(
+                    session.pr_url,
+                    session.id,
+                    comment_checker=comment_checker,
+                    comment_poster=comment_poster,
+                    gh_runner=gh_runner,
+                )
             if posted:
                 backfilled.append(entry.issue_ref)
         except Exception as err:
@@ -2863,7 +2875,7 @@ def _review_queue_retry_seconds_for_partial_failure(
 
 
 def _queue_review_item(
-    db: ConsumerDB,
+    store: SessionStorePort,
     issue_ref: str,
     pr_url: str,
     *,
@@ -2875,7 +2887,7 @@ def _queue_review_item(
     if parsed is None:
         return None
     owner, repo, pr_number = parsed
-    db.enqueue_review_item(
+    store.enqueue_review_item(
         issue_ref,
         pr_url=pr_url,
         pr_repo=f"{owner}/{repo}",
@@ -2884,7 +2896,7 @@ def _queue_review_item(
         next_attempt_at=(now or datetime.now(timezone.utc)).isoformat(),
         now=now,
     )
-    return db.get_review_queue_item(issue_ref)
+    return store.get_review_queue_item(issue_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -2894,7 +2906,7 @@ def _queue_review_item(
 
 
 def _apply_review_queue_result(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entry: ReviewQueueEntry,
     result: Any,
     *,
@@ -2926,7 +2938,7 @@ def _apply_review_queue_result(
         return False
 
     if result.auto_merge_enabled:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="auto_merge_enabled",
@@ -2939,7 +2951,7 @@ def _apply_review_queue_result(
         return False
 
     if result.rerun_checks:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="rerun_checks",
@@ -2957,7 +2969,7 @@ def _apply_review_queue_result(
             entry.blocked_streak,
             entry.blocked_class,
         )
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="blocked",
@@ -2970,7 +2982,7 @@ def _apply_review_queue_result(
         return needs_escalation
 
     if result.skipped_reason:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="skipped",
@@ -2982,7 +2994,7 @@ def _apply_review_queue_result(
         )
         return False
 
-    db.update_review_queue_item(
+    store.update_review_queue_item(
         entry.issue_ref,
         next_attempt_at=next_attempt_at,
         last_result="processed",
@@ -2996,7 +3008,7 @@ def _apply_review_queue_result(
 
 
 def _apply_review_queue_partial_failure(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     *,
     config: ConsumerConfig,
@@ -3012,7 +3024,7 @@ def _apply_review_queue_partial_failure(
         delay_seconds=_review_queue_retry_seconds_for_partial_failure(config, error),
     )
     for entry in entries:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="partial_failure",
@@ -3054,7 +3066,7 @@ def _update_board_snapshot_statuses(
 
 
 def _prune_stale_review_entries(
-    db: ConsumerDB,
+    store: SessionStorePort,
     review_refs: set[str],
     existing_entries: list[ReviewQueueEntry],
     *,
@@ -3066,13 +3078,13 @@ def _prune_stale_review_entries(
         if entry.issue_ref in review_refs:
             continue
         if not dry_run:
-            db.delete_review_queue_item(entry.issue_ref)
+            store.delete_review_queue_item(entry.issue_ref)
         removed.append(entry.issue_ref)
     return removed
 
 
 def _seed_new_review_entries(
-    db: ConsumerDB,
+    store: SessionStorePort,
     review_refs: set[str],
     existing_refs: set[str],
     *,
@@ -3084,12 +3096,12 @@ def _seed_new_review_entries(
     for issue_ref in sorted(review_refs):
         if issue_ref in existing_refs:
             continue
-        latest_session = db.latest_session_for_issue(issue_ref)
+        latest_session = store.latest_session_for_issue(issue_ref)
         if latest_session is None or not latest_session.pr_url:
             continue
         if not dry_run:
             if _queue_review_item(
-                db,
+                store,
                 issue_ref,
                 latest_session.pr_url,
                 session_id=latest_session.id,
@@ -3101,7 +3113,7 @@ def _seed_new_review_entries(
 
 
 def _reconcile_review_queue_identity(
-    db: ConsumerDB,
+    store: SessionStorePort,
     review_refs: set[str],
     *,
     now: datetime | None = None,
@@ -3111,11 +3123,11 @@ def _reconcile_review_queue_identity(
     When the active session's PR URL changes, update the queue entry and
     reset the requeue counter to avoid false escalation.
     """
-    for entry in db.list_review_queue_items():
+    for entry in store.list_review_queue_items():
         if entry.issue_ref not in review_refs:
             continue
         current_pr_url = entry.pr_url
-        latest_session = db.latest_session_for_issue(entry.issue_ref)
+        latest_session = store.latest_session_for_issue(entry.issue_ref)
         if latest_session is not None and latest_session.pr_url:
             current_pr_url = latest_session.pr_url
         if current_pr_url != entry.pr_url:
@@ -3123,7 +3135,7 @@ def _reconcile_review_queue_identity(
             if parsed is None:
                 continue
             owner, repo, pr_number = parsed
-            db.enqueue_review_item(
+            store.enqueue_review_item(
                 entry.issue_ref,
                 pr_url=current_pr_url,
                 pr_repo=f"{owner}/{repo}",
@@ -3134,9 +3146,9 @@ def _reconcile_review_queue_identity(
                 next_attempt_at=entry.next_attempt_at,
                 now=now,
             )
-        _count, stored_pr_url = db.get_requeue_state(entry.issue_ref)
+        _count, stored_pr_url = store.get_requeue_state(entry.issue_ref)
         if stored_pr_url is not None and stored_pr_url != current_pr_url:
-            db.reset_requeue_count(entry.issue_ref)
+            store.reset_requeue_count(entry.issue_ref)
 
 
 def _drain_review_queue(
@@ -3145,7 +3157,7 @@ def _drain_review_queue(
     critical_path_config: CriticalPathConfig,
     automation_config: BoardAutomationConfig | None,
     *,
-    session_store: SqliteSessionStore | None = None,
+    session_store: SessionStorePort | None = None,
     board_snapshot: CycleBoardSnapshot,
     dry_run: bool = False,
     github_memo: CycleGitHubMemo | None = None,
@@ -3168,7 +3180,6 @@ def _drain_review_queue(
     existing_refs = {entry.issue_ref for entry in existing_entries}
 
     # Phase 1: Prune stale entries, seed new ones, reconcile identity
-    # Helpers accept ConsumerDB | SqliteSessionStore (duck typing on shared methods)
     removed = _prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
     seeded = _seed_new_review_entries(store, review_refs, existing_refs, dry_run=dry_run, now=now)
     if not dry_run:
@@ -3188,13 +3199,21 @@ def _drain_review_queue(
             board_snapshot,
         )
     memo = github_memo or CycleGitHubMemo()
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter as _GhCliAdapter
+
+    _drain_pr_port = _GhCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=critical_path_config,
+        github_memo=memo,
+        gh_runner=gh_runner,
+    )
     try:
         _wakeup_changed_review_queue_entries(
-            db,
+            store,
             queue_items,
             now=now,
-            github_memo=memo,
-            gh_runner=gh_runner,
+            pr_port=_drain_pr_port,
             dry_run=dry_run,
         )
     except GhQueryError as err:
@@ -3224,7 +3243,10 @@ def _drain_review_queue(
     pre_backfilled: tuple[str, ...] = ()
     if not dry_run and due_items:
         pre_backfilled = _pre_backfill_verdicts_for_due_prs(
-            db, due_items, gh_runner=gh_runner,
+            store,
+            due_items,
+            pr_port=_drain_pr_port,
+            gh_runner=gh_runner,
         )
 
     verdict_backfilled: tuple[str, ...] = ()
@@ -3242,12 +3264,11 @@ def _drain_review_queue(
         try:
             changed_due_items, unchanged_due_items = _partition_review_queue_entries_by_probe_change(
                 due_items,
-                github_memo=memo,
-                gh_runner=gh_runner,
+                pr_port=_drain_pr_port,
             )
             if unchanged_due_items and not dry_run:
                 _repark_unchanged_review_queue_entries(
-                    db,
+                    store,
                     unchanged_due_items,
                     now=now,
                 )
@@ -3278,22 +3299,16 @@ def _drain_review_queue(
             error = str(err)
         if not dry_run and not partial_failure:
             secondary_backfilled = _backfill_review_verdicts_from_snapshots(
-                db,
+                store,
                 due_items,
                 snapshots,
+                pr_port=_drain_pr_port,
                 gh_runner=gh_runner,
             )
             verdict_backfilled = tuple(
                 dict.fromkeys(pre_backfilled + secondary_backfilled)
             )
 
-    from startupai_controller.adapters.github_cli import GitHubCliAdapter as _GhCliAdapter
-
-    _drain_pr_port = _GhCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
-        gh_runner=gh_runner,
-    )
     for (pr_repo, pr_number), entries in due_pr_groups:
         if partial_failure:
             break
@@ -3321,16 +3336,9 @@ def _drain_review_queue(
             break
 
         if not dry_run:
-            probe = memo.review_state_probes.get((pr_repo, pr_number))
-            if probe is not None:
-                state_digest = review_state_digest_from_probe(probe)
-            else:
-                payload = memo.review_pull_requests.get((pr_repo, pr_number))
-                state_digest = (
-                    review_state_digest_from_payload(payload)
-                    if payload is not None
-                    else None
-                )
+            state_digest = _drain_pr_port.review_state_digests(
+                [(pr_repo, pr_number)]
+            ).get((pr_repo, pr_number))
             for entry in entries:
                 needs_escalation = _apply_review_queue_result(
                     store,
@@ -5183,6 +5191,7 @@ def run_one_cycle(
         _record_metric(db, config, "session_transition_review", issue_ref=candidate)
 
         if session_status == "success":
+            handoff_store = SqliteSessionStore(db)
             try:
                 _post_pr_codex_verdict(
                     pr_url,
@@ -5195,26 +5204,29 @@ def run_one_cycle(
                 _mark_degraded(db, f"verdict-marker:{err}")
                 _queue_verdict_marker(db, pr_url, session_id)
             queue_entry = _queue_review_item(
-                db,
+                handoff_store,
                 candidate,
                 pr_url,
                 session_id=session_id,
             )
             if queue_entry is not None and auto_config is not None:
                 try:
+                    from startupai_controller.adapters.github_cli import GitHubCliAdapter as _GhCliAdapter
+
                     review_memo = CycleGitHubMemo()
+                    handoff_pr_port = _GhCliAdapter(
+                        project_owner=config.project_owner,
+                        project_number=config.project_number,
+                        config=cp_config,
+                        github_memo=review_memo,
+                        gh_runner=gh_runner,
+                    )
                     queue_entries = [
                         entry
-                        for entry in db.list_review_queue_items()
+                        for entry in handoff_store.list_review_queue_items()
                         if entry.pr_repo == queue_entry.pr_repo
                         and entry.pr_number == queue_entry.pr_number
                     ]
-                    memoized_query_pull_request_state_probes(
-                        review_memo,
-                        queue_entry.pr_repo,
-                        (queue_entry.pr_number,),
-                        gh_runner=gh_runner,
-                    )
                     review_snapshots = _build_review_snapshots_for_queue_entries(
                         queue_entries=queue_entries,
                         review_refs={entry.issue_ref for entry in queue_entries},
@@ -5236,23 +5248,12 @@ def run_one_cycle(
                         snapshot=snapshot,
                         gh_runner=gh_runner,
                     )
-                    probe = review_memo.review_state_probes.get(
-                        (queue_entry.pr_repo, queue_entry.pr_number)
-                    )
-                    if probe is not None:
-                        state_digest = review_state_digest_from_probe(probe)
-                    else:
-                        payload = review_memo.review_pull_requests.get(
-                            (queue_entry.pr_repo, queue_entry.pr_number)
-                        )
-                        state_digest = (
-                            review_state_digest_from_payload(payload)
-                            if payload is not None
-                            else None
-                        )
+                    state_digest = handoff_pr_port.review_state_digests(
+                        [(queue_entry.pr_repo, queue_entry.pr_number)]
+                    ).get((queue_entry.pr_repo, queue_entry.pr_number))
                     for entry in queue_entries or [queue_entry]:
                         _apply_review_queue_result(
-                            db,
+                            handoff_store,
                             entry,
                             result,
                             last_state_digest=state_digest,

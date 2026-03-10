@@ -150,3 +150,80 @@ def test_list_issues_by_status_maps_issue_refs_through_config(monkeypatch) -> No
             project_id="PROJ",
         )
     ]
+
+
+def test_review_state_digests_batches_by_repo(monkeypatch) -> None:
+    calls: list[tuple[str, tuple[int, ...]]] = []
+
+    def fake_probes(memo, pr_repo, pr_numbers, *, gh_runner=None):
+        calls.append((pr_repo, pr_numbers))
+        return {
+            number: {"repo": pr_repo, "number": number}
+            for number in pr_numbers
+        }
+
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.memoized_query_pull_request_state_probes",
+        fake_probes,
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.review_state_digest_from_probe",
+        lambda probe: f"{probe['repo']}#{probe['number']}",
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    digests = adapter.review_state_digests(
+        [
+            ("StartupAI-site/startupai-crew", 7),
+            ("StartupAI-site/startupai-crew", 9),
+            ("StartupAI-site/app.startupai.site", 3),
+        ]
+    )
+
+    assert calls == [
+        ("StartupAI-site/app.startupai.site", (3,)),
+        ("StartupAI-site/startupai-crew", (7, 9)),
+    ]
+    assert digests == {
+        ("StartupAI-site/startupai-crew", 7): "StartupAI-site/startupai-crew#7",
+        ("StartupAI-site/startupai-crew", 9): "StartupAI-site/startupai-crew#9",
+        ("StartupAI-site/app.startupai.site", 3): "StartupAI-site/app.startupai.site#3",
+    }
+
+
+def test_post_codex_verdict_if_missing_checks_marker_first(monkeypatch) -> None:
+    checker_calls: list[tuple[str, str, int, str]] = []
+    poster_calls: list[tuple[str, str, int, str]] = []
+
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._comment_exists",
+        lambda owner, repo, number, marker, gh_runner=None: (
+            checker_calls.append((owner, repo, number, marker)) or False
+        ),
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._post_comment",
+        lambda owner, repo, number, body, gh_runner=None: poster_calls.append(
+            (owner, repo, number, body)
+        ),
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    posted = adapter.post_codex_verdict_if_missing(
+        "https://github.com/StartupAI-site/startupai-crew/pull/42",
+        "session-123",
+    )
+
+    assert posted is True
+    assert checker_calls == [
+        (
+            "StartupAI-site",
+            "startupai-crew",
+            42,
+            "<!-- startupai-board-bot:codex-verdict:session=session-123 -->",
+        )
+    ]
+    assert len(poster_calls) == 1
+    assert poster_calls[0][0:3] == ("StartupAI-site", "startupai-crew", 42)
+    assert "<!-- startupai-board-bot:codex-verdict:session=session-123 -->" in poster_calls[0][3]
+    assert "codex-review: pass" in poster_calls[0][3]

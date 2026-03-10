@@ -29,14 +29,19 @@ class SessionStorePort(Protocol):
         pr_url: str,
         pr_repo: str,
         pr_number: int,
-        source_session_id: str,
-        next_attempt_at: datetime,
+        source_session_id: str | None = None,
+        next_attempt_at: str | None = None,
+        now: datetime | None = None,
     ) -> None:
         """Add or update a review queue entry."""
         ...
 
     def latest_session_for_issue(self, issue_ref: str) -> SessionInfo | None:
         """Return the most recent session for an issue, or None."""
+        ...
+
+    def get_session(self, session_id: str) -> SessionInfo | None:
+        """Return a session by id, or None."""
         ...
 
     def get_requeue_state(self, issue_ref: str) -> tuple[int, str | None]:
@@ -66,6 +71,16 @@ class SessionStorePort(Protocol):
         now: datetime | None = None,
     ) -> None:
         """Update a review-queue entry with processing results."""
+        ...
+
+    def reschedule_review_queue_item(
+        self,
+        issue_ref: str,
+        *,
+        next_attempt_at: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Reschedule a review-queue entry without recording a processing attempt."""
         ...
 
     def reset_requeue_count(self, issue_ref: str) -> None:

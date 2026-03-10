@@ -11,6 +11,10 @@ from startupai_controller.domain.models import (
     OpenPullRequest,
     PrGateStatus,
 )
+from startupai_controller.domain.verdict_policy import (
+    verdict_comment_body,
+    verdict_marker_text,
+)
 from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 from startupai_controller.board_io import (  # noqa: F401
@@ -87,11 +91,13 @@ class GitHubCliAdapter:
         project_owner: str,
         project_number: int,
         config: CriticalPathConfig | None = None,
+        github_memo: CycleGitHubMemo | None = None,
         gh_runner: Callable[..., str] | None = None,
     ) -> None:
         self._project_owner = project_owner
         self._project_number = project_number
         self._config = config
+        self._github_memo = github_memo or CycleGitHubMemo()
         self._gh_runner = gh_runner
 
     def _require_config(self) -> CriticalPathConfig:
@@ -180,6 +186,39 @@ class GitHubCliAdapter:
         from startupai_controller.board_io import update_pull_request_branch
 
         update_pull_request_branch(pr_repo, pr_number, gh_runner=self._gh_runner)
+
+    def review_state_digests(
+        self, pr_refs: list[tuple[str, int]]
+    ) -> dict[tuple[str, int], str]:
+        digests: dict[tuple[str, int], str] = {}
+        numbers_by_repo: dict[str, list[int]] = {}
+        for pr_repo, pr_number in pr_refs:
+            numbers_by_repo.setdefault(pr_repo, []).append(pr_number)
+
+        for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
+            probes = memoized_query_pull_request_state_probes(
+                self._github_memo,
+                pr_repo,
+                tuple(sorted(set(pr_numbers))),
+                gh_runner=self._gh_runner,
+            )
+            for pr_number, probe in probes.items():
+                digests[(pr_repo, pr_number)] = review_state_digest_from_probe(probe)
+        return digests
+
+    def post_codex_verdict_if_missing(self, pr_url: str, session_id: str) -> bool:
+        parsed = _parse_pr_url(pr_url)
+        if parsed is None:
+            from startupai_controller.validate_critical_path_promotion import GhQueryError
+
+            raise GhQueryError(f"Invalid PR URL for codex verdict: {pr_url}")
+        owner, repo, pr_number = parsed
+        marker = verdict_marker_text(session_id)
+        if _comment_exists(owner, repo, pr_number, marker, gh_runner=self._gh_runner):
+            return False
+        body = verdict_comment_body(session_id)
+        _post_comment(owner, repo, pr_number, body, gh_runner=self._gh_runner)
+        return True
 
     # -- BoardMutationPort methods --
 

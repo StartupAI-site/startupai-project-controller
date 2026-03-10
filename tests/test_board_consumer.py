@@ -1780,17 +1780,8 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-1",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
         result = run_one_cycle(setup["config"], setup["db"], **{
             k: v for k, v in setup.items()
@@ -1874,17 +1865,8 @@ class TestRunOneCycle:
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-1",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
 
         summary, updated_snapshot = _drain_review_queue(
@@ -1953,17 +1935,8 @@ class TestRunOneCycle:
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-1",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
         rescue_calls: list[tuple[str, int]] = []
         monkeypatch.setattr(
@@ -2366,17 +2339,8 @@ class TestRunOneCycle:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-new",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-new" for pr_ref in pr_refs},
         )
         monkeypatch.setattr(
             "startupai_controller.board_consumer._build_review_snapshots_for_queue_entries",

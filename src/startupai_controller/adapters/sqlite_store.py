@@ -40,8 +40,9 @@ class SqliteSessionStore:
         pr_url: str,
         pr_repo: str,
         pr_number: int,
-        source_session_id: str,
-        next_attempt_at: datetime,
+        source_session_id: str | None = None,
+        next_attempt_at: str | None = None,
+        now: datetime | None = None,
     ) -> None:
         self._db.enqueue_review_item(
             issue_ref=issue_ref,
@@ -49,11 +50,15 @@ class SqliteSessionStore:
             pr_repo=pr_repo,
             pr_number=pr_number,
             source_session_id=source_session_id,
-            next_attempt_at=next_attempt_at.isoformat(),
+            next_attempt_at=next_attempt_at,
+            now=now,
         )
 
     def latest_session_for_issue(self, issue_ref: str) -> SessionInfo | None:
         return self._db.latest_session_for_issue(issue_ref)
+
+    def get_session(self, session_id: str) -> SessionInfo | None:
+        return self._db.get_session(session_id)
 
     def get_requeue_state(self, issue_ref: str) -> tuple[int, str | None]:
         return self._db.get_requeue_state(issue_ref)
@@ -94,6 +99,19 @@ class SqliteSessionStore:
 
     def increment_requeue_count(self, issue_ref: str, pr_url: str) -> int:
         return self._db.increment_requeue_count(issue_ref, pr_url)
+
+    def reschedule_review_queue_item(
+        self,
+        issue_ref: str,
+        *,
+        next_attempt_at: str,
+        now: datetime | None = None,
+    ) -> None:
+        self._db.reschedule_review_queue_item(
+            issue_ref,
+            next_attempt_at=next_attempt_at,
+            now=now,
+        )
 
     def active_workers(self) -> list[SessionInfo]:
         return self._db.active_workers()
