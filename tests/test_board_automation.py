@@ -3192,16 +3192,16 @@ def test_review_rescue_reruns_cancelled_repo_specific_check(
             ),
             "tag-contract": CheckObservation(
                 name="tag-contract",
-                result="pass",
+                result="cancelled",
                 status="completed",
-                conclusion="success",
+                conclusion="cancelled",
                 run_id=101,
             ),
             "codex-review-gate": CheckObservation(
                 name="codex-review-gate",
-                result="cancelled",
+                result="pass",
                 status="completed",
-                conclusion="cancelled",
+                conclusion="success",
                 run_id=202,
             ),
         },
@@ -3211,15 +3211,15 @@ def test_review_rescue_reruns_cancelled_repo_specific_check(
         pr_number=183,
         review_refs=("app#110",),
         gate_status=gate_status,
-        rescue_checks=("ci", "db-test-gate", "e2e", "tag-contract", "codex-review-gate"),
+        rescue_checks=("ci", "db-test-gate", "e2e", "tag-contract"),
         rescue_passed={"ci", "db-test-gate", "e2e", "tag-contract"},
-        rescue_cancelled={"codex-review-gate"},
+        rescue_cancelled={"tag-contract"},
     )
-    reruns: list[tuple[str, int]] = []
-    monkeypatch.setattr(
-        board_io_mod,
-        "rerun_actions_run",
-        lambda pr_repo, run_id, **kwargs: reruns.append((pr_repo, run_id)),
+    reruns: list[tuple[str, str, int]] = []
+    pr_port = _fake_pr_port(
+        rerun_failed_check=lambda pr_repo, check_name, run_id: (
+            reruns.append((pr_repo, check_name, run_id)) or True
+        )
     )
 
     result = review_rescue(
@@ -3230,9 +3230,10 @@ def test_review_rescue_reruns_cancelled_repo_specific_check(
         "StartupAI-site",
         1,
         snapshot=snapshot,
+        pr_port=pr_port,
     )
-    assert result.rerun_checks == ("codex-review-gate",)
-    assert ("StartupAI-site/app.startupai-site", 202) in reruns
+    assert result.rerun_checks == ("tag-contract",)
+    assert ("StartupAI-site/app.startupai-site", "tag-contract", 101) in reruns
     assert result.blocked_reason is None
 
 

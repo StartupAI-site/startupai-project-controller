@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
+import time
 
 from startupai_controller.domain.models import (
     IssueContext,
@@ -68,7 +69,6 @@ from startupai_controller.board_io import (  # noqa: F401
     clear_cycle_board_snapshot_cache,
     close_issue,
     close_pull_request,
-    enable_pull_request_automerge,
     gh_reason_code,
     has_copilot_review_signal_from_payload,
     latest_codex_verdict_from_payload,
@@ -77,12 +77,7 @@ from startupai_controller.board_io import (  # noqa: F401
     memoized_query_pull_request_state_probes,
     memoized_query_pull_request_view_payloads,
     memoized_query_required_status_checks,
-    query_closing_issues,
     query_latest_codex_verdict,
-    query_open_pull_requests,
-    query_pull_request_view_payload,
-    query_required_status_checks,
-    rerun_actions_run,
     review_state_digest_from_payload,
     review_state_digest_from_probe,
 )
@@ -95,6 +90,18 @@ class _BoardItemInfo:
     status: str
     item_id: str
     project_id: str
+
+
+@dataclass(frozen=True)
+class _PullRequestListItem:
+    """Minimal PR list payload used to build OpenPullRequest objects."""
+
+    number: int
+    url: str
+    head_ref_name: str
+    is_draft: bool
+    body: str
+    author: str
 
 
 class GitHubCliAdapter:
@@ -160,6 +167,24 @@ class GitHubCliAdapter:
             joined = "; ".join(messages) if messages else "unknown GraphQL error"
             raise GhQueryError(joined)
         return payload
+
+    def _gh_json(
+        self,
+        args: list[str],
+        *,
+        operation_type: str = "query",
+        error_message: str,
+    ) -> object:
+        """Run gh and parse the JSON payload with adapter-owned error shaping."""
+        output = _run_gh(
+            args,
+            gh_runner=self._gh_runner,
+            operation_type=operation_type,
+        )
+        try:
+            return json.loads(output) if output else None
+        except json.JSONDecodeError as error:
+            raise GhQueryError(error_message) from error
 
     def _issue_ref_from_repo_slug(self, repo_slug: str, issue_number: int) -> str:
         """Map a repo slug + issue number to canonical issue_ref when config is known."""
@@ -233,6 +258,38 @@ query($owner: String!, $repo: String!, $number: Int!) {
                     project_id=str(project.get("id") or ""),
                 )
         return _BoardItemInfo(status="NOT_ON_BOARD", item_id="", project_id="")
+
+    def _pull_request_list_items(self, payload: object) -> list[_PullRequestListItem]:
+        """Normalize gh `pr list` output into typed list items."""
+        results: list[_PullRequestListItem] = []
+        for item in payload or []:
+            if not isinstance(item, dict):
+                continue
+            number = item.get("number")
+            if not isinstance(number, int):
+                continue
+            results.append(
+                _PullRequestListItem(
+                    number=number,
+                    url=str(item.get("url") or ""),
+                    head_ref_name=str(item.get("headRefName") or ""),
+                    is_draft=bool(item.get("isDraft", False)),
+                    body=str(item.get("body") or ""),
+                    author=str(((item.get("author") or {}).get("login") or "")).strip().lower(),
+                )
+            )
+        return results
+
+    def _to_open_pull_request(self, item: _PullRequestListItem) -> OpenPullRequest:
+        """Convert a typed list payload into the domain PR type."""
+        return OpenPullRequest(
+            number=item.number,
+            url=item.url,
+            head_ref_name=item.head_ref_name,
+            is_draft=item.is_draft,
+            body=item.body,
+            author=item.author,
+        )
 
     def _query_project_field_value(self, issue_ref: str, field_name: str) -> str:
         """Read a project field value for a single issue."""
@@ -437,19 +494,171 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $textValue: String!) {
             ],
         )
 
+    def _query_pull_request_view_payload(
+        self,
+        pr_repo: str,
+        pr_number: int,
+    ) -> PullRequestViewPayload:
+        """Return one expanded PR payload directly from gh."""
+        payload = self._gh_json(
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--repo",
+                pr_repo,
+                "--json",
+                (
+                    "author,body,comments,reviews,state,isDraft,mergeStateStatus,"
+                    "mergeable,baseRefName,autoMergeRequest,statusCheckRollup"
+                ),
+            ],
+            error_message=f"Failed querying PR {pr_repo}#{pr_number}: invalid JSON.",
+        )
+        if not isinstance(payload, dict):
+            raise GhQueryError(
+                f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
+            )
+        comments = tuple(
+            item for item in (payload.get("comments", []) or []) if isinstance(item, dict)
+        )
+        reviews = tuple(
+            item for item in (payload.get("reviews", []) or []) if isinstance(item, dict)
+        )
+        status_check_rollup = tuple(
+            item
+            for item in (payload.get("statusCheckRollup", []) or [])
+            if isinstance(item, dict)
+        )
+        return PullRequestViewPayload(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            author=str(((payload.get("author") or {}).get("login") or "")).strip().lower(),
+            body=str(payload.get("body") or ""),
+            state=str(payload.get("state") or ""),
+            is_draft=bool(payload.get("isDraft", False)),
+            merge_state_status=str(payload.get("mergeStateStatus") or ""),
+            mergeable=str(payload.get("mergeable") or ""),
+            base_ref_name=str(payload.get("baseRefName") or "main"),
+            auto_merge_enabled=payload.get("autoMergeRequest") is not None,
+            comments=comments,
+            reviews=reviews,
+            status_check_rollup=status_check_rollup,
+        )
+
+    def _query_closing_issue_refs(self, pr_repo: str, pr_number: int) -> tuple[str, ...]:
+        """Return linked issue refs for one PR using the configured repo-prefix map."""
+        config = self._require_config()
+        pr_owner, pr_repo_name = pr_repo.split("/", maxsplit=1)
+        query = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      closingIssuesReferences(first: 50) {
+        nodes {
+          number
+          repository { nameWithOwner }
+        }
+      }
+    }
+  }
+}
+"""
+        payload = self._graphql(
+            query,
+            fields=[
+                "-f",
+                f"owner={pr_owner}",
+                "-f",
+                f"repo={pr_repo_name}",
+                "-F",
+                f"number={pr_number}",
+            ],
+        )
+        nodes = (
+            payload.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("closingIssuesReferences", {})
+            .get("nodes", [])
+        )
+        refs: list[str] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            issue_number = node.get("number")
+            repo_with_owner = (node.get("repository") or {}).get("nameWithOwner", "")
+            if not issue_number or not repo_with_owner:
+                continue
+            prefix = _repo_to_prefix(repo_with_owner, config)
+            if prefix is None:
+                continue
+            refs.append(f"{prefix}#{issue_number}")
+        return tuple(refs)
+
+    def _query_required_status_checks(
+        self,
+        pr_repo: str,
+        base_ref_name: str = "main",
+    ) -> set[str]:
+        """Query required status checks directly from branch protection."""
+        key = (pr_repo, base_ref_name)
+        cached = self._github_memo.required_status_checks.get(key)
+        if cached is not None:
+            return set(cached)
+        owner, repo = pr_repo.split("/", maxsplit=1)
+        payload = self._gh_json(
+            [
+                "api",
+                f"repos/{owner}/{repo}/branches/{base_ref_name}/protection/required_status_checks",
+            ],
+            error_message=(
+                f"Failed parsing branch protection for {pr_repo}:{base_ref_name}."
+            ),
+        )
+        if not isinstance(payload, dict):
+            raise GhQueryError(
+                f"Failed querying branch protection for {pr_repo}:{base_ref_name}."
+            )
+        required: set[str] = set()
+        for context in payload.get("contexts", []) or []:
+            if isinstance(context, str) and context:
+                required.add(context)
+        for check in payload.get("checks", []) or []:
+            if isinstance(check, dict):
+                name = check.get("context")
+                if isinstance(name, str) and name:
+                    required.add(name)
+        self._github_memo.required_status_checks[key] = set(required)
+        return set(required)
+
 
     # -- PullRequestPort methods --
 
     def list_open_prs(self, repo: str) -> list[OpenPullRequest]:
-        return query_open_pull_requests(repo, gh_runner=self._gh_runner)
+        payload = self._gh_json(
+            [
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                "number,url,headRefName,isDraft,body,author",
+            ],
+            error_message=f"Failed querying open PRs for {repo}: invalid JSON.",
+        )
+        return [
+            self._to_open_pull_request(item)
+            for item in self._pull_request_list_items(payload)
+        ]
 
     def get_pull_request(self, repo: str, number: int) -> OpenPullRequest | None:
         try:
-            payload = query_pull_request_view_payload(
-                repo,
-                number,
-                gh_runner=self._gh_runner,
-            )
+            payload = self._query_pull_request_view_payload(repo, number)
         except Exception:
             return None
         return OpenPullRequest(
@@ -462,45 +671,29 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $textValue: String!) {
         )
 
     def linked_issue_refs(self, pr_repo: str, pr_number: int) -> tuple[str, ...]:
-        config = self._require_config()
-        owner, repo = pr_repo.split("/", maxsplit=1)
-        linked = query_closing_issues(
-            owner,
-            repo,
-            pr_number,
-            config,
-            gh_runner=self._gh_runner,
-        )
-        return tuple(issue.ref for issue in linked)
+        return self._query_closing_issue_refs(pr_repo, pr_number)
 
     def has_copilot_review_signal(self, pr_repo: str, pr_number: int) -> bool:
-        payload = query_pull_request_view_payload(
-            pr_repo,
-            pr_number,
-            gh_runner=self._gh_runner,
-        )
+        payload = self._query_pull_request_view_payload(pr_repo, pr_number)
         return has_copilot_review_signal_from_payload(payload)
 
     def get_gate_status(self, pr_repo: str, pr_number: int) -> PrGateStatus:
-        from startupai_controller.board_io import _query_pr_gate_status
-
-        return _query_pr_gate_status(pr_repo, pr_number, gh_runner=self._gh_runner)
+        payload = self._query_pull_request_view_payload(pr_repo, pr_number)
+        required = self._query_required_status_checks(
+            pr_repo,
+            payload.base_ref_name or "main",
+        )
+        return build_pr_gate_status_from_payload(payload, required=required)
 
     def required_status_checks(
         self, pr_repo: str, base_ref_name: str = "main"
     ) -> set[str]:
-        return query_required_status_checks(
-            pr_repo,
-            base_ref_name,
-            gh_runner=self._gh_runner,
-        )
+        return self._query_required_status_checks(pr_repo, base_ref_name)
 
     def list_open_prs_for_issue(
         self, repo: str, issue_number: int
     ) -> list[OpenPullRequest]:
-        from startupai_controller.board_io import _run_gh
-
-        output = _run_gh(
+        payload = self._gh_json(
             [
                 "pr",
                 "list",
@@ -513,50 +706,67 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $textValue: String!) {
                 "--json",
                 "number,url,headRefName,isDraft,body,author",
             ],
-            gh_runner=self._gh_runner,
+            error_message=f"Failed querying open PRs for {repo}: invalid JSON.",
         )
-        payload = json.loads(output or "[]")
         return [
-            OpenPullRequest(
-                number=int(item.get("number") or 0),
-                url=str(item.get("url") or ""),
-                head_ref_name=str(item.get("headRefName") or ""),
-                is_draft=bool(item.get("isDraft", False)),
-                body=str(item.get("body") or ""),
-                author=str(((item.get("author") or {}).get("login") or "")).strip().lower(),
-            )
-            for item in payload
-            if isinstance(item, dict) and isinstance(item.get("number"), int)
+            self._to_open_pull_request(item)
+            for item in self._pull_request_list_items(payload)
         ]
 
     def enable_automerge(
         self, pr_repo: str, pr_number: int, *, delete_branch: bool = False
     ) -> str:
-        from startupai_controller.board_io import enable_pull_request_automerge
-
-        return enable_pull_request_automerge(
-            pr_repo,
-            pr_number,
-            delete_branch=delete_branch,
+        args = ["pr", "merge", str(pr_number), "--repo", pr_repo, "--auto", "--squash"]
+        if delete_branch:
+            args.append("--delete-branch")
+        _run_gh(
+            args,
             gh_runner=self._gh_runner,
+            operation_type="automerge",
         )
+        for _attempt in range(3):
+            time.sleep(1.0)
+            try:
+                payload = self._gh_json(
+                    [
+                        "pr",
+                        "view",
+                        str(pr_number),
+                        "--repo",
+                        pr_repo,
+                        "--json",
+                        "autoMergeRequest",
+                    ],
+                    error_message=(
+                        f"Failed querying automerge state for {pr_repo}#{pr_number}: invalid JSON."
+                    ),
+                )
+                if isinstance(payload, dict) and payload.get("autoMergeRequest") is not None:
+                    return "confirmed"
+            except GhQueryError:
+                continue
+        return "pending"
 
     def rerun_failed_check(
         self, pr_repo: str, check_name: str, run_id: int
     ) -> bool:
         del check_name  # run id is the actual rerun handle
-        from startupai_controller.board_io import rerun_actions_run
-
         try:
-            rerun_actions_run(pr_repo, run_id, gh_runner=self._gh_runner)
+            _run_gh(
+                ["run", "rerun", str(run_id), "--repo", pr_repo],
+                gh_runner=self._gh_runner,
+                operation_type="check_rerun",
+            )
             return True
         except Exception:
             return False
 
     def update_branch(self, pr_repo: str, pr_number: int) -> None:
-        from startupai_controller.board_io import update_pull_request_branch
-
-        update_pull_request_branch(pr_repo, pr_number, gh_runner=self._gh_runner)
+        _run_gh(
+            ["pr", "update-branch", str(pr_number), "--repo", pr_repo],
+            gh_runner=self._gh_runner,
+            operation_type="mutation",
+        )
 
     def review_state_digests(
         self, pr_refs: list[tuple[str, int]]
@@ -819,6 +1029,143 @@ query($owner: String!, $number: Int!, $cursor: String) {
             handoff_to=field("Handoff To"),
             blocked_reason=field("Blocked Reason"),
         )
+
+
+def query_open_pull_requests(
+    pr_repo: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[OpenPullRequest]:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    return adapter.list_open_prs(pr_repo)
+
+
+def query_pull_request_view_payload(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> PullRequestViewPayload:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    return adapter._query_pull_request_view_payload(pr_repo, pr_number)
+
+
+def query_required_status_checks(
+    pr_repo: str,
+    base_ref_name: str = "main",
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> set[str]:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    return adapter._query_required_status_checks(pr_repo, base_ref_name)
+
+
+def query_closing_issues(
+    pr_owner: str,
+    pr_repo: str,
+    pr_number: int,
+    config: CriticalPathConfig,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[LinkedIssue]:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        config=config,
+        gh_runner=gh_runner,
+    )
+    refs = adapter._query_closing_issue_refs(f"{pr_owner}/{pr_repo}", pr_number)
+    issues: list[LinkedIssue] = []
+    for ref in refs:
+        parsed = parse_issue_ref(ref)
+        repo_slug = config.issue_prefixes.get(parsed.prefix)
+        if not repo_slug:
+            continue
+        owner, repo = repo_slug.split("/", maxsplit=1)
+        issues.append(
+            LinkedIssue(
+                owner=owner,
+                repo=repo,
+                number=parsed.number,
+                ref=ref,
+            )
+        )
+    return issues
+
+
+def rerun_actions_run(
+    pr_repo: str,
+    run_id: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    _run_gh(
+        ["run", "rerun", str(run_id), "--repo", pr_repo],
+        gh_runner=gh_runner,
+        operation_type="check_rerun",
+    )
+
+
+def update_pull_request_branch(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    _run_gh(
+        ["pr", "update-branch", str(pr_number), "--repo", pr_repo],
+        gh_runner=gh_runner,
+        operation_type="mutation",
+    )
+
+
+def enable_pull_request_automerge(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    delete_branch: bool = False,
+    confirm_retries: int = 3,
+    confirm_delay_seconds: float = 1.0,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Compatibility wrapper implemented on the adapter-owned mechanism."""
+    args = ["pr", "merge", str(pr_number), "--repo", pr_repo, "--auto", "--squash"]
+    if delete_branch:
+        args.append("--delete-branch")
+    _run_gh(
+        args,
+        gh_runner=gh_runner,
+        operation_type="automerge",
+    )
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
+    for _attempt in range(confirm_retries):
+        time.sleep(confirm_delay_seconds)
+        try:
+            payload = adapter._gh_json(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--repo",
+                    pr_repo,
+                    "--json",
+                    "autoMergeRequest",
+                ],
+                error_message=(
+                    f"Failed querying automerge state for {pr_repo}#{pr_number}: invalid JSON."
+                ),
+            )
+            if isinstance(payload, dict) and payload.get("autoMergeRequest") is not None:
+                return "confirmed"
+        except GhQueryError:
+            continue
+    return "pending"
 
 
 def _codex_gate_from_payload(

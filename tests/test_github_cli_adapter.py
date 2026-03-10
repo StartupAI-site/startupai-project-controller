@@ -29,7 +29,7 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
             ]
         )
 
-    monkeypatch.setattr("startupai_controller.board_io._run_gh", fake_run_gh)
+    monkeypatch.setattr("startupai_controller.adapters.github_cli._run_gh", fake_run_gh)
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
     prs = adapter.list_open_prs_for_issue("StartupAI-site/startupai-crew", 42)
@@ -48,19 +48,21 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
     assert prs[0].author == "codex"
 
 
-def test_list_open_prs_delegates_to_query_open_pull_requests(monkeypatch) -> None:
+def test_list_open_prs_reads_json_directly(monkeypatch) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.query_open_pull_requests",
-        lambda repo, gh_runner=None: [
-            SimpleNamespace(
-                number=11,
-                url=f"https://example.com/{repo}/11",
-                head_ref_name="feat/example",
-                is_draft=False,
-                body="Closes #11",
-                author="codex",
-            )
-        ],
+        "startupai_controller.adapters.github_cli._run_gh",
+        lambda args, gh_runner=None, operation_type="query": json.dumps(
+            [
+                {
+                    "number": 11,
+                    "url": "https://example.com/pr/11",
+                    "headRefName": "feat/example",
+                    "isDraft": False,
+                    "body": "Closes #11",
+                    "author": {"login": "codex"},
+                }
+            ]
+        ),
     )
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
@@ -73,11 +75,9 @@ def test_list_open_prs_delegates_to_query_open_pull_requests(monkeypatch) -> Non
 
 def test_linked_issue_refs_uses_configured_query(monkeypatch) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.query_closing_issues",
-        lambda owner, repo, pr_number, config, gh_runner=None: [
-            SimpleNamespace(ref="crew#42"),
-            SimpleNamespace(ref="crew#43"),
-        ],
+        GitHubCliAdapter,
+        "_query_closing_issue_refs",
+        lambda self, pr_repo, pr_number: ("crew#42", "crew#43"),
     )
     adapter = GitHubCliAdapter(
         project_owner="StartupAI-site",
@@ -92,8 +92,9 @@ def test_linked_issue_refs_uses_configured_query(monkeypatch) -> None:
 
 def test_has_copilot_review_signal_uses_payload_projection(monkeypatch) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.query_pull_request_view_payload",
-        lambda repo, number, gh_runner=None: {"number": number},
+        GitHubCliAdapter,
+        "_query_pull_request_view_payload",
+        lambda self, repo, number: {"number": number},
     )
     monkeypatch.setattr(
         "startupai_controller.adapters.github_cli.has_copilot_review_signal_from_payload",
@@ -206,8 +207,9 @@ def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
 
 def test_required_status_checks_delegates_to_query(monkeypatch) -> None:
     monkeypatch.setattr(
-        "startupai_controller.adapters.github_cli.query_required_status_checks",
-        lambda pr_repo, base_ref_name, gh_runner=None: {
+        GitHubCliAdapter,
+        "_query_required_status_checks",
+        lambda self, pr_repo, base_ref_name="main": {
             f"{pr_repo}:{base_ref_name}"
         },
     )
