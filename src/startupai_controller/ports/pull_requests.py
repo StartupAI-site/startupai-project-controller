@@ -34,6 +34,12 @@ class PullRequestPort(Protocol):
         """Return the gate readiness snapshot for a PR."""
         ...
 
+    def required_status_checks(
+        self, pr_repo: str, base_ref_name: str = "main"
+    ) -> set[str]:
+        """Return the required status-check contexts for a PR base branch."""
+        ...
+
     def list_open_prs_for_issue(
         self, repo: str, issue_number: int
     ) -> list[OpenPullRequest]:

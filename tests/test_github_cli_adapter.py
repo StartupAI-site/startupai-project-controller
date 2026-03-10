@@ -146,6 +146,49 @@ def test_set_issue_status_uses_board_info_and_field_option(monkeypatch) -> None:
     assert mutate_calls == [("PROJ", "ITEM", "FIELD", "OPT")]
 
 
+def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
+    board_info = BoardInfo(status="Ready", item_id="ITEM", project_id="PROJ")
+    select_calls: list[tuple[str, str, str, str]] = []
+
+    monkeypatch.setattr(
+        GitHubCliAdapter,
+        "_query_board_info",
+        lambda self, issue_ref: board_info,
+    )
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._set_single_select_field",
+        lambda project_id, item_id, field_name, option_name, gh_runner=None: select_calls.append(
+            (project_id, item_id, field_name, option_name)
+        ),
+    )
+    adapter = GitHubCliAdapter(
+        project_owner="StartupAI-site",
+        project_number=1,
+        config=_config(),
+    )
+
+    adapter.set_issue_field("crew#42", "Handoff To", "claude")
+
+    assert select_calls == [("PROJ", "ITEM", "Handoff To", "claude")]
+
+
+def test_required_status_checks_delegates_to_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli.query_required_status_checks",
+        lambda pr_repo, base_ref_name, gh_runner=None: {
+            f"{pr_repo}:{base_ref_name}"
+        },
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    required = adapter.required_status_checks(
+        "StartupAI-site/startupai-crew",
+        "main",
+    )
+
+    assert required == {"StartupAI-site/startupai-crew:main"}
+
+
 def test_get_issue_fields_passes_config_to_field_queries(monkeypatch) -> None:
     calls: list[tuple[str, str, object, str, int]] = []
     values = {

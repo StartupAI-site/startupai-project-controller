@@ -85,6 +85,18 @@ from startupai_controller.board_io import (  # noqa: F401
 class GitHubCliAdapter:
     """Adapter wrapping gh CLI interactions behind port protocols."""
 
+    _SINGLE_SELECT_FIELDS = frozenset(
+        {
+            "Status",
+            "Priority",
+            "Sprint",
+            "Agent",
+            "Executor",
+            "Handoff To",
+            "CI",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -164,6 +176,15 @@ class GitHubCliAdapter:
         from startupai_controller.board_io import _query_pr_gate_status
 
         return _query_pr_gate_status(pr_repo, pr_number, gh_runner=self._gh_runner)
+
+    def required_status_checks(
+        self, pr_repo: str, base_ref_name: str = "main"
+    ) -> set[str]:
+        return query_required_status_checks(
+            pr_repo,
+            base_ref_name,
+            gh_runner=self._gh_runner,
+        )
 
     def list_open_prs_for_issue(
         self, repo: str, issue_number: int
@@ -284,16 +305,23 @@ class GitHubCliAdapter:
         )
 
     def set_issue_field(self, issue_ref: str, field_name: str, value: str) -> None:
-        from startupai_controller.board_io import _set_text_field
-
         info = self._query_board_info(issue_ref)
-        _set_text_field(
-            info.project_id,
-            info.item_id,
-            field_name,
-            value,
-            gh_runner=self._gh_runner,
-        )
+        if field_name in self._SINGLE_SELECT_FIELDS:
+            _set_single_select_field(
+                info.project_id,
+                info.item_id,
+                field_name,
+                value,
+                gh_runner=self._gh_runner,
+            )
+        else:
+            _set_text_field(
+                info.project_id,
+                info.item_id,
+                field_name,
+                value,
+                gh_runner=self._gh_runner,
+            )
 
     def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
         from startupai_controller.board_io import _post_comment

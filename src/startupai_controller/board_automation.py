@@ -681,11 +681,40 @@ def _set_blocked_with_reason(
     project_owner: str,
     project_number: int,
     *,
+    dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set Status=Blocked and Blocked Reason on a board item."""
+    if (
+        board_info_resolver is None
+        and board_mutator is None
+    ) or review_state_port is not None or board_port is not None:
+        review_state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        current_status = review_state_port.get_issue_status(issue_ref)
+        if current_status in {None, "NOT_ON_BOARD"}:
+            raise GhQueryError(f"{issue_ref} is not on the project board.")
+        if dry_run:
+            return
+        if current_status != "Blocked":
+            board_port.set_issue_status(issue_ref, "Blocked")
+        board_port.set_issue_field(issue_ref, "Blocked Reason", reason)
+        return
+
     resolve_info = board_info_resolver or _query_issue_board_info
     info = resolve_info(issue_ref, config, project_owner, project_number)
 
@@ -715,6 +744,58 @@ def _set_blocked_with_reason(
         info.item_id,
         "Blocked Reason",
         reason,
+        gh_runner=gh_runner,
+    )
+
+
+def _transition_issue_status(
+    issue_ref: str,
+    from_statuses: set[str],
+    to_status: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
+    board_info_resolver: Callable[..., BoardInfo] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[bool, str]:
+    """Transition issue status through ports, with legacy fallback for tests."""
+    if (
+        board_info_resolver is None
+        and board_mutator is None
+    ) or review_state_port is not None or board_port is not None:
+        review_state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        old_status = review_state_port.get_issue_status(issue_ref) or "NOT_ON_BOARD"
+        if old_status not in from_statuses:
+            return False, old_status
+        if not dry_run:
+            board_port.set_issue_status(issue_ref, to_status)
+        return True, old_status
+
+    return _set_status_if_changed(
+        issue_ref,
+        from_statuses,
+        to_status,
+        config,
+        project_owner,
+        project_number,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
         gh_runner=gh_runner,
     )
 
@@ -759,19 +840,23 @@ def _apply_codex_fail_routing(
     project_number: int,
     *,
     dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Route failed codex review back to In Progress with explicit handoff."""
-    _changed, old_status = _set_status_if_changed(
+    _changed, old_status = _transition_issue_status(
         issue_ref,
         {"Review"},
         "In Progress",
         config,
         project_owner,
         project_number,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
-        board_mutator=(lambda *_: None) if dry_run else None,
         gh_runner=gh_runner,
     )
 
@@ -779,30 +864,37 @@ def _apply_codex_fail_routing(
         return
 
     if route == "executor":
-        executor = _query_project_item_field(
-            issue_ref,
-            "Executor",
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        ).lower()
+        if review_state_port is not None or board_info_resolver is None:
+            review_state_port = review_state_port or _default_review_state_port(
+                project_owner,
+                project_number,
+                config,
+                gh_runner=gh_runner,
+            )
+            executor = review_state_port.get_issue_fields(issue_ref).executor.lower()
+        else:
+            executor = _query_project_item_field(
+                issue_ref,
+                "Executor",
+                config,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            ).lower()
         handoff_target = executor if executor in VALID_EXECUTORS else "human"
     elif route in VALID_EXECUTORS:
         handoff_target = route
     else:
         handoff_target = "human"
 
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-    if info.status != "NOT_ON_BOARD" and not dry_run:
-        _set_single_select_field(
-            info.project_id,
-            info.item_id,
-            "Handoff To",
-            handoff_target,
+    if not dry_run:
+        board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
             gh_runner=gh_runner,
         )
+        board_port.set_issue_field(issue_ref, "Handoff To", handoff_target)
 
     owner, repo, number = _issue_ref_to_repo_parts(issue_ref, config)
     marker = _marker_for("codex-review-fail", issue_ref)
@@ -823,7 +915,13 @@ def _apply_codex_fail_routing(
         f"{checklist_text}"
     )
     if not dry_run:
-        _post_comment(owner, repo, number, body, gh_runner=gh_runner)
+        board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port.post_issue_comment(f"{owner}/{repo}", number, body)
 
 
 def mark_issues_done(
@@ -832,38 +930,31 @@ def mark_issues_done(
     project_owner: str,
     project_number: int,
     *,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Mark linked issues as Done on the board. Returns list of refs marked Done."""
-    resolve_info = board_info_resolver or _query_issue_board_info
     marked: list[str] = []
 
     for issue in issues:
-        info = resolve_info(issue.ref, config, project_owner, project_number)
-
-        if info.status in ("Done", "NOT_ON_BOARD"):
-            continue
-
-        mutate = board_mutator
-        if mutate is None:
-            field_id, option_id = _query_status_field_option(
-                info.project_id,
-                "Done",
-                gh_runner=gh_runner,
-            )
-            _set_board_status(
-                info.project_id,
-                info.item_id,
-                field_id,
-                option_id,
-                gh_runner=gh_runner,
-            )
-        else:
-            mutate(info.project_id, info.item_id)
-
-        marked.append(issue.ref)
+        changed, old_status = _transition_issue_status(
+            issue.ref,
+            {"Review", "In Progress", "Blocked", "Ready", "Backlog"},
+            "Done",
+            config,
+            project_owner,
+            project_number,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        if changed:
+            marked.append(issue.ref)
 
     return marked
 
@@ -1516,19 +1607,30 @@ def _set_handoff_target(
     project_owner: str,
     project_number: int,
     *,
+    dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    info = _query_issue_board_info(issue_ref, config, project_owner, project_number)
-    if info.status == "NOT_ON_BOARD":
-        return
-    _set_single_select_field(
-        info.project_id,
-        info.item_id,
-        "Handoff To",
-        target,
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
         gh_runner=gh_runner,
     )
+    current_status = review_state_port.get_issue_status(issue_ref)
+    if current_status in {None, "NOT_ON_BOARD"}:
+        return
+    if dry_run:
+        return
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port.set_issue_field(issue_ref, "Handoff To", target)
 
 
 def _apply_prior_resolution_signal(
@@ -1967,6 +2069,7 @@ def _post_claim_comment(
     executor: str,
     config: CriticalPathConfig,
     *,
+    board_port: _BoardMutationPort | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -1979,7 +2082,6 @@ def _post_claim_comment(
     if checker(owner, repo, number, marker, gh_runner=gh_runner):
         return
 
-    poster = comment_poster or _post_comment
     executor_label = f"Executor: `{executor}`" if executor else ""
     body = (
         f"{marker}\n"
@@ -1987,7 +2089,16 @@ def _post_claim_comment(
         "Board transition: `Ready -> In Progress`.\n"
         f"{executor_label}".strip()
     )
-    poster(owner, repo, number, body, gh_runner=gh_runner)
+    if comment_poster is not None:
+        comment_poster(owner, repo, number, body, gh_runner=gh_runner)
+        return
+    board_port = board_port or _default_board_mutation_port(
+        DEFAULT_PROJECT_OWNER,
+        DEFAULT_PROJECT_NUMBER,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port.post_issue_comment(f"{owner}/{repo}", number, body)
 
 
 def schedule_ready_items(
@@ -2951,6 +3062,9 @@ def sync_review_state(
     checks_state: str | None = None,
     failed_checks: list[str] | None = None,
     dry_run: bool = False,
+    pr_port: _PullRequestPort | None = None,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -2968,7 +3082,6 @@ def sync_review_state(
     For checks events: read required checks from branch protection API.
     If branch protection API fails: exit 4, no mutation.
     """
-    noop_mutator = lambda *a: None  # noqa: E731
     governed_single_machine_issue = (
         automation_config is not None
         and automation_config.execution_authority_mode == "single_machine"
@@ -2985,15 +3098,18 @@ def sync_review_state(
         )
 
     elif event_kind == "pr_ready_for_review":
-        changed, old = _set_status_if_changed(
+        changed, old = _transition_issue_status(
             issue_ref,
             {"In Progress"},
             "Review",
             config,
             project_owner,
             project_number,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
-            board_mutator=noop_mutator if dry_run else board_mutator,
+            board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
         if changed:
@@ -3001,15 +3117,18 @@ def sync_review_state(
         return 2, f"{issue_ref}: no change (Status={old})"
 
     elif event_kind == "review_submitted":
-        changed, old = _set_status_if_changed(
+        changed, old = _transition_issue_status(
             issue_ref,
             {"In Progress"},
             "Review",
             config,
             project_owner,
             project_number,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
-            board_mutator=noop_mutator if dry_run else board_mutator,
+            board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
         if changed:
@@ -3021,15 +3140,18 @@ def sync_review_state(
             return 2, (
                 f"{issue_ref}: governed local repair transition deferred to consumer"
             )
-        changed, old = _set_status_if_changed(
+        changed, old = _transition_issue_status(
             issue_ref,
             {"Review"},
             "In Progress",
             config,
             project_owner,
             project_number,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
-            board_mutator=noop_mutator if dry_run else board_mutator,
+            board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
         if changed:
@@ -3044,35 +3166,51 @@ def sync_review_state(
         # Only transition if a *required* check failed.
         # Read required checks from branch protection API.
         owner, repo, _number = _issue_ref_to_repo_parts(issue_ref, config)
-        try:
-            bp_output = _run_gh(
-                [
-                    "api",
-                    f"repos/{owner}/{repo}/branches/main/protection/required_status_checks",
-                ],
+        if pr_port is None and (
+            board_info_resolver is not None or board_mutator is not None
+        ):
+            try:
+                bp_output = _run_gh(
+                    [
+                        "api",
+                        f"repos/{owner}/{repo}/branches/main/protection/required_status_checks",
+                    ],
+                    gh_runner=gh_runner,
+                )
+            except GhQueryError as error:
+                return 4, (
+                    f"Cannot read branch protection for {owner}/{repo}: {error}"
+                )
+            try:
+                bp_data = json.loads(bp_output)
+            except json.JSONDecodeError:
+                return 4, (
+                    f"Cannot parse branch protection response for {owner}/{repo}"
+                )
+
+            required_contexts: set[str] = set()
+            for ctx in bp_data.get("contexts", []):
+                if isinstance(ctx, str):
+                    required_contexts.add(ctx)
+            for check in bp_data.get("checks", []):
+                if isinstance(check, dict) and check.get("context"):
+                    required_contexts.add(check["context"])
+        else:
+            pr_port = pr_port or _default_pr_port(
+                project_owner,
+                project_number,
+                config,
                 gh_runner=gh_runner,
             )
-        except GhQueryError as error:
-            return 4, (
-                f"Cannot read branch protection for {owner}/{repo}: {error}"
-            )
-
-        # Parse required check names from branch protection response
-        try:
-            bp_data = json.loads(bp_output)
-        except json.JSONDecodeError:
-            return 4, (
-                f"Cannot parse branch protection response for {owner}/{repo}"
-            )
-
-        required_contexts: set[str] = set()
-        # GitHub API returns contexts in "contexts" array and/or "checks" array
-        for ctx in bp_data.get("contexts", []):
-            if isinstance(ctx, str):
-                required_contexts.add(ctx)
-        for check in bp_data.get("checks", []):
-            if isinstance(check, dict) and check.get("context"):
-                required_contexts.add(check["context"])
+            try:
+                required_contexts = pr_port.required_status_checks(
+                    f"{owner}/{repo}",
+                    "main",
+                )
+            except GhQueryError as error:
+                return 4, (
+                    f"Cannot read branch protection for {owner}/{repo}: {error}"
+                )
 
         # Filter: only transition if at least one failed check is required
         actual_failed = set(failed_checks) if failed_checks else set()
@@ -3092,15 +3230,18 @@ def sync_review_state(
                 f"({sorted(required_contexts)}) — no board change"
             )
 
-        changed, old = _set_status_if_changed(
+        changed, old = _transition_issue_status(
             issue_ref,
             {"Review"},
             "In Progress",
             config,
             project_owner,
             project_number,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
-            board_mutator=noop_mutator if dry_run else board_mutator,
+            board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
         if changed:
@@ -3114,15 +3255,18 @@ def sync_review_state(
                 f"{issue_ref}: PR merged but checks_state={checks_state}"
             )
 
-        changed, old = _set_status_if_changed(
+        changed, old = _transition_issue_status(
             issue_ref,
             {"Review", "In Progress"},
             "Done",
             config,
             project_owner,
             project_number,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
-            board_mutator=noop_mutator if dry_run else board_mutator,
+            board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
         if changed:

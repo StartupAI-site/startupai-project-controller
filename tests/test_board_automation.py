@@ -136,6 +136,7 @@ def _fake_pr_port(**overrides):
         "get_pull_request": lambda repo, number: None,
         "linked_issue_refs": lambda pr_repo, pr_number: (),
         "has_copilot_review_signal": lambda pr_repo, pr_number: False,
+        "required_status_checks": lambda pr_repo, base_ref_name="main": set(),
         "get_gate_status": lambda pr_repo, pr_number: PrGateStatus(
             required=set(),
             passed=set(),
@@ -160,13 +161,29 @@ def _fake_review_state_port(*, status_by_issue: dict[str, str] | None = None):
     statuses = status_by_issue or {}
     return SimpleNamespace(
         get_issue_status=lambda issue_ref: statuses.get(issue_ref),
+        get_issue_fields=lambda issue_ref: SimpleNamespace(
+            issue_ref=issue_ref,
+            status=statuses.get(issue_ref, ""),
+            priority="P1",
+            sprint="Sprint 1",
+            executor="codex",
+            owner="codex:local-consumer",
+            handoff_to="none",
+            blocked_reason="",
+        ),
     )
 
 
 def _fake_board_port(calls: list[tuple[str, str]] | None = None):
     bucket = calls if calls is not None else []
     return SimpleNamespace(
-        set_issue_status=lambda issue_ref, status: bucket.append((issue_ref, status))
+        set_issue_status=lambda issue_ref, status: bucket.append((issue_ref, status)),
+        set_issue_field=lambda issue_ref, field_name, value: bucket.append(
+            (issue_ref, f"{field_name}={value}")
+        ),
+        post_issue_comment=lambda repo, issue_number, body: bucket.append(
+            (f"{repo}#{issue_number}", body)
+        ),
     )
 
 
@@ -1204,17 +1221,24 @@ def test_admit_backlog_items_blocks_prior_ambiguous_resolution_issue(
     )
     monkeypatch.setattr(
         automation,
-        "_set_single_select_field",
-        lambda _project_id, _item_id, field_name, option_name, **_kwargs: (
-            handoffs.append(option_name)
-            if field_name == "Handoff To"
-            else None
+        "_default_board_mutation_port",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            set_issue_status=lambda issue_ref, status: None,
+            set_issue_field=lambda issue_ref, field_name, value: (
+                handoffs.append(value)
+                if field_name == "Handoff To"
+                else None
+            ),
+            post_issue_comment=lambda repo, issue_number, body: None,
+            close_issue=lambda repo, issue_number: None,
         ),
     )
     monkeypatch.setattr(
         automation,
-        "_query_issue_board_info",
-        lambda *_args, **_kwargs: _make_info("Backlog"),
+        "_default_review_state_port",
+        lambda *_args, **_kwargs: _fake_review_state_port(
+            status_by_issue={"crew#27": "Backlog"}
+        ),
     )
 
     decision = automation.admit_backlog_items(
@@ -1856,6 +1880,30 @@ def test_review_sync_moves_in_progress_to_review_on_review_submitted(
     assert "Review" in msg
 
 
+def test_review_sync_uses_ports_for_status_transition(
+    tmp_path: Path,
+) -> None:
+    """review_submitted transitions through ReviewStatePort + BoardMutationPort."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+
+    code, msg = sync_review_state(
+        "review_submitted",
+        "crew#88",
+        config,
+        "StartupAI-site",
+        1,
+        review_state_port=_fake_review_state_port(
+            status_by_issue={"crew#88": "In Progress"}
+        ),
+        board_port=_fake_board_port(board_calls),
+    )
+
+    assert code == 0
+    assert board_calls == [("crew#88", "Review")]
+    assert "Review" in msg
+
+
 def test_review_sync_moves_in_progress_to_review_on_ready_for_review(
     tmp_path: Path,
 ) -> None:
@@ -2049,6 +2097,34 @@ def test_review_sync_ignores_non_required_check_failure(
     )
     assert code == 2  # No-op: failures are all non-required
     mutator.assert_not_called()
+    assert "non-required" in msg
+
+
+def test_review_sync_checks_failed_uses_pr_port_required_checks(
+    tmp_path: Path,
+) -> None:
+    """checks_failed filters on required checks via PullRequestPort."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+
+    code, msg = sync_review_state(
+        "checks_failed",
+        "crew#88",
+        config,
+        "StartupAI-site",
+        1,
+        failed_checks=["Lint"],
+        pr_port=_fake_pr_port(
+            required_status_checks=lambda pr_repo, base_ref_name="main": {
+                "Unit & Integration Tests"
+            }
+        ),
+        review_state_port=_fake_review_state_port(status_by_issue={"crew#88": "Review"}),
+        board_port=_fake_board_port(board_calls),
+    )
+
+    assert code == 2
+    assert board_calls == []
     assert "non-required" in msg
 
 
@@ -2411,6 +2487,48 @@ def test_claim_comment_no_at_mentions(tmp_path: Path, executor: str) -> None:
     assert "@claude" not in body
     assert "@copilot" not in body
     assert "@codex" not in body
+
+
+def test_claim_comment_uses_board_port_when_no_legacy_poster(
+    tmp_path: Path,
+) -> None:
+    """Claim comments can flow through BoardMutationPort."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+
+    _post_claim_comment(
+        "crew#88",
+        "codex",
+        config,
+        board_port=_fake_board_port(board_calls),
+        comment_checker=lambda *a, **kw: False,
+    )
+
+    assert len(board_calls) == 1
+    target, body = board_calls[0]
+    assert target == "StartupAI-site/startupai-crew#88"
+    assert "Claimed for execution" in body
+
+
+def test_set_blocked_with_reason_uses_ports(tmp_path: Path) -> None:
+    """Blocked transition and reason update can flow through ports."""
+    config = _load(tmp_path)
+    board_calls: list[tuple[str, str]] = []
+
+    automation._set_blocked_with_reason(
+        "crew#88",
+        "dependency-unmet",
+        config,
+        "StartupAI-site",
+        1,
+        review_state_port=_fake_review_state_port(status_by_issue={"crew#88": "Ready"}),
+        board_port=_fake_board_port(board_calls),
+    )
+
+    assert board_calls == [
+        ("crew#88", "Blocked"),
+        ("crew#88", "Blocked Reason=dependency-unmet"),
+    ]
 
 
 def test_stale_escalation_no_at_mentions(tmp_path: Path) -> None:
