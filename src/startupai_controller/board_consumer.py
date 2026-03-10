@@ -340,6 +340,36 @@ class SessionExecutionOutcome:
     done_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class PreparedReviewQueueBatch:
+    """Prepared review-queue workset for one drain cycle."""
+
+    review_refs: frozenset[str]
+    queue_items: tuple[ReviewQueueEntry, ...]
+    due_items: tuple[ReviewQueueEntry, ...]
+    due_pr_groups: tuple[tuple[tuple[str, int], tuple[ReviewQueueEntry, ...]], ...]
+    selected_snapshot_entries: tuple[ReviewQueueEntry, ...]
+    seeded: tuple[str, ...]
+    removed: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReviewQueueProcessingOutcome:
+    """Processed review-queue results for a prepared batch."""
+
+    due_count: int
+    verdict_backfilled: tuple[str, ...]
+    rerun: tuple[str, ...]
+    auto_merge_enabled: tuple[str, ...]
+    requeued: tuple[str, ...]
+    blocked: tuple[str, ...]
+    skipped: tuple[str, ...]
+    escalated: tuple[str, ...]
+    partial_failure: bool
+    error: str | None
+    updated_snapshot: CycleBoardSnapshot
+
+
 # RepairBranchReconcileOutcome: re-exported from domain.models
 # ResolutionEvaluation: re-exported from domain.models
 
@@ -2812,6 +2842,315 @@ def _update_board_snapshot_statuses(
     )
 
 
+def _prepare_review_queue_batch(
+    *,
+    config: ConsumerConfig,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    board_snapshot: CycleBoardSnapshot,
+    pr_port: PullRequestPort,
+    now: datetime,
+    dry_run: bool,
+) -> tuple[PreparedReviewQueueBatch | None, ReviewQueueDrainSummary | None]:
+    """Prepare the bounded review-queue workset for one drain cycle."""
+    review_refs = frozenset(
+        _review_scope_issue_refs(
+            config,
+            critical_path_config,
+            board_snapshot,
+        )
+    )
+    existing_entries = store.list_review_queue_items()
+    existing_refs = {entry.issue_ref for entry in existing_entries}
+
+    removed = tuple(
+        _prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
+    )
+    seeded = tuple(
+        _seed_new_review_entries(
+            store,
+            review_refs,
+            existing_refs,
+            dry_run=dry_run,
+            now=now,
+        )
+    )
+    if not dry_run:
+        _reconcile_review_queue_identity(store, review_refs, now=now)
+
+    queue_items = tuple(
+        entry
+        for entry in store.list_review_queue_items()
+        if entry.issue_ref in review_refs
+    )
+    if not review_refs and not queue_items:
+        return None, ReviewQueueDrainSummary(
+            queued_count=0,
+            due_count=0,
+            removed=removed,
+            skipped=("control-plane:no-review-items",),
+        )
+
+    try:
+        _wakeup_changed_review_queue_entries(
+            store,
+            list(queue_items),
+            now=now,
+            pr_port=pr_port,
+            dry_run=dry_run,
+        )
+    except GhQueryError as err:
+        logger.warning("Review queue wakeup probe failed: %s", err)
+
+    if not dry_run:
+        queue_items = tuple(
+            entry
+            for entry in store.list_review_queue_items()
+            if entry.issue_ref in review_refs
+        )
+
+    queue_pr_groups = dict(_group_review_queue_entries_by_pr(list(queue_items)))
+    due_items = tuple(
+        entry for entry in queue_items if entry.next_attempt_datetime() <= now
+    )
+    due_pr_groups_list = _group_review_queue_entries_by_pr(list(due_items))[
+        :DEFAULT_REVIEW_QUEUE_BATCH_SIZE
+    ]
+    due_items = tuple(
+        entry for _pr_key, entries in due_pr_groups_list for entry in entries
+    )
+    due_pr_keys = {pr_key for pr_key, _entries in due_pr_groups_list}
+    selected_snapshot_entries = tuple(
+        entry
+        for pr_key, entries in queue_pr_groups.items()
+        if pr_key in due_pr_keys
+        for entry in entries
+    )
+
+    return (
+        PreparedReviewQueueBatch(
+            review_refs=review_refs,
+            queue_items=queue_items,
+            due_items=due_items,
+            due_pr_groups=tuple(
+                (pr_key, tuple(entries)) for pr_key, entries in due_pr_groups_list
+            ),
+            selected_snapshot_entries=selected_snapshot_entries,
+            seeded=seeded,
+            removed=removed,
+        ),
+        None,
+    )
+
+
+def _process_review_queue_due_groups(
+    *,
+    config: ConsumerConfig,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    prepared_batch: PreparedReviewQueueBatch,
+    board_snapshot: CycleBoardSnapshot,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None = None,
+) -> ReviewQueueProcessingOutcome:
+    """Process the due PR groups for a prepared review-queue batch."""
+    due_items = list(prepared_batch.due_items)
+    due_pr_groups = [
+        (pr_key, list(entries)) for pr_key, entries in prepared_batch.due_pr_groups
+    ]
+    selected_snapshot_entries = list(prepared_batch.selected_snapshot_entries)
+
+    pre_backfilled: tuple[str, ...] = ()
+    if not dry_run and due_items:
+        pre_backfilled = _pre_backfill_verdicts_for_due_prs(
+            store,
+            due_items,
+            pr_port=pr_port,
+            gh_runner=gh_runner,
+        )
+
+    verdict_backfilled: tuple[str, ...] = ()
+    rerun: list[str] = []
+    auto_merge_enabled: list[str] = []
+    requeued: list[str] = []
+    blocked: list[str] = []
+    skipped: list[str] = []
+    escalated: list[str] = []
+    partial_failure = False
+    error: str | None = None
+    updated_snapshot = board_snapshot
+    snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
+
+    if due_pr_groups:
+        try:
+            changed_due_items, unchanged_due_items = (
+                _partition_review_queue_entries_by_probe_change(
+                    due_items,
+                    pr_port=pr_port,
+                )
+            )
+            if unchanged_due_items and not dry_run:
+                _repark_unchanged_review_queue_entries(
+                    store,
+                    unchanged_due_items,
+                    now=now,
+                )
+            due_pr_keys = {
+                (entry.pr_repo, entry.pr_number) for entry in changed_due_items
+            }
+            due_pr_groups = [
+                (pr_key, entries)
+                for pr_key, entries in due_pr_groups
+                if pr_key in due_pr_keys
+            ]
+            selected_snapshot_entries = [
+                entry
+                for entry in selected_snapshot_entries
+                if (entry.pr_repo, entry.pr_number) in due_pr_keys
+            ]
+            due_items = changed_due_items
+            if due_pr_groups:
+                snapshots = _build_review_snapshots_for_queue_entries(
+                    queue_entries=selected_snapshot_entries,
+                    review_refs=set(prepared_batch.review_refs),
+                    pr_port=pr_port,
+                    trusted_codex_actors=frozenset(
+                        automation_config.trusted_codex_actors
+                    ),
+                )
+        except GhQueryError as err:
+            partial_failure = True
+            error = str(err)
+        if not dry_run and not partial_failure:
+            secondary_backfilled = _backfill_review_verdicts_from_snapshots(
+                store,
+                due_items,
+                snapshots,
+                pr_port=pr_port,
+                gh_runner=gh_runner,
+            )
+            verdict_backfilled = tuple(
+                dict.fromkeys(pre_backfilled + secondary_backfilled)
+            )
+
+    for (pr_repo, pr_number), entries in due_pr_groups:
+        if partial_failure:
+            break
+        snapshot = snapshots.get((pr_repo, pr_number))
+        if snapshot is None:
+            partial_failure = True
+            error = error or f"missing-review-snapshot:{pr_repo}#{pr_number}"
+            break
+        try:
+            result = review_rescue(
+                pr_repo=pr_repo,
+                pr_number=pr_number,
+                config=critical_path_config,
+                automation_config=automation_config,
+                project_owner=config.project_owner,
+                project_number=config.project_number,
+                dry_run=dry_run,
+                snapshot=snapshot,
+                gh_runner=gh_runner,
+                pr_port=pr_port,
+            )
+        except GhQueryError as err:
+            partial_failure = True
+            error = str(err)
+            break
+
+        if not dry_run:
+            state_digest = pr_port.review_state_digests([(pr_repo, pr_number)]).get(
+                (pr_repo, pr_number)
+            )
+            for entry in entries:
+                needs_escalation = _apply_review_queue_result(
+                    store,
+                    entry,
+                    result,
+                    now=now,
+                    last_state_digest=state_digest,
+                )
+                if needs_escalation:
+                    _escalate_to_claude(
+                        entry.issue_ref,
+                        critical_path_config,
+                        config.project_owner,
+                        config.project_number,
+                        reason=f"review queue blocked escalation: {result.blocked_reason}",
+                        gh_runner=gh_runner,
+                    )
+                    store.delete_review_queue_item(entry.issue_ref)
+                    escalated.append(entry.issue_ref)
+        pr_ref = f"{pr_repo}#{pr_number}"
+        if result.rerun_checks:
+            rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
+        elif result.auto_merge_enabled:
+            auto_merge_enabled.append(pr_ref)
+        elif result.requeued_refs:
+            for issue_ref in result.requeued_refs:
+                entry = next((e for e in entries if e.issue_ref == issue_ref), None)
+                pr_url = entry.pr_url if entry is not None else ""
+                requeue_count, _ = store.get_requeue_state(issue_ref)
+                if _requeue_or_escalate(requeue_count) == "escalate":
+                    if not dry_run:
+                        _escalate_to_claude(
+                            issue_ref,
+                            critical_path_config,
+                            config.project_owner,
+                            config.project_number,
+                            reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
+                            f"{result.blocked_reason or 'persistent check failure / conflict'}",
+                            gh_runner=gh_runner,
+                        )
+                        store.delete_review_queue_item(issue_ref)
+                    escalated.append(issue_ref)
+                else:
+                    if not dry_run:
+                        store.increment_requeue_count(issue_ref, pr_url)
+                        store.delete_review_queue_item(issue_ref)
+                    requeued.append(issue_ref)
+            requeued_this_group = [
+                ref for ref in result.requeued_refs if ref not in escalated
+            ]
+            if requeued_this_group:
+                updated_snapshot = _update_board_snapshot_statuses(
+                    updated_snapshot,
+                    critical_path_config,
+                    {ref: "Ready" for ref in requeued_this_group},
+                )
+        elif result.blocked_reason:
+            blocked.append(f"{pr_ref}:{result.blocked_reason}")
+        elif result.skipped_reason:
+            skipped.append(f"{pr_ref}:{result.skipped_reason}")
+
+    if partial_failure and not dry_run:
+        _apply_review_queue_partial_failure(
+            store,
+            due_items,
+            config=config,
+            error=error,
+            now=now,
+        )
+
+    return ReviewQueueProcessingOutcome(
+        due_count=len(due_items),
+        verdict_backfilled=verdict_backfilled,
+        rerun=tuple(rerun),
+        auto_merge_enabled=tuple(auto_merge_enabled),
+        requeued=tuple(requeued),
+        blocked=tuple(blocked),
+        skipped=tuple(skipped),
+        escalated=tuple(escalated),
+        partial_failure=partial_failure,
+        error=error,
+        updated_snapshot=updated_snapshot,
+    )
+
+
 # ---------------------------------------------------------------------------
 # _drain_review_queue sub-functions: focused extraction from god-function
 # ---------------------------------------------------------------------------
@@ -2922,35 +3261,6 @@ def _drain_review_queue(
 
     store = session_store or SqliteSessionStore(db)
     now = datetime.now(timezone.utc)
-    review_refs = set(
-        _review_scope_issue_refs(
-            config,
-            critical_path_config,
-            board_snapshot,
-        )
-    )
-    existing_entries = store.list_review_queue_items()
-    existing_refs = {entry.issue_ref for entry in existing_entries}
-
-    # Phase 1: Prune stale entries, seed new ones, reconcile identity
-    removed = _prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
-    seeded = _seed_new_review_entries(store, review_refs, existing_refs, dry_run=dry_run, now=now)
-    if not dry_run:
-        _reconcile_review_queue_identity(store, review_refs, now=now)
-
-    queue_items = [
-        entry for entry in store.list_review_queue_items() if entry.issue_ref in review_refs
-    ]
-    if not review_refs and not queue_items:
-        return (
-            ReviewQueueDrainSummary(
-                queued_count=0,
-                due_count=0,
-                removed=tuple(removed),
-                skipped=("control-plane:no-review-items",),
-            ),
-            board_snapshot,
-        )
     memo = github_memo or CycleGitHubMemo()
     effective_pr_port = pr_port or GitHubCliAdapter(
         project_owner=config.project_owner,
@@ -2959,223 +3269,49 @@ def _drain_review_queue(
         github_memo=memo,
         gh_runner=gh_runner,
     )
-    try:
-        _wakeup_changed_review_queue_entries(
-            store,
-            queue_items,
-            now=now,
-            pr_port=effective_pr_port,
-            dry_run=dry_run,
-        )
-    except GhQueryError as err:
-        logger.warning("Review queue wakeup probe failed: %s", err)
-        memo = github_memo or CycleGitHubMemo()
-    if not dry_run:
-        queue_items = [
-            entry for entry in store.list_review_queue_items() if entry.issue_ref in review_refs
-        ]
-    queue_pr_groups = dict(_group_review_queue_entries_by_pr(queue_items))
-    due_entries_all = [
-        entry
-        for entry in queue_items
-        if entry.next_attempt_datetime() <= now
-    ]
-    due_pr_groups = _group_review_queue_entries_by_pr(due_entries_all)[
-        :DEFAULT_REVIEW_QUEUE_BATCH_SIZE
-    ]
-    due_items = [entry for _pr_key, entries in due_pr_groups for entry in entries]
-    selected_snapshot_entries = [
-        entry
-        for pr_key, entries in queue_pr_groups.items()
-        if pr_key in {group_key for group_key, _group_entries in due_pr_groups}
-        for entry in entries
-    ]
 
-    pre_backfilled: tuple[str, ...] = ()
-    if not dry_run and due_items:
-        pre_backfilled = _pre_backfill_verdicts_for_due_prs(
-            store,
-            due_items,
-            pr_port=effective_pr_port,
-            gh_runner=gh_runner,
-        )
+    prepared_batch, empty_summary = _prepare_review_queue_batch(
+        config=config,
+        store=store,
+        critical_path_config=critical_path_config,
+        board_snapshot=board_snapshot,
+        pr_port=effective_pr_port,
+        now=now,
+        dry_run=dry_run,
+    )
+    if empty_summary is not None:
+        return empty_summary, board_snapshot
+    assert prepared_batch is not None
 
-    verdict_backfilled: tuple[str, ...] = ()
-    rerun: list[str] = []
-    auto_merge_enabled: list[str] = []
-    requeued: list[str] = []
-    blocked: list[str] = []
-    skipped: list[str] = []
-    escalated: list[str] = []
-    partial_failure = False
-    error: str | None = None
-    updated_snapshot = board_snapshot
-    snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
-    if due_pr_groups:
-        try:
-            changed_due_items, unchanged_due_items = _partition_review_queue_entries_by_probe_change(
-                due_items,
-                pr_port=effective_pr_port,
-            )
-            if unchanged_due_items and not dry_run:
-                _repark_unchanged_review_queue_entries(
-                    store,
-                    unchanged_due_items,
-                    now=now,
-                )
-            due_pr_keys = {
-                (entry.pr_repo, entry.pr_number) for entry in changed_due_items
-            }
-            due_pr_groups = [
-                (pr_key, entries)
-                for pr_key, entries in due_pr_groups
-                if pr_key in due_pr_keys
-            ]
-            selected_snapshot_entries = [
-                entry
-                for entry in selected_snapshot_entries
-                if (entry.pr_repo, entry.pr_number) in due_pr_keys
-            ]
-            due_items = changed_due_items
-            if due_pr_groups:
-                snapshots = _build_review_snapshots_for_queue_entries(
-                    queue_entries=selected_snapshot_entries,
-                    review_refs=review_refs,
-                    pr_port=effective_pr_port,
-                    trusted_codex_actors=frozenset(
-                        automation_config.trusted_codex_actors
-                    ),
-                )
-        except GhQueryError as err:
-            partial_failure = True
-            error = str(err)
-        if not dry_run and not partial_failure:
-            secondary_backfilled = _backfill_review_verdicts_from_snapshots(
-                store,
-                due_items,
-                snapshots,
-                pr_port=effective_pr_port,
-                gh_runner=gh_runner,
-            )
-            verdict_backfilled = tuple(
-                dict.fromkeys(pre_backfilled + secondary_backfilled)
-            )
-
-    for (pr_repo, pr_number), entries in due_pr_groups:
-        if partial_failure:
-            break
-        snapshot = snapshots.get((pr_repo, pr_number))
-        if snapshot is None:
-            partial_failure = True
-            error = error or f"missing-review-snapshot:{pr_repo}#{pr_number}"
-            break
-        try:
-            result = review_rescue(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                config=critical_path_config,
-                automation_config=automation_config,
-                project_owner=config.project_owner,
-                project_number=config.project_number,
-                dry_run=dry_run,
-                snapshot=snapshot,
-                gh_runner=gh_runner,
-                pr_port=effective_pr_port,
-            )
-        except GhQueryError as err:
-            partial_failure = True
-            error = str(err)
-            break
-
-        if not dry_run:
-            state_digest = effective_pr_port.review_state_digests(
-                [(pr_repo, pr_number)]
-            ).get((pr_repo, pr_number))
-            for entry in entries:
-                needs_escalation = _apply_review_queue_result(
-                    store,
-                    entry,
-                    result,
-                    now=now,
-                    last_state_digest=state_digest,
-                )
-                if needs_escalation:
-                    _escalate_to_claude(
-                        entry.issue_ref,
-                        critical_path_config,
-                        config.project_owner,
-                        config.project_number,
-                        reason=f"review queue blocked escalation: "
-                               f"{result.blocked_reason}",
-                        gh_runner=gh_runner,
-                    )
-                    store.delete_review_queue_item(entry.issue_ref)
-                    escalated.append(entry.issue_ref)
-        pr_ref = f"{pr_repo}#{pr_number}"
-        if result.rerun_checks:
-            rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
-        elif result.auto_merge_enabled:
-            auto_merge_enabled.append(pr_ref)
-        elif result.requeued_refs:
-            for issue_ref in result.requeued_refs:
-                entry = next((e for e in entries if e.issue_ref == issue_ref), None)
-                pr_url = entry.pr_url if entry is not None else ""
-                requeue_count, _ = store.get_requeue_state(issue_ref)
-                if _requeue_or_escalate(requeue_count) == "escalate":
-                    if not dry_run:
-                        _escalate_to_claude(
-                            issue_ref,
-                            critical_path_config,
-                            config.project_owner,
-                            config.project_number,
-                            reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
-                                   f"{result.blocked_reason or 'persistent check failure / conflict'}",
-                            gh_runner=gh_runner,
-                        )
-                        store.delete_review_queue_item(issue_ref)
-                    escalated.append(issue_ref)
-                else:
-                    if not dry_run:
-                        store.increment_requeue_count(issue_ref, pr_url)
-                        store.delete_review_queue_item(issue_ref)
-                    requeued.append(issue_ref)
-            requeued_this_group = [r for r in result.requeued_refs if r not in escalated]
-            if requeued_this_group:
-                updated_snapshot = _update_board_snapshot_statuses(
-                    updated_snapshot,
-                    critical_path_config,
-                    {ref: "Ready" for ref in requeued_this_group},
-                )
-        elif result.blocked_reason:
-            blocked.append(f"{pr_ref}:{result.blocked_reason}")
-        elif result.skipped_reason:
-            skipped.append(f"{pr_ref}:{result.skipped_reason}")
-
-    if partial_failure and not dry_run:
-        _apply_review_queue_partial_failure(
-            store,
-            due_items,
-            config=config,
-            error=error,
-            now=now,
-        )
+    processing_outcome = _process_review_queue_due_groups(
+        config=config,
+        store=store,
+        critical_path_config=critical_path_config,
+        automation_config=automation_config,
+        pr_port=effective_pr_port,
+        prepared_batch=prepared_batch,
+        board_snapshot=board_snapshot,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
 
     summary = ReviewQueueDrainSummary(
-        queued_count=len(queue_items),
-        due_count=len(due_items),
-        seeded=tuple(seeded),
-        removed=tuple(removed),
-        verdict_backfilled=verdict_backfilled,
-        rerun=tuple(rerun),
-        auto_merge_enabled=tuple(auto_merge_enabled),
-        requeued=tuple(requeued),
-        blocked=tuple(blocked),
-        skipped=tuple(skipped),
-        escalated=tuple(escalated),
-        partial_failure=partial_failure,
-        error=error,
+        queued_count=len(prepared_batch.queue_items),
+        due_count=processing_outcome.due_count,
+        seeded=prepared_batch.seeded,
+        removed=prepared_batch.removed,
+        verdict_backfilled=processing_outcome.verdict_backfilled,
+        rerun=processing_outcome.rerun,
+        auto_merge_enabled=processing_outcome.auto_merge_enabled,
+        requeued=processing_outcome.requeued,
+        blocked=processing_outcome.blocked,
+        skipped=processing_outcome.skipped,
+        escalated=processing_outcome.escalated,
+        partial_failure=processing_outcome.partial_failure,
+        error=processing_outcome.error,
     )
-    return summary, updated_snapshot
+    return summary, processing_outcome.updated_snapshot
 
 
 def _replay_deferred_actions(
