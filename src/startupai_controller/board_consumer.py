@@ -71,6 +71,7 @@ from startupai_controller.consumer_workflow import (
 from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     CycleBoardSnapshot,
     CycleGitHubMemo,
+    GitHubCliAdapter,
     LinkedIssue,
     _ProjectItemSnapshot,
     _comment_exists,
@@ -93,6 +94,7 @@ from startupai_controller.adapters.github_http_adapter import (  # canonical: tr
     begin_request_stats,
     end_request_stats,
 )
+from startupai_controller.adapters.local_process import LocalProcessAdapter
 from startupai_controller.adapters.sqlite_store import ConsumerDB
 from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-internal types
     MetricEvent,
@@ -100,7 +102,9 @@ from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-i
 )
 from startupai_controller.adapters.sqlite_store import SqliteSessionStore
 from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     build_resolution_comment,
@@ -112,12 +116,14 @@ from startupai_controller.domain.models import (
     ClaimReadyResult,
     CycleResult,
     OpenPullRequestMatch,
+    IssueContext,
     RepairBranchReconcileOutcome,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
     ReviewQueueEntry,
     ReviewSnapshot,
     SessionInfo,
+    WorktreeEntry,
 )
 from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
@@ -1196,33 +1202,17 @@ def _run_workspace_hooks(
     worktree_path: str,
     issue_ref: str,
     branch_name: str,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Run repo-owned workspace hook commands in the claimed worktree."""
-    if not commands:
-        return
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    env = os.environ.copy()
-    env.update(
-        {
-            "STARTUPAI_ISSUE_REF": issue_ref,
-            "STARTUPAI_WORKTREE_PATH": worktree_path,
-            "STARTUPAI_BRANCH_NAME": branch_name,
-        }
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port.run_workspace_hooks(
+        commands,
+        worktree_path=worktree_path,
+        issue_ref=issue_ref,
+        branch_name=branch_name,
     )
-    for command in commands:
-        result = runner(
-            ["bash", "-lc", command],
-            cwd=worktree_path,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                f"workspace hook failed for '{command}' (exit {result.returncode}): {detail}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -1307,24 +1297,22 @@ def _fetch_issue_context(
     repo: str,
     number: int,
     *,
+    issue_context_port: IssueContextPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
-    """Read issue title, body, and labels via gh api."""
-    output = _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}",
-            "--jq",
-            '{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}',
-        ],
+    """Read issue title, body, and labels via the issue-context boundary."""
+    port = issue_context_port or GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
         gh_runner=gh_runner,
     )
-    try:
-        return json.loads(output)
-    except json.JSONDecodeError as err:
-        raise GhQueryError(
-            f"Failed parsing issue context for {owner}/{repo}#{number}"
-        ) from err
+    context = port.get_issue_context(owner, repo, number)
+    return {
+        "title": context.title,
+        "body": context.body,
+        "labels": list(context.labels),
+        "updated_at": context.updated_at,
+    }
 
 
 def _snapshot_for_issue(
@@ -1365,6 +1353,7 @@ def _hydrate_issue_context(
     snapshot: _ProjectItemSnapshot | None,
     config: ConsumerConfig,
     db: ConsumerDB,
+    issue_context_port: IssueContextPort | None = None,
     gh_runner: Callable[..., str] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -1406,7 +1395,13 @@ def _hydrate_issue_context(
         issue_ref=issue_ref,
         now=current,
     )
-    context = _fetch_issue_context(owner, repo, number, gh_runner=gh_runner)
+    context = _fetch_issue_context(
+        owner,
+        repo,
+        number,
+        issue_context_port=issue_context_port,
+        gh_runner=gh_runner,
+    )
     context.setdefault("title", snapshot.title if snapshot is not None else f"issue-{number}")
     context.setdefault("body", "")
     labels = context.get("labels")
@@ -1444,63 +1439,35 @@ def _hydrate_issue_context(
 def _list_repo_worktrees(
     repo_root: Path,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Return (worktree_path, branch_name) pairs for a repo root."""
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    result = runner(
-        ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(_git_command_detail(result))
-
-    records: list[tuple[str, str]] = []
-    path = ""
-    branch = ""
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            if path and branch:
-                records.append((path, branch))
-            path = ""
-            branch = ""
-            continue
-        if line.startswith("worktree "):
-            path = line.split(" ", 1)[1].strip()
-        elif line.startswith("branch "):
-            ref = line.split(" ", 1)[1].strip()
-            branch = ref.removeprefix("refs/heads/")
-    if path and branch:
-        records.append((path, branch))
-    return records
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    return [(entry.path, entry.branch_name) for entry in port.list_worktrees(str(repo_root))]
 
 
 def _worktree_is_clean(
     worktree_path: str,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Return True when a worktree has no local changes."""
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    result = runner(
-        ["git", "-C", worktree_path, "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0 and not result.stdout.strip()
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    return port.is_clean(worktree_path)
 
 
 def _worktree_ownership_is_safe(
-    db: ConsumerDB,
+    store: SessionStorePort,
     issue_ref: str,
     worktree_path: str,
 ) -> bool:
     """Return True when a clean worktree is safe to adopt for an issue."""
-    for worker in db.active_workers():
+    for worker in store.active_workers():
         if worker.worktree_path == worktree_path and worker.issue_ref != issue_ref:
             return False
-    latest = db.latest_session_for_worktree(worktree_path)
+    latest = store.latest_session_for_worktree(worktree_path)
     if latest is None:
         return True
     return latest.issue_ref == issue_ref
@@ -1513,11 +1480,14 @@ def _prepare_worktree(
     db: ConsumerDB,
     *,
     branch_name_override: str | None = None,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
     parsed = parse_issue_ref(issue_ref)
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
+    store = session_store or SqliteSessionStore(db)
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
     if config.worktree_reuse_enabled:
         repo_root = config.repo_roots.get(parsed.prefix)
         if repo_root is None:
@@ -1530,7 +1500,7 @@ def _prepare_worktree(
         try:
             worktree_records = _list_repo_worktrees(
                 repo_root,
-                subprocess_runner=runner,
+                worktree_port=port,
             )
         except RuntimeError as err:
             logger.warning(
@@ -1542,21 +1512,17 @@ def _prepare_worktree(
         for worktree_path, branch_name in worktree_records:
             if branch_name != target_branch:
                 continue
-            if not _worktree_is_clean(worktree_path, subprocess_runner=runner):
+            if not _worktree_is_clean(worktree_path, worktree_port=port):
                 raise WorktreePrepareError(
                     "worktree_in_use",
                     f"existing worktree is dirty for {target_branch}: {worktree_path}",
                 )
-            if not _worktree_ownership_is_safe(db, issue_ref, worktree_path):
+            if not _worktree_ownership_is_safe(store, issue_ref, worktree_path):
                 raise WorktreePrepareError(
                     "worktree_in_use",
                     f"existing worktree ownership is ambiguous for {target_branch}: {worktree_path}",
                 )
-            _fast_forward_existing_worktree(
-                worktree_path,
-                target_branch,
-                subprocess_runner=runner,
-            )
+            port.fast_forward_existing(worktree_path, target_branch)
             _record_metric(
                 db,
                 config,
@@ -1571,7 +1537,8 @@ def _prepare_worktree(
         title,
         config,
         branch_name_override=branch_name_override,
-        subprocess_runner=runner,
+        worktree_port=port,
+        subprocess_runner=subprocess_runner,
     )
 
 
@@ -1586,144 +1553,32 @@ def _create_worktree(
     config: ConsumerConfig,
     *,
     branch_name_override: str | None = None,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create a worktree for the issue. Returns (worktree_path, branch_name).
 
     Shells out to wt-create.sh.
     """
-    parsed = parse_issue_ref(issue_ref)
-    # Slugify title: lowercase, replace non-alnum with hyphen, truncate
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
-    branch = branch_name_override or f"feat/{parsed.number}-{slug}"
-    worktree_branch_arg = branch_name_override or f"feat/{slug}"
-    repo_prefix = parsed.prefix  # "crew"
-    if branch_name_override:
-        expected_worktree_path = os.path.expanduser(
-            f"~/projects/worktrees/{repo_prefix}/{branch_name_override}"
-        )
-    else:
-        expected_worktree_path = os.path.expanduser(
-            f"~/projects/worktrees/{repo_prefix}/feat/{parsed.number}-{slug}"
-        )
-
-    runner = subprocess_runner or (
-        lambda args, **kw: subprocess.run(args, **kw)
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    entry = port.create_issue_worktree(
+        issue_ref,
+        title,
+        branch_name_override=branch_name_override,
     )
-    wt_script = os.path.expanduser(
-        "~/.claude/skills/worktree/scripts/wt-create.sh"
-    )
-    result = runner(
-        [
-            wt_script,
-            repo_prefix,
-            worktree_branch_arg,
-            "--agent",
-            "board-consumer",
-            "--issue",
-            str(parsed.number),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        if (
-            "Worktree already exists at" in result.stderr
-            and os.path.isdir(expected_worktree_path)
-        ):
-            branch_result = runner(
-                ["git", "-C", expected_worktree_path, "branch", "--show-current"],
-                capture_output=True,
-                text=True,
-            )
-            if branch_result.returncode == 0:
-                current_branch = branch_result.stdout.strip()
-                if current_branch == branch:
-                    _fast_forward_existing_worktree(
-                        expected_worktree_path,
-                        branch,
-                        subprocess_runner=runner,
-                    )
-                    return expected_worktree_path, branch
-        raise RuntimeError(
-            f"wt-create.sh failed (exit {result.returncode}): {result.stderr}"
-        )
-
-    # Parse worktree path from output (last line: "Worktree ready: /path")
-    worktree_path = ""
-    for line in result.stdout.splitlines():
-        if line.startswith("Worktree ready:"):
-            worktree_path = line.split(":", 1)[1].strip()
-            break
-
-    if not worktree_path:
-        # Fallback: construct expected path
-        worktree_path = expected_worktree_path
-
-    return worktree_path, branch
+    return entry.path, entry.branch_name
 
 
 def _fast_forward_existing_worktree(
     worktree_path: str,
     branch: str,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    runner = subprocess_runner or (
-        lambda args, **kw: subprocess.run(args, **kw)
-    )
-
-    status_result = runner(
-        ["git", "-C", worktree_path, "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    if status_result.returncode != 0 or status_result.stdout.strip():
-        return
-
-    fetch_result = runner(
-        ["git", "-C", worktree_path, "fetch", "origin", branch],
-        capture_output=True,
-        text=True,
-    )
-    if fetch_result.returncode != 0:
-        return
-
-    counts_result = runner(
-        [
-            "git",
-            "-C",
-            worktree_path,
-            "rev-list",
-            "--left-right",
-            "--count",
-            f"HEAD...origin/{branch}",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if counts_result.returncode != 0:
-        return
-
-    parts = counts_result.stdout.strip().split()
-    if len(parts) != 2:
-        return
-
-    ahead, behind = (int(parts[0]), int(parts[1]))
-    if behind == 0 or ahead != 0:
-        return
-
-    ff_result = runner(
-        ["git", "-C", worktree_path, "merge", "--ff-only", f"origin/{branch}"],
-        capture_output=True,
-        text=True,
-    )
-    if ff_result.returncode != 0:
-        detail = ff_result.stderr.strip() or ff_result.stdout.strip() or "unknown-error"
-        raise RuntimeError(
-            f"existing worktree fast-forward failed for {branch}: {detail}"
-        )
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port.fast_forward_existing(worktree_path, branch)
 
 
 def _git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
@@ -1735,96 +1590,12 @@ def _reconcile_repair_branch(
     worktree_path: str,
     branch: str,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> RepairBranchReconcileOutcome:
     """Reconcile a repair branch against its remote and origin/main."""
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-
-    def run_git(*args: str) -> subprocess.CompletedProcess[str]:
-        return runner(
-            ["git", "-C", worktree_path, *args],
-            capture_output=True,
-            text=True,
-        )
-
-    checkout_result = run_git("checkout", branch)
-    if checkout_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"checkout-branch:{_git_command_detail(checkout_result)}",
-        )
-
-    status_result = run_git("status", "--porcelain")
-    if status_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"status:{_git_command_detail(status_result)}",
-        )
-    if status_result.stdout.strip():
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            "worktree-dirty-before-repair-reconcile",
-        )
-
-    fetch_result = run_git("fetch", "origin", "main", branch)
-    if fetch_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"fetch:{_git_command_detail(fetch_result)}",
-        )
-
-    counts_result = run_git(
-        "rev-list",
-        "--left-right",
-        "--count",
-        f"HEAD...origin/{branch}",
-    )
-    if counts_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"branch-sync:{_git_command_detail(counts_result)}",
-        )
-
-    parts = counts_result.stdout.strip().split()
-    if len(parts) != 2:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"branch-sync:unexpected-rev-list-output:{counts_result.stdout.strip()}",
-        )
-
-    ahead, behind = (int(parts[0]), int(parts[1]))
-    synced_remote_branch = False
-    if ahead > 0 and behind > 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            "repair-branch-diverged-from-origin",
-        )
-    if ahead == 0 and behind > 0:
-        ff_result = run_git("merge", "--ff-only", f"origin/{branch}")
-        if ff_result.returncode != 0:
-            return RepairBranchReconcileOutcome(
-                "reconcile_setup_failed",
-                f"fast-forward-branch:{_git_command_detail(ff_result)}",
-            )
-        synced_remote_branch = True
-
-    merge_main_result = run_git("merge", "--no-edit", "origin/main")
-    if merge_main_result.returncode == 0:
-        detail = _git_command_detail(merge_main_result)
-        if "Already up to date." in detail:
-            return RepairBranchReconcileOutcome(
-                "fast_forwarded_repair_branch" if synced_remote_branch else "up_to_date"
-            )
-        return RepairBranchReconcileOutcome("merged_main")
-
-    merge_head_result = run_git("rev-parse", "-q", "--verify", "MERGE_HEAD")
-    if merge_head_result.returncode == 0:
-        return RepairBranchReconcileOutcome("conflicted_main_merge")
-
-    return RepairBranchReconcileOutcome(
-        "reconcile_setup_failed",
-        f"merge-main:{_git_command_detail(merge_main_result)}",
-    )
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    return port.reconcile_repair_branch(worktree_path, branch)
 
 
 # ---------------------------------------------------------------------------
@@ -2298,41 +2069,26 @@ def _list_open_pr_candidates(
     repo: str,
     issue_number: int,
     *,
+    pr_port: PullRequestPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequestMatch]:
     """Return open PRs that reference an issue number in the repository."""
-    output = _run_gh(
-        [
-            "pr",
-            "list",
-            "--repo",
-            f"{owner}/{repo}",
-            "--state",
-            "open",
-            "--search",
-            f"Closes #{issue_number}",
-            "--json",
-            "number,url,body,author,headRefName",
-        ],
+    port = pr_port or GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
         gh_runner=gh_runner,
     )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as err:
-        raise GhQueryError(
-            f"Failed parsing PR search results for {owner}/{repo}#{issue_number}"
-        ) from err
-
+    payload = port.list_open_prs_for_issue(f"{owner}/{repo}", issue_number)
     matches: list[OpenPullRequestMatch] = []
     for item in payload:
-        body = str(item.get("body") or "")
+        body = item.body
         matches.append(
             OpenPullRequestMatch(
-                url=str(item.get("url") or ""),
-                number=int(item.get("number") or 0),
-                author=str(((item.get("author") or {}).get("login") or "")).strip().lower(),
+                url=item.url,
+                number=item.number,
+                author=item.author,
                 body=body,
-                branch_name=str(item.get("headRefName") or "").strip(),
+                branch_name=item.head_ref_name,
                 provenance=_parse_consumer_provenance(body),
             )
         )
@@ -2347,6 +2103,7 @@ def _classify_open_pr_candidates(
     automation_config: BoardAutomationConfig,
     *,
     expected_branch: str | None = None,
+    pr_port: PullRequestPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, OpenPullRequestMatch | None, str]:
     """Classify open PRs for an issue as adoptable, ambiguous, non-local, or none."""
@@ -2354,6 +2111,7 @@ def _classify_open_pr_candidates(
         owner,
         repo,
         issue_number,
+        pr_port=pr_port,
         gh_runner=gh_runner,
     )
     return _classify_pr_candidates_pure(
@@ -4355,6 +4113,8 @@ def _setup_launch_worktree(
     config: ConsumerConfig,
     cp_config: CriticalPathConfig,
     db: ConsumerDB,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     board_info_resolver: Callable | None = None,
     board_mutator: Callable[..., None] | None = None,
@@ -4372,6 +4132,8 @@ def _setup_launch_worktree(
             config,
             db,
             branch_name_override=repair_branch_name,
+            session_store=session_store,
+            worktree_port=worktree_port,
             subprocess_runner=subprocess_runner,
         )
     except WorktreePrepareError as err:
@@ -4425,6 +4187,7 @@ def _setup_launch_worktree(
         reconcile_outcome = _reconcile_repair_branch(
             worktree_path,
             branch_name,
+            worktree_port=worktree_port,
             subprocess_runner=subprocess_runner,
         )
         branch_reconcile_state = reconcile_outcome.state
@@ -4509,10 +4272,27 @@ def _prepare_launch_candidate(
     board_info_resolver: Callable | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
+    pr_port: PullRequestPort | None = None,
+    issue_context_port: IssueContextPort | None = None,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
 ) -> PreparedLaunchContext:
     """Prepare local launch state for an issue before board claim."""
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
+    store = session_store or SqliteSessionStore(db)
+    effective_pr_port = pr_port or GitHubCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=cp_config,
+        github_memo=prepared.github_memo,
+        gh_runner=gh_runner,
+    )
+    effective_issue_context_port = issue_context_port or effective_pr_port
+    effective_worktree_port = worktree_port or LocalProcessAdapter(
+        subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+    )
     candidate_prefix = parse_issue_ref(issue_ref).prefix
     owner, repo, number = _resolve_issue_coordinates(issue_ref, cp_config)
     snapshot = _snapshot_for_issue(prepared.board_snapshot, issue_ref, cp_config)
@@ -4529,6 +4309,7 @@ def _prepare_launch_candidate(
             repo,
             number,
             auto_config,
+            pr_port=effective_pr_port,
             gh_runner=gh_runner,
         )
         session_kind = _launch_session_kind(classification, pr_match)
@@ -4544,6 +4325,7 @@ def _prepare_launch_candidate(
         snapshot=snapshot,
         config=config,
         db=db,
+        issue_context_port=effective_issue_context_port,
         gh_runner=gh_runner,
     )
     title = str(context.get("title") or (snapshot.title if snapshot is not None else f"issue-{number}"))
@@ -4555,12 +4337,14 @@ def _prepare_launch_candidate(
             title,
             session_kind,
             repair_branch_name,
-            config=config,
-            cp_config=cp_config,
-            db=db,
-            subprocess_runner=subprocess_runner,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        session_store=store,
+        worktree_port=effective_worktree_port,
+        subprocess_runner=subprocess_runner,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
     )
@@ -4578,6 +4362,7 @@ def _prepare_launch_candidate(
         worktree_path=worktree_path,
         issue_ref=issue_ref,
         branch_name=branch_name,
+        worktree_port=effective_worktree_port,
         subprocess_runner=subprocess_runner,
     )
     _run_workspace_hooks(
@@ -4585,6 +4370,7 @@ def _prepare_launch_candidate(
         worktree_path=worktree_path,
         issue_ref=issue_ref,
         branch_name=branch_name,
+        worktree_port=effective_worktree_port,
         subprocess_runner=subprocess_runner,
     )
 

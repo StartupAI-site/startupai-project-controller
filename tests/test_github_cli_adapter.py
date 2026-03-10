@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from startupai_controller.adapters.github_cli import GitHubCliAdapter
 from startupai_controller.board_io import _ProjectItemSnapshot
-from startupai_controller.domain.models import IssueSnapshot
+from startupai_controller.domain.models import IssueContext, IssueSnapshot
 from startupai_controller.promote_ready import BoardInfo
 
 
@@ -144,6 +144,34 @@ def test_set_issue_status_uses_board_info_and_field_option(monkeypatch) -> None:
 
     assert field_calls == [("PROJ", "Blocked")]
     assert mutate_calls == [("PROJ", "ITEM", "FIELD", "OPT")]
+
+
+def test_get_issue_context_returns_typed_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_cli._run_gh",
+        lambda args, gh_runner=None: json.dumps(
+            {
+                "title": "Issue title",
+                "body": "Issue body",
+                "labels": ["bug", "urgent"],
+                "updated_at": "2026-03-10T12:00:00+00:00",
+            }
+        ),
+    )
+    adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
+
+    context = adapter.get_issue_context(
+        "StartupAI-site",
+        "startupai-crew",
+        42,
+    )
+
+    assert context == IssueContext(
+        title="Issue title",
+        body="Issue body",
+        labels=("bug", "urgent"),
+        updated_at="2026-03-10T12:00:00+00:00",
+    )
 
 
 def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:

@@ -116,5 +116,8 @@ class SqliteSessionStore:
     def active_workers(self) -> list[SessionInfo]:
         return self._db.active_workers()
 
+    def latest_session_for_worktree(self, worktree_path: str) -> SessionInfo | None:
+        return self._db.latest_session_for_worktree(worktree_path)
+
     def update_session(self, session_id: str, **fields: Any) -> None:
         self._db.update_session(session_id, **fields)

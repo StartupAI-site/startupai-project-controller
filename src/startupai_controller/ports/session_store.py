@@ -95,6 +95,10 @@ class SessionStorePort(Protocol):
         """Return currently active workers (sessions with active leases)."""
         ...
 
+    def latest_session_for_worktree(self, worktree_path: str) -> SessionInfo | None:
+        """Return the most recent session that used a worktree path."""
+        ...
+
     def update_session(self, session_id: str, **fields: Any) -> None:
         """Update session fields by session_id."""
         ...

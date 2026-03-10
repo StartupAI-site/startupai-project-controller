@@ -6,6 +6,7 @@ from collections.abc import Callable
 import json
 
 from startupai_controller.domain.models import (
+    IssueContext,
     IssueFields,
     IssueSnapshot,
     OpenPullRequest,
@@ -281,6 +282,29 @@ class GitHubCliAdapter:
         body = verdict_comment_body(session_id)
         _post_comment(owner, repo, pr_number, body, gh_runner=self._gh_runner)
         return True
+
+    # -- IssueContextPort methods --
+
+    def get_issue_context(self, owner: str, repo: str, number: int) -> IssueContext:
+        output = _run_gh(
+            [
+                "api",
+                f"repos/{owner}/{repo}/issues/{number}",
+                "--jq",
+                '{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}',
+            ],
+            gh_runner=self._gh_runner,
+        )
+        payload = json.loads(output)
+        labels = payload.get("labels")
+        if not isinstance(labels, list):
+            labels = []
+        return IssueContext(
+            title=str(payload.get("title") or ""),
+            body=str(payload.get("body") or ""),
+            labels=tuple(str(label) for label in labels if str(label)),
+            updated_at=str(payload.get("updated_at") or ""),
+        )
 
     # -- BoardMutationPort methods --
 
