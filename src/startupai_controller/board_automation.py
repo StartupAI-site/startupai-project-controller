@@ -4502,30 +4502,14 @@ def enforce_execution_policy(
 
     decision = ExecutionPolicyDecision()
     owner, repo = pr_repo.split("/", maxsplit=1)
-
-    pr_output = _run_gh(
-        [
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            pr_repo,
-            "--json",
-            "author,state,url,body",
-        ],
+    pr_context = _load_execution_policy_pr_context(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
         gh_runner=gh_runner,
     )
-    try:
-        pr_data = json.loads(pr_output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed parsing PR payload for {pr_repo}#{pr_number}."
-        ) from error
-
-    actor = ((pr_data.get("author") or {}).get("login") or "").strip().lower()
-    state = str(pr_data.get("state") or "").strip().upper()
-    body = str(pr_data.get("body") or "")
-    provenance = _parse_consumer_provenance(body)
+    actor = pr_context.actor
+    state = pr_context.state
+    provenance = pr_context.provenance
     legacy_copilot_only_mode = automation_config is None
 
     if allow_copilot_coding_agent:
@@ -4549,9 +4533,131 @@ def enforce_execution_policy(
         )
 
     noop_mutator = lambda *a: None  # noqa: E731
-    linked = query_closing_issues(
-        owner, repo, pr_number, config, gh_runner=gh_runner
+    linked = query_closing_issues(owner, repo, pr_number, config, gh_runner=gh_runner)
+    protected_linked = _select_execution_policy_issues(
+        linked=linked,
+        automation_config=automation_config,
+        legacy_copilot_only_mode=legacy_copilot_only_mode,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        gh_runner=gh_runner,
     )
+
+    if not protected_linked:
+        decision.skipped_reason = "no-protected-linked-issues"
+        return decision
+
+    valid_provenance_issue = provenance.get("issue_ref") if provenance else None
+    if (
+        provenance is not None
+        and actor in automation_config.trusted_local_authors
+        and any(issue.ref == valid_provenance_issue for issue in protected_linked)
+        ):
+            decision.skipped_reason = "valid-local-pr"
+            return decision
+
+    policy = automation_config.non_local_pr_policy
+    for issue in linked:
+        if issue not in protected_linked:
+            continue
+        _apply_execution_policy_to_issue(
+            issue=issue,
+            policy=policy,
+            decision=decision,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            dry_run=dry_run,
+            pr_url=pr_context.url,
+            board_info_resolver=board_info_resolver,
+            board_mutator=noop_mutator if dry_run else board_mutator,
+            gh_runner=gh_runner,
+        )
+
+    decision.enforced_pr = True
+    _post_execution_policy_pr_comment(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        owner=owner,
+        repo=repo,
+        policy=policy,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+
+    if state == "OPEN" and policy == "close":
+        decision.pr_closed = True
+        if not dry_run:
+            close_pull_request(
+                pr_repo,
+                pr_number,
+                comment=(
+                    "Closed by execution policy: Copilot coding-agent PRs are "
+                    "disabled in the strict execution lane."
+                ),
+                gh_runner=gh_runner,
+            )
+
+    return decision
+
+
+@dataclass(frozen=True)
+class _ExecutionPolicyPrContext:
+    actor: str
+    state: str
+    url: str
+    provenance: dict[str, str] | None
+
+
+def _load_execution_policy_pr_context(
+    *,
+    pr_repo: str,
+    pr_number: int,
+    gh_runner: Callable[..., str] | None,
+) -> _ExecutionPolicyPrContext:
+    """Load the PR context needed for execution policy decisions."""
+    pr_output = _run_gh(
+        [
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            pr_repo,
+            "--json",
+            "author,state,url,body",
+        ],
+        gh_runner=gh_runner,
+    )
+    try:
+        pr_data = json.loads(pr_output)
+    except json.JSONDecodeError as error:
+        raise GhQueryError(
+            f"Failed parsing PR payload for {pr_repo}#{pr_number}."
+        ) from error
+    actor = ((pr_data.get("author") or {}).get("login") or "").strip().lower()
+    state = str(pr_data.get("state") or "").strip().upper()
+    url = str(pr_data.get("url") or "").strip()
+    body = str(pr_data.get("body") or "")
+    return _ExecutionPolicyPrContext(
+        actor=actor,
+        state=state,
+        url=url,
+        provenance=_parse_consumer_provenance(body),
+    )
+
+
+def _select_execution_policy_issues(
+    *,
+    linked: Sequence[LinkedIssue],
+    automation_config: BoardAutomationConfig,
+    legacy_copilot_only_mode: bool,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    gh_runner: Callable[..., str] | None,
+) -> list[LinkedIssue]:
+    """Filter linked issues to the protected execution-policy scope."""
     protected_linked: list[LinkedIssue] = []
     for issue in linked:
         prefix = parse_issue_ref(issue.ref).prefix
@@ -4570,116 +4676,110 @@ def enforce_execution_policy(
         ).strip().lower()
         if executor in automation_config.execution_authority_executors:
             protected_linked.append(issue)
+    return protected_linked
 
-    if not protected_linked:
-        decision.skipped_reason = "no-protected-linked-issues"
-        return decision
 
-    valid_provenance_issue = provenance.get("issue_ref") if provenance else None
-    if (
-        provenance is not None
-        and actor in automation_config.trusted_local_authors
-        and any(issue.ref == valid_provenance_issue for issue in protected_linked)
-    ):
-        decision.skipped_reason = "valid-local-pr"
-        return decision
-
-    policy = automation_config.non_local_pr_policy
-    for issue in linked:
-        if issue not in protected_linked:
-            continue
-        changed, old_status = _set_status_if_changed(
-            issue.ref,
-            {"In Progress", "Review", "Ready"},
-            "Blocked" if policy == "block" else "Ready",
-            config,
-            project_owner,
-            project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=noop_mutator if dry_run else board_mutator,
-            gh_runner=gh_runner,
-        )
-        if changed and policy == "block":
-            decision.blocked.append(issue.ref)
-        elif changed:
-            decision.requeued.append(issue.ref)
-
-        assignees = _query_issue_assignees(
-            issue.owner, issue.repo, issue.number, gh_runner=gh_runner
-        )
-        filtered_assignees = [
-            login for login in assignees if not _is_copilot_coding_agent_actor(login)
-        ]
-        if filtered_assignees != assignees:
-            if not dry_run:
-                _set_issue_assignees(
-                    issue.owner,
-                    issue.repo,
-                    issue.number,
-                    filtered_assignees,
-                    gh_runner=gh_runner,
-                )
-            decision.copilot_unassigned.append(issue.ref)
-
-        marker = _marker_for("execution-policy", issue.ref)
-        if not _comment_exists(
-            issue.owner, issue.repo, issue.number, marker, gh_runner=gh_runner
-        ):
-            policy_message = (
-                "moved this issue to `Blocked`"
-                if policy == "block"
-                else "re-queued this issue to `Ready`"
-            )
-            body = (
-                f"{marker}\n"
-                "Execution policy found a non-local coding PR without valid "
-                f"consumer provenance and {policy_message} "
-                f"(previous status: `{old_status}`).\n"
-                f"PR: {pr_data.get('url')}\n"
-                "Consumer provenance is required for protected coding lanes."
-            )
-            if not dry_run:
-                _post_comment(
-                    issue.owner,
-                    issue.repo,
-                    issue.number,
-                    body,
-                    gh_runner=gh_runner,
-                )
-
-    decision.enforced_pr = True
-    pr_marker = (
-        f"<!-- {MARKER_PREFIX}:execution-policy-pr:{pr_repo}#{pr_number} -->"
+def _apply_execution_policy_to_issue(
+    *,
+    issue: LinkedIssue,
+    policy: str,
+    decision: ExecutionPolicyDecision,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    dry_run: bool,
+    pr_url: str,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Apply the execution policy to one protected linked issue."""
+    changed, old_status = _set_status_if_changed(
+        issue.ref,
+        {"In Progress", "Review", "Ready"},
+        "Blocked" if policy == "block" else "Ready",
+        config,
+        project_owner,
+        project_number,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
     )
-    if not _comment_exists(owner, repo, pr_number, pr_marker, gh_runner=gh_runner):
-        action_text = (
-            "The linked issue has been moved to `Blocked` for operator review."
-            if policy == "block"
-            else "The linked issue has been re-queued for local execution."
-        )
-        pr_body = (
-            f"{pr_marker}\n"
-            "Execution policy rejected this coding PR because it lacks valid local "
-            "consumer provenance for a protected execution lane.\n"
-            f"{action_text}"
-        )
-        if not dry_run:
-            _post_comment(owner, repo, pr_number, pr_body, gh_runner=gh_runner)
+    if changed and policy == "block":
+        decision.blocked.append(issue.ref)
+    elif changed:
+        decision.requeued.append(issue.ref)
 
-    if state == "OPEN" and policy == "close":
-        decision.pr_closed = True
+    assignees = _query_issue_assignees(
+        issue.owner, issue.repo, issue.number, gh_runner=gh_runner
+    )
+    filtered_assignees = [
+        login for login in assignees if not _is_copilot_coding_agent_actor(login)
+    ]
+    if filtered_assignees != assignees:
         if not dry_run:
-            close_pull_request(
-                pr_repo,
-                pr_number,
-                comment=(
-                    "Closed by execution policy: Copilot coding-agent PRs are "
-                    "disabled in the strict execution lane."
-                ),
+            _set_issue_assignees(
+                issue.owner,
+                issue.repo,
+                issue.number,
+                filtered_assignees,
                 gh_runner=gh_runner,
             )
+        decision.copilot_unassigned.append(issue.ref)
 
-    return decision
+    marker = _marker_for("execution-policy", issue.ref)
+    if _comment_exists(issue.owner, issue.repo, issue.number, marker, gh_runner=gh_runner):
+        return
+    policy_message = (
+        "moved this issue to `Blocked`"
+        if policy == "block"
+        else "re-queued this issue to `Ready`"
+    )
+    body = (
+        f"{marker}\n"
+        "Execution policy found a non-local coding PR without valid "
+        f"consumer provenance and {policy_message} "
+        f"(previous status: `{old_status}`).\n"
+        f"PR: {pr_url}\n"
+        "Consumer provenance is required for protected coding lanes."
+    )
+    if not dry_run:
+        _post_comment(
+            issue.owner,
+            issue.repo,
+            issue.number,
+            body,
+            gh_runner=gh_runner,
+        )
+
+
+def _post_execution_policy_pr_comment(
+    *,
+    pr_repo: str,
+    pr_number: int,
+    owner: str,
+    repo: str,
+    policy: str,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Post the top-level execution policy PR comment if absent."""
+    pr_marker = f"<!-- {MARKER_PREFIX}:execution-policy-pr:{pr_repo}#{pr_number} -->"
+    if _comment_exists(owner, repo, pr_number, pr_marker, gh_runner=gh_runner):
+        return
+    action_text = (
+        "The linked issue has been moved to `Blocked` for operator review."
+        if policy == "block"
+        else "The linked issue has been re-queued for local execution."
+    )
+    pr_body = (
+        f"{pr_marker}\n"
+        "Execution policy rejected this coding PR because it lacks valid local "
+        "consumer provenance for a protected execution lane.\n"
+        f"{action_text}"
+    )
+    if not dry_run:
+        _post_comment(owner, repo, pr_number, pr_body, gh_runner=gh_runner)
 
 
 # ---------------------------------------------------------------------------
