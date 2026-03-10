@@ -3456,6 +3456,159 @@ def resolve_pr_to_issues(
     return [issue.ref for issue in linked]
 
 
+def _sync_review_transition(
+    issue_ref: str,
+    from_statuses: set[str],
+    target_status: str,
+    reason: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
+    board_info_resolver: Callable[..., BoardInfo] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[int, str]:
+    """Apply one review-state transition and format the result."""
+    changed, old = _transition_issue_status(
+        issue_ref,
+        from_statuses,
+        target_status,
+        config,
+        project_owner,
+        project_number,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    if changed:
+        return 0, f"{issue_ref}: {old} -> {target_status} ({reason})"
+    return 2, f"{issue_ref}: no change (Status={old})"
+
+
+def _required_review_check_contexts(
+    issue_ref: str,
+    config: CriticalPathConfig,
+    *,
+    project_owner: str,
+    project_number: int,
+    pr_port: _PullRequestPort | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> set[str] | tuple[int, str]:
+    """Return required status-check contexts for the issue repo."""
+    owner, repo, _number = _issue_ref_to_repo_parts(issue_ref, config)
+    if pr_port is None and (
+        board_info_resolver is not None or board_mutator is not None
+    ):
+        try:
+            bp_output = _run_gh(
+                [
+                    "api",
+                    f"repos/{owner}/{repo}/branches/main/protection/required_status_checks",
+                ],
+                gh_runner=gh_runner,
+            )
+        except GhQueryError as error:
+            return 4, f"Cannot read branch protection for {owner}/{repo}: {error}"
+        try:
+            bp_data = json.loads(bp_output)
+        except json.JSONDecodeError:
+            return 4, f"Cannot parse branch protection response for {owner}/{repo}"
+
+        required_contexts: set[str] = set()
+        for ctx in bp_data.get("contexts", []):
+            if isinstance(ctx, str):
+                required_contexts.add(ctx)
+        for check in bp_data.get("checks", []):
+            if isinstance(check, dict) and check.get("context"):
+                required_contexts.add(check["context"])
+        return required_contexts
+
+    pr_port = pr_port or _default_pr_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    try:
+        return pr_port.required_status_checks(f"{owner}/{repo}", "main")
+    except GhQueryError as error:
+        return 4, f"Cannot read branch protection for {owner}/{repo}: {error}"
+
+
+def _handle_checks_failed_sync_event(
+    issue_ref: str,
+    *,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    governed_single_machine_issue: bool,
+    failed_checks: list[str] | None,
+    dry_run: bool,
+    pr_port: _PullRequestPort | None,
+    review_state_port: _ReviewStatePort | None,
+    board_port: _BoardMutationPort | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[int, str]:
+    """Handle checks_failed state sync for one issue."""
+    if governed_single_machine_issue:
+        return 2, f"{issue_ref}: governed local repair transition deferred to consumer"
+
+    required_contexts = _required_review_check_contexts(
+        issue_ref,
+        config,
+        project_owner=project_owner,
+        project_number=project_number,
+        pr_port=pr_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    if isinstance(required_contexts, tuple):
+        return required_contexts
+
+    actual_failed = set(failed_checks) if failed_checks else set()
+    if required_contexts and actual_failed:
+        required_failures = actual_failed & required_contexts
+        if not required_failures:
+            return 2, (
+                f"{issue_ref}: check failures are non-required, "
+                f"no board change (failed: {sorted(actual_failed)})"
+            )
+    elif required_contexts and not actual_failed:
+        return 2, (
+            f"{issue_ref}: checks_failed but no failed check names "
+            f"provided; cannot filter by required checks "
+            f"({sorted(required_contexts)}) — no board change"
+        )
+
+    return _sync_review_transition(
+        issue_ref,
+        {"Review"},
+        "In Progress",
+        "required check failed",
+        config,
+        project_owner,
+        project_number,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+
+
 def sync_review_state(
     event_kind: str,
     issue_ref: str,
@@ -3504,11 +3657,12 @@ def sync_review_state(
             "waiting for review signal"
         )
 
-    elif event_kind == "pr_ready_for_review":
-        changed, old = _transition_issue_status(
+    if event_kind == "pr_ready_for_review":
+        return _sync_review_transition(
             issue_ref,
             {"In Progress"},
             "Review",
+            "PR ready for review",
             config,
             project_owner,
             project_number,
@@ -3519,15 +3673,13 @@ def sync_review_state(
             board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
-        if changed:
-            return 0, f"{issue_ref}: {old} -> Review (PR ready for review)"
-        return 2, f"{issue_ref}: no change (Status={old})"
 
-    elif event_kind == "review_submitted":
-        changed, old = _transition_issue_status(
+    if event_kind == "review_submitted":
+        return _sync_review_transition(
             issue_ref,
             {"In Progress"},
             "Review",
+            "review submitted",
             config,
             project_owner,
             project_number,
@@ -3538,19 +3690,15 @@ def sync_review_state(
             board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
-        if changed:
-            return 0, f"{issue_ref}: {old} -> Review (review submitted)"
-        return 2, f"{issue_ref}: no change (Status={old})"
 
-    elif event_kind == "changes_requested":
+    if event_kind == "changes_requested":
         if governed_single_machine_issue:
-            return 2, (
-                f"{issue_ref}: governed local repair transition deferred to consumer"
-            )
-        changed, old = _transition_issue_status(
+            return 2, f"{issue_ref}: governed local repair transition deferred to consumer"
+        return _sync_review_transition(
             issue_ref,
             {"Review"},
             "In Progress",
+            "changes requested",
             config,
             project_owner,
             project_number,
@@ -3561,111 +3709,34 @@ def sync_review_state(
             board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
-        if changed:
-            return 0, f"{issue_ref}: {old} -> In Progress (changes requested)"
-        return 2, f"{issue_ref}: no change (Status={old})"
 
-    elif event_kind == "checks_failed":
-        if governed_single_machine_issue:
-            return 2, (
-                f"{issue_ref}: governed local repair transition deferred to consumer"
-            )
-        # Only transition if a *required* check failed.
-        # Read required checks from branch protection API.
-        owner, repo, _number = _issue_ref_to_repo_parts(issue_ref, config)
-        if pr_port is None and (
-            board_info_resolver is not None or board_mutator is not None
-        ):
-            try:
-                bp_output = _run_gh(
-                    [
-                        "api",
-                        f"repos/{owner}/{repo}/branches/main/protection/required_status_checks",
-                    ],
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError as error:
-                return 4, (
-                    f"Cannot read branch protection for {owner}/{repo}: {error}"
-                )
-            try:
-                bp_data = json.loads(bp_output)
-            except json.JSONDecodeError:
-                return 4, (
-                    f"Cannot parse branch protection response for {owner}/{repo}"
-                )
-
-            required_contexts: set[str] = set()
-            for ctx in bp_data.get("contexts", []):
-                if isinstance(ctx, str):
-                    required_contexts.add(ctx)
-            for check in bp_data.get("checks", []):
-                if isinstance(check, dict) and check.get("context"):
-                    required_contexts.add(check["context"])
-        else:
-            pr_port = pr_port or _default_pr_port(
-                project_owner,
-                project_number,
-                config,
-                gh_runner=gh_runner,
-            )
-            try:
-                required_contexts = pr_port.required_status_checks(
-                    f"{owner}/{repo}",
-                    "main",
-                )
-            except GhQueryError as error:
-                return 4, (
-                    f"Cannot read branch protection for {owner}/{repo}: {error}"
-                )
-
-        # Filter: only transition if at least one failed check is required
-        actual_failed = set(failed_checks) if failed_checks else set()
-        if required_contexts and actual_failed:
-            required_failures = actual_failed & required_contexts
-            if not required_failures:
-                return 2, (
-                    f"{issue_ref}: check failures are non-required, "
-                    f"no board change (failed: {sorted(actual_failed)})"
-                )
-        elif required_contexts and not actual_failed:
-            # Cannot determine which checks failed — refuse to transition
-            # to avoid board regression from non-required failures.
-            return 2, (
-                f"{issue_ref}: checks_failed but no failed check names "
-                f"provided; cannot filter by required checks "
-                f"({sorted(required_contexts)}) — no board change"
-            )
-
-        changed, old = _transition_issue_status(
+    if event_kind == "checks_failed":
+        return _handle_checks_failed_sync_event(
             issue_ref,
-            {"Review"},
-            "In Progress",
-            config,
-            project_owner,
-            project_number,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            governed_single_machine_issue=governed_single_machine_issue,
+            failed_checks=failed_checks,
             dry_run=dry_run,
+            pr_port=pr_port,
             review_state_port=review_state_port,
             board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
-        if changed:
-            return 0, f"{issue_ref}: {old} -> In Progress (required check failed)"
-        return 2, f"{issue_ref}: no change (Status={old})"
 
-    elif event_kind == "pr_close_merged":
+    if event_kind == "pr_close_merged":
         # Merged PR with passing checks -> Done
         if checks_state and checks_state != "passed":
-            return 2, (
-                f"{issue_ref}: PR merged but checks_state={checks_state}"
-            )
+            return 2, f"{issue_ref}: PR merged but checks_state={checks_state}"
 
-        changed, old = _transition_issue_status(
+        return _sync_review_transition(
             issue_ref,
             {"Review", "In Progress"},
             "Done",
+            "PR merged",
             config,
             project_owner,
             project_number,
@@ -3676,18 +3747,12 @@ def sync_review_state(
             board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
-        if changed:
-            return 0, f"{issue_ref}: {old} -> Done (PR merged)"
-        return 2, f"{issue_ref}: no change (Status={old})"
 
-    elif event_kind == "checks_passed":
+    if event_kind == "checks_passed":
         # Checks passed alone doesn't change state unless combined with merge
-        return 2, (
-            f"{issue_ref}: checks_passed (no state change without merge)"
-        )
+        return 2, f"{issue_ref}: checks_passed (no state change without merge)"
 
-    else:
-        return 2, f"{issue_ref}: unknown event_kind '{event_kind}'"
+    return 2, f"{issue_ref}: unknown event_kind '{event_kind}'"
 
 
 # ---------------------------------------------------------------------------
