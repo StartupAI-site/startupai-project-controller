@@ -2323,37 +2323,24 @@ def _post_claim_comment(
     board_port.post_issue_comment(f"{owner}/{repo}", number, body)
 
 
-def schedule_ready_items(
+def _load_schedule_ready_state(
+    *,
     config: CriticalPathConfig,
     project_owner: str,
     project_number: int,
-    *,
-    this_repo_prefix: str | None = None,
-    all_prefixes: bool = False,
-    mode: str = "advisory",
-    per_executor_wip_limit: int = 3,
-    automation_config: BoardAutomationConfig | None = None,
-    missing_executor_block_cap: int = DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
-    dry_run: bool = False,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> SchedulingDecision:
-    """Classify and optionally claim Ready issues. Returns SchedulingDecision.
-
-    All Ready items in selected scope are considered. Dependency gating is
-    applied only to issues that are members of a critical-path graph.
-    """
-    if mode not in {"advisory", "claim"}:
-        raise ConfigError(
-            f"Invalid schedule mode '{mode}'. Use advisory or claim."
-        )
-
-    decision = SchedulingDecision()
-
+    automation_config: BoardAutomationConfig | None,
+    review_state_port: _ReviewStatePort | None,
+    board_port: _BoardMutationPort | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[
+    bool,
+    list[object],
+    dict[str, int],
+    dict[tuple[str, str], int],
+]:
+    """Load Ready items and WIP counts for one scheduling pass."""
     use_ports = (
         board_info_resolver is None
         and board_mutator is None
@@ -2386,155 +2373,272 @@ def schedule_ready_items(
                 parse_issue_ref(snapshot.issue_ref).number,
             ),
         )
-    else:
-        # Get current WIP counts (global or per-lane policy)
-        wip_counts = _count_wip_by_executor(
-            project_owner, project_number, gh_runner=gh_runner
-        )
-        lane_wip_counts: dict[tuple[str, str], int] = {}
-        if automation_config is not None:
-            lane_wip_counts = _count_wip_by_executor_lane(
-                config,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
+        return use_ports, ready_items, wip_counts, lane_wip_counts
 
-        # List Ready items
-        ready_items = _list_project_items_by_status(
-            "Ready", project_owner, project_number, gh_runner=gh_runner
+    wip_counts = _count_wip_by_executor(
+        project_owner, project_number, gh_runner=gh_runner
+    )
+    lane_wip_counts: dict[tuple[str, str], int] = {}
+    if automation_config is not None:
+        lane_wip_counts = _count_wip_by_executor_lane(
+            config,
+            project_owner,
+            project_number,
+            gh_runner=gh_runner,
         )
-        ready_items = sorted(
-            ready_items,
-            key=lambda snapshot: _ready_snapshot_rank(snapshot, config),
+    ready_items = _list_project_items_by_status(
+        "Ready", project_owner, project_number, gh_runner=gh_runner
+    )
+    ready_items = sorted(
+        ready_items,
+        key=lambda snapshot: _ready_snapshot_rank(snapshot, config),
+    )
+    return use_ports, ready_items, wip_counts, lane_wip_counts
+
+
+def _record_missing_executor_ready_item(
+    ref: str,
+    reason: str,
+    *,
+    decision: SchedulingDecision,
+    missing_executor_block_cap: int,
+    dry_run: bool,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Block or skip one Ready item with a missing/invalid executor."""
+    if len(decision.blocked_missing_executor) < missing_executor_block_cap:
+        if not dry_run:
+            try:
+                _set_blocked_with_reason(
+                    ref,
+                    reason,
+                    config,
+                    project_owner,
+                    project_number,
+                    board_info_resolver=board_info_resolver,
+                    board_mutator=board_mutator,
+                    gh_runner=gh_runner,
+                )
+            except GhQueryError:
+                pass
+        decision.blocked_missing_executor.append(ref)
+        return
+    decision.skipped_missing_executor.append(ref)
+
+
+def _process_schedule_ready_snapshot(
+    snapshot: object,
+    *,
+    use_ports: bool,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    this_repo_prefix: str | None,
+    all_prefixes: bool,
+    mode: str,
+    per_executor_wip_limit: int,
+    automation_config: BoardAutomationConfig | None,
+    missing_executor_block_cap: int,
+    dry_run: bool,
+    decision: SchedulingDecision,
+    review_state_port: _ReviewStatePort | None,
+    board_port: _BoardMutationPort | None,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    wip_counts: dict[str, int],
+    lane_wip_counts: dict[tuple[str, str], int],
+) -> None:
+    """Apply scheduling policy to one Ready snapshot."""
+    if use_ports:
+        ref = snapshot.issue_ref
+    else:
+        ref = _snapshot_to_issue_ref(snapshot, config)
+        if ref is None:
+            return
+
+    if not all_prefixes and this_repo_prefix:
+        parsed = parse_issue_ref(ref)
+        if parsed.prefix != this_repo_prefix:
+            return
+
+    is_graph_member = in_any_critical_path(config, ref)
+    executor = snapshot.executor.strip().lower()
+    if executor not in VALID_EXECUTORS:
+        reason = "missing-executor" if not executor else f"invalid-executor:{executor}"
+        _record_missing_executor_ready_item(
+            ref,
+            reason,
+            decision=decision,
+            missing_executor_block_cap=missing_executor_block_cap,
+            dry_run=dry_run,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        return
+
+    if not is_graph_member:
+        decision.skipped_non_graph.append(ref)
+    else:
+        val_code, _val_output = evaluate_ready_promotion(
+            issue_ref=ref,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            status_resolver=status_resolver,
+            require_in_graph=True,
+        )
+        if val_code != 0:
+            preds = direct_predecessors(config, ref)
+            reason = f"dependency-unmet:{','.join(sorted(preds))}"
+            if not dry_run:
+                try:
+                    _set_blocked_with_reason(
+                        ref,
+                        reason,
+                        config,
+                        project_owner,
+                        project_number,
+                        board_info_resolver=board_info_resolver,
+                        board_mutator=board_mutator,
+                        gh_runner=gh_runner,
+                    )
+                except GhQueryError:
+                    pass
+            decision.blocked_invalid_ready.append(ref)
+            return
+
+    lane = parse_issue_ref(ref).prefix
+    if automation_config is not None:
+        current_wip = lane_wip_counts.get((executor, lane), 0)
+        lane_limit = _wip_limit_for_lane(
+            automation_config,
+            executor,
+            lane,
+            fallback=per_executor_wip_limit,
+        )
+    else:
+        current_wip = wip_counts.get(executor, 0)
+        lane_limit = per_executor_wip_limit
+    if current_wip >= lane_limit:
+        decision.deferred_wip.append(ref)
+        return
+
+    if mode == "claim":
+        changed, _old = _transition_issue_status(
+            ref,
+            {"Ready"},
+            "In Progress",
+            config,
+            project_owner,
+            project_number,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        if not changed:
+            return
+        decision.claimed.append(ref)
+    else:
+        decision.claimable.append(ref)
+
+    if automation_config is not None:
+        lane_wip_counts[(executor, lane)] = current_wip + 1
+    else:
+        wip_counts[executor] = current_wip + 1
+
+
+def schedule_ready_items(
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    this_repo_prefix: str | None = None,
+    all_prefixes: bool = False,
+    mode: str = "advisory",
+    per_executor_wip_limit: int = 3,
+    automation_config: BoardAutomationConfig | None = None,
+    missing_executor_block_cap: int = DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
+    dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver: Callable[..., BoardInfo] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> SchedulingDecision:
+    """Classify and optionally claim Ready issues. Returns SchedulingDecision.
+
+    All Ready items in selected scope are considered. Dependency gating is
+    applied only to issues that are members of a critical-path graph.
+    """
+    if mode not in {"advisory", "claim"}:
+        raise ConfigError(
+            f"Invalid schedule mode '{mode}'. Use advisory or claim."
+        )
+
+    decision = SchedulingDecision()
+    (
+        use_ports,
+        ready_items,
+        wip_counts,
+        lane_wip_counts,
+    ) = _load_schedule_ready_state(
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        automation_config=automation_config,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    if use_ports:
+        review_state_port = review_state_port or _default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
         )
 
     for snapshot in ready_items:
-        if use_ports:
-            ref = snapshot.issue_ref
-        else:
-            ref = _snapshot_to_issue_ref(snapshot, config)
-            if ref is None:
-                continue
-
-        # Filter by prefix if not all_prefixes
-        if not all_prefixes and this_repo_prefix:
-            parsed = parse_issue_ref(ref)
-            if parsed.prefix != this_repo_prefix:
-                continue
-
-        is_graph_member = in_any_critical_path(config, ref)
-
-        # Check executor field
-        executor = snapshot.executor.strip().lower()
-        if executor not in VALID_EXECUTORS:
-            reason = (
-                "missing-executor"
-                if not executor
-                else f"invalid-executor:{executor}"
-            )
-            if len(decision.blocked_missing_executor) < missing_executor_block_cap:
-                if not dry_run:
-                    try:
-                        _set_blocked_with_reason(
-                            ref,
-                            reason,
-                            config,
-                            project_owner,
-                            project_number,
-                            board_info_resolver=board_info_resolver,
-                            board_mutator=board_mutator,
-                            gh_runner=gh_runner,
-                        )
-                    except GhQueryError:
-                        pass
-                decision.blocked_missing_executor.append(ref)
-            else:
-                decision.skipped_missing_executor.append(ref)
-            continue
-
-        if not is_graph_member:
-            decision.skipped_non_graph.append(ref)
-        else:
-            # Check predecessors for graph-member issues only
-            val_code, _val_output = evaluate_ready_promotion(
-                issue_ref=ref,
-                config=config,
-                project_owner=project_owner,
-                project_number=project_number,
-                status_resolver=status_resolver,
-                require_in_graph=True,
-            )
-
-            if val_code != 0:
-                # Unmet predecessors -> block
-                preds = direct_predecessors(config, ref)
-                pred_list = ",".join(sorted(preds))
-                reason = f"dependency-unmet:{pred_list}"
-
-                if not dry_run:
-                    try:
-                        _set_blocked_with_reason(
-                            ref,
-                            reason,
-                            config,
-                            project_owner,
-                            project_number,
-                            board_info_resolver=board_info_resolver,
-                            board_mutator=board_mutator,
-                            gh_runner=gh_runner,
-                        )
-                    except GhQueryError:
-                        pass
-
-                decision.blocked_invalid_ready.append(ref)
-                continue
-
-        # Check WIP limit
-        lane = parse_issue_ref(ref).prefix
-        if automation_config is not None:
-            current_wip = lane_wip_counts.get((executor, lane), 0)
-            lane_limit = _wip_limit_for_lane(
-                automation_config,
-                executor,
-                lane,
-                fallback=per_executor_wip_limit,
-            )
-        else:
-            current_wip = wip_counts.get(executor, 0)
-            lane_limit = per_executor_wip_limit
-
-        if current_wip >= lane_limit:
-            decision.deferred_wip.append(ref)
-            continue
-
-        if mode == "claim":
-            changed, _old = _transition_issue_status(
-                ref,
-                {"Ready"},
-                "In Progress",
-                config,
-                project_owner,
-                project_number,
-                dry_run=dry_run,
-                review_state_port=review_state_port,
-                board_port=board_port,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            if not changed:
-                continue
-
-            decision.claimed.append(ref)
-        else:
-            decision.claimable.append(ref)
-
-        # Reserve a virtual WIP slot so advisory output mirrors claim behavior.
-        if automation_config is not None:
-            lane_wip_counts[(executor, lane)] = current_wip + 1
-        else:
-            wip_counts[executor] = current_wip + 1
+        _process_schedule_ready_snapshot(
+            snapshot,
+            use_ports=use_ports,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            this_repo_prefix=this_repo_prefix,
+            all_prefixes=all_prefixes,
+            mode=mode,
+            per_executor_wip_limit=per_executor_wip_limit,
+            automation_config=automation_config,
+            missing_executor_block_cap=missing_executor_block_cap,
+            dry_run=dry_run,
+            decision=decision,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+            wip_counts=wip_counts,
+            lane_wip_counts=lane_wip_counts,
+        )
 
     return decision
 
