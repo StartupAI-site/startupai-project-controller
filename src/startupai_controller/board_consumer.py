@@ -3923,40 +3923,48 @@ def _initialize_cycle_runtime(
     )
 
 
-def _execute_prepare_cycle_phases(
+def _run_deferred_replay_phase(
     config: ConsumerConfig,
     db: ConsumerDB,
     runtime: CycleRuntimeContext,
     *,
-    dry_run: bool = False,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[CycleBoardSnapshot, ReviewQueueDrainSummary, dict[str, Any], dict[str, int]]:
-    """Execute the preflight phases for one cycle."""
-    timings_ms: dict[str, int] = {}
+    timings_ms: dict[str, int],
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> None:
+    """Replay deferred actions for the cycle when enabled."""
+    if not config.deferred_replay_enabled or dry_run:
+        return
+    phase_started = time.monotonic()
+    replayed_actions = _replay_deferred_actions(
+        db,
+        config,
+        runtime.cp_config,
+        pr_port=runtime.pr_port,
+        review_state_port=runtime.pr_port,
+        board_port=runtime.pr_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+    timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
+    if replayed_actions:
+        logger.info("Replayed deferred control-plane actions: %s", replayed_actions)
 
-    if config.deferred_replay_enabled and not dry_run:
-        phase_started = time.monotonic()
-        replayed_actions = _replay_deferred_actions(
-            db,
-            config,
-            runtime.cp_config,
-            pr_port=runtime.pr_port,
-            review_state_port=runtime.pr_port,
-            board_port=runtime.pr_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-        )
-        timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
-        if replayed_actions:
-            logger.info("Replayed deferred control-plane actions: %s", replayed_actions)
 
+def _load_board_snapshot_phase(
+    config: ConsumerConfig,
+    *,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+) -> CycleBoardSnapshot:
+    """Load the cycle board snapshot."""
     phase_started = time.monotonic()
     board_snapshot = build_cycle_board_snapshot(
         config.project_owner,
@@ -3964,7 +3972,20 @@ def _execute_prepare_cycle_phases(
         gh_runner=gh_runner,
     )
     timings_ms["board_snapshot"] = int((time.monotonic() - phase_started) * 1000)
+    return board_snapshot
 
+
+def _run_executor_routing_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> None:
+    """Normalize executor routing for the protected queue."""
     phase_started = time.monotonic()
     routing_decision = route_protected_queue_executors(
         runtime.cp_config,
@@ -3984,6 +4005,19 @@ def _execute_prepare_cycle_phases(
             routing_decision.routed,
         )
 
+
+def _run_reconciliation_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Run truthful board reconciliation for the cycle."""
     phase_started = time.monotonic()
     reconciliation = _reconcile_board_truth(
         config,
@@ -4010,8 +4044,20 @@ def _execute_prepare_cycle_phases(
     ):
         logger.info("Board reconciliation: %s", reconciliation)
 
+
+def _run_review_queue_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
+    """Drain the review queue for the current cycle."""
     phase_started = time.monotonic()
-    review_queue_summary, board_snapshot = _drain_review_queue(
+    review_queue_summary, updated_snapshot = _drain_review_queue(
         config,
         db,
         runtime.cp_config,
@@ -4042,7 +4088,20 @@ def _execute_prepare_cycle_phases(
         or review_queue_summary.skipped
     ):
         logger.info("Review queue: %s", review_queue_summary)
+    return review_queue_summary, updated_snapshot
 
+
+def _run_admission_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Run backlog admission for the current cycle."""
     phase_started = time.monotonic()
     admission_decision = admit_backlog_items(
         runtime.cp_config,
@@ -4071,6 +4130,78 @@ def _execute_prepare_cycle_phases(
         logger.warning("Backlog admission partial failure: %s", admission_decision.error)
     if not dry_run:
         _persist_admission_summary(db, admission_summary)
+    return admission_summary
+
+
+def _execute_prepare_cycle_phases(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    dry_run: bool = False,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[CycleBoardSnapshot, ReviewQueueDrainSummary, dict[str, Any], dict[str, int]]:
+    """Execute the preflight phases for one cycle."""
+    timings_ms: dict[str, int] = {}
+
+    _run_deferred_replay_phase(
+        config,
+        db,
+        runtime,
+        timings_ms=timings_ms,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
+    )
+    board_snapshot = _load_board_snapshot_phase(
+        config,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+    )
+    _run_executor_routing_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
+    )
+    _run_reconciliation_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    review_queue_summary, board_snapshot = _run_review_queue_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
+    )
+    admission_summary = _run_admission_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
+    )
 
     return board_snapshot, review_queue_summary, admission_summary, timings_ms
 
