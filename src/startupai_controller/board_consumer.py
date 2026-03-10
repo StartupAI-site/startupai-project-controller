@@ -7004,6 +7004,39 @@ def _collect_status_payload(
     local_only: bool = False,
 ) -> dict[str, Any]:
     """Collect consumer status as a JSON-serializable payload."""
+    auto_config, main_workflows, workflow_statuses, effective_interval, last_reload_at = (
+        _load_status_runtime(config)
+    )
+    status_now = datetime.now(timezone.utc)
+    status_state = _collect_status_runtime_state(
+        config,
+        auto_config=auto_config,
+        local_only=local_only,
+        status_now=status_now,
+    )
+    return _build_status_payload(
+        config,
+        auto_config=auto_config,
+        workflow_statuses=workflow_statuses,
+        main_workflows=main_workflows,
+        effective_interval=effective_interval,
+        last_reload_at=last_reload_at,
+        status_now=status_now,
+        local_only=local_only,
+        **status_state,
+    )
+
+
+def _load_status_runtime(
+    config: ConsumerConfig,
+) -> tuple[
+    BoardAutomationConfig | None,
+    dict[str, RepoWorkflow],
+    dict[str, RepoWorkflowStatus],
+    int,
+    str | None,
+]:
+    """Load automation config and persisted workflow status for status reporting."""
     try:
         auto_config = load_automation_config(config.automation_config_path)
     except ConfigError:
@@ -7020,9 +7053,18 @@ def _collect_status_payload(
         if persisted_snapshot is not None
         else None
     )
+    return auto_config, main_workflows, workflow_statuses, effective_interval, last_reload_at
 
+
+def _collect_status_runtime_state(
+    config: ConsumerConfig,
+    *,
+    auto_config: BoardAutomationConfig | None,
+    local_only: bool,
+    status_now: datetime,
+) -> dict[str, Any]:
+    """Collect DB-backed runtime state for status reporting."""
     db = ConsumerDB(db_path=config.db_path)
-    status_now = datetime.now(timezone.utc)
     try:
         leases = db.active_lease_count()
         slots = sorted(db.active_slot_ids())
@@ -7053,6 +7095,46 @@ def _collect_status_payload(
     finally:
         db.close()
 
+    return {
+        "leases": leases,
+        "slots": slots,
+        "workers": workers,
+        "sessions": sessions,
+        "control_state": control_state,
+        "deferred_action_count": deferred_action_count,
+        "oldest_deferred_action_age_seconds": oldest_deferred_action_age_seconds,
+        "review_summary": review_summary,
+        "review_queue": review_queue,
+        "admission_summary": admission_summary,
+        "throughput_1h": throughput_1h,
+        "throughput_24h": throughput_24h,
+    }
+
+
+def _build_status_payload(
+    config: ConsumerConfig,
+    *,
+    auto_config: BoardAutomationConfig | None,
+    workflow_statuses: dict[str, RepoWorkflowStatus],
+    main_workflows: dict[str, RepoWorkflow],
+    effective_interval: int,
+    last_reload_at: str | None,
+    status_now: datetime,
+    leases: int,
+    slots: list[int],
+    workers: list[SessionInfo],
+    sessions: list[SessionInfo],
+    control_state: dict[str, str],
+    deferred_action_count: int,
+    oldest_deferred_action_age_seconds: float | None,
+    review_summary: dict[str, Any],
+    review_queue: dict[str, Any],
+    admission_summary: dict[str, Any],
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+    local_only: bool,
+) -> dict[str, Any]:
+    """Assemble the final JSON-serializable status payload."""
     degraded = control_state.get(CONTROL_KEY_DEGRADED) == "true"
     claim_suppressed_until = control_state.get(CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL)
     claim_suppressed_reason = control_state.get(CONTROL_KEY_CLAIM_SUPPRESSED_REASON)
