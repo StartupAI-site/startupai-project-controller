@@ -3132,20 +3132,18 @@ def _process_due_review_group(
             error=f"missing-review-snapshot:{pr_repo}#{pr_number}",
         )
 
-    try:
-        result = review_rescue(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            config=critical_path_config,
-            automation_config=automation_config,
-            project_owner=config.project_owner,
-            project_number=config.project_number,
-            dry_run=dry_run,
-            snapshot=snapshot,
-            gh_runner=gh_runner,
-            pr_port=pr_port,
-        )
-    except GhQueryError as err:
+    rescue_result = _run_review_rescue_for_group(
+        config=config,
+        critical_path_config=critical_path_config,
+        automation_config=automation_config,
+        pr_port=pr_port,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        snapshot=snapshot,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+    if rescue_result.partial_failure:
         return ReviewGroupProcessingOutcome(
             rerun=(),
             auto_merge_enabled=(),
@@ -3155,39 +3153,151 @@ def _process_due_review_group(
             escalated=(),
             updated_snapshot=updated_snapshot,
             partial_failure=True,
+            error=rescue_result.error,
+        )
+
+    escalated = _apply_review_queue_group_result(
+        store=store,
+        critical_path_config=critical_path_config,
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        pr_port=pr_port,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        entries=entries,
+        result=rescue_result.result,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+    return _summarize_review_group_outcome(
+        critical_path_config=critical_path_config,
+        store=store,
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        entries=entries,
+        result=rescue_result.result,
+        updated_snapshot=updated_snapshot,
+        escalated=escalated,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+
+
+@dataclass(frozen=True)
+class ReviewRescueExecution:
+    """Result of executing rescue logic for one review PR."""
+
+    result: ReviewRescueResult
+    partial_failure: bool = False
+    error: str | None = None
+
+
+def _run_review_rescue_for_group(
+    *,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    pr_repo: str,
+    pr_number: int,
+    snapshot: ReviewSnapshot,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewRescueExecution:
+    """Run rescue logic for one due review group."""
+    try:
+        return ReviewRescueExecution(
+            result=review_rescue(
+                pr_repo=pr_repo,
+                pr_number=pr_number,
+                config=critical_path_config,
+                automation_config=automation_config,
+                project_owner=config.project_owner,
+                project_number=config.project_number,
+                dry_run=dry_run,
+                snapshot=snapshot,
+                gh_runner=gh_runner,
+                pr_port=pr_port,
+            )
+        )
+    except GhQueryError as err:
+        return ReviewRescueExecution(
+            result=ReviewRescueResult(),
+            partial_failure=True,
             error=str(err),
         )
 
+
+def _apply_review_queue_group_result(
+    *,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    pr_port: PullRequestPort,
+    pr_repo: str,
+    pr_number: int,
+    entries: tuple[ReviewQueueEntry, ...],
+    result: ReviewRescueResult,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[str, ...]:
+    """Persist one review-group result and return escalated issue refs."""
+    if dry_run:
+        return ()
+
     escalated: list[str] = []
+    state_digest = pr_port.review_state_digests([(pr_repo, pr_number)]).get(
+        (pr_repo, pr_number)
+    )
+    for entry in entries:
+        needs_escalation = _apply_review_queue_result(
+            store,
+            entry,
+            result,
+            now=now,
+            last_state_digest=state_digest,
+        )
+        if needs_escalation:
+            _escalate_to_claude(
+                entry.issue_ref,
+                critical_path_config,
+                project_owner,
+                project_number,
+                reason=f"review queue blocked escalation: {result.blocked_reason}",
+                gh_runner=gh_runner,
+            )
+            store.delete_review_queue_item(entry.issue_ref)
+            escalated.append(entry.issue_ref)
+    return tuple(escalated)
+
+
+def _summarize_review_group_outcome(
+    *,
+    critical_path_config: CriticalPathConfig,
+    store: SessionStorePort,
+    project_owner: str,
+    project_number: int,
+    pr_repo: str,
+    pr_number: int,
+    entries: tuple[ReviewQueueEntry, ...],
+    result: ReviewRescueResult,
+    updated_snapshot: CycleBoardSnapshot,
+    escalated: tuple[str, ...],
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewGroupProcessingOutcome:
+    """Build the public outcome for one processed review group."""
+    escalated_refs = list(escalated)
     requeued: list[str] = []
     blocked: list[str] = []
     skipped: list[str] = []
     rerun: list[str] = []
     auto_merge_enabled: list[str] = []
-
-    if not dry_run:
-        state_digest = pr_port.review_state_digests([(pr_repo, pr_number)]).get(
-            (pr_repo, pr_number)
-        )
-        for entry in entries:
-            needs_escalation = _apply_review_queue_result(
-                store,
-                entry,
-                result,
-                now=now,
-                last_state_digest=state_digest,
-            )
-            if needs_escalation:
-                _escalate_to_claude(
-                    entry.issue_ref,
-                    critical_path_config,
-                    config.project_owner,
-                    config.project_number,
-                    reason=f"review queue blocked escalation: {result.blocked_reason}",
-                    gh_runner=gh_runner,
-                )
-                store.delete_review_queue_item(entry.issue_ref)
-                escalated.append(entry.issue_ref)
 
     pr_ref = f"{pr_repo}#{pr_number}"
     if result.rerun_checks:
@@ -3204,20 +3314,22 @@ def _process_due_review_group(
                     _escalate_to_claude(
                         issue_ref,
                         critical_path_config,
-                        config.project_owner,
-                        config.project_number,
+                        project_owner,
+                        project_number,
                         reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
                         f"{result.blocked_reason or 'persistent check failure / conflict'}",
                         gh_runner=gh_runner,
                     )
                     store.delete_review_queue_item(issue_ref)
-                escalated.append(issue_ref)
+                escalated_refs.append(issue_ref)
             else:
                 if not dry_run:
                     store.increment_requeue_count(issue_ref, pr_url)
                     store.delete_review_queue_item(issue_ref)
                 requeued.append(issue_ref)
-        requeued_this_group = [ref for ref in result.requeued_refs if ref not in escalated]
+        requeued_this_group = [
+            ref for ref in result.requeued_refs if ref not in escalated_refs
+        ]
         if requeued_this_group:
             updated_snapshot = _update_board_snapshot_statuses(
                 updated_snapshot,
@@ -3235,7 +3347,7 @@ def _process_due_review_group(
         requeued=tuple(requeued),
         blocked=tuple(blocked),
         skipped=tuple(skipped),
-        escalated=tuple(escalated),
+        escalated=tuple(escalated_refs),
         updated_snapshot=updated_snapshot,
     )
 
