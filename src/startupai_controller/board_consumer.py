@@ -70,7 +70,6 @@ from startupai_controller.consumer_workflow import (
 from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     CycleBoardSnapshot,
     CycleGitHubMemo,
-    GitHubCliAdapter,
     LinkedIssue,
     _ProjectItemSnapshot,
     _comment_exists,
@@ -90,19 +89,22 @@ from startupai_controller.adapters.github_http_adapter import (  # canonical: tr
     begin_request_stats,
     end_request_stats,
 )
-from startupai_controller.adapters.local_process import LocalProcessAdapter
 from startupai_controller.adapters.sqlite_store import ConsumerDB
 from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-internal types
     MetricEvent,
     RecoveredLease,
 )
-from startupai_controller.adapters.sqlite_store import SqliteSessionStore
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
+from startupai_controller.runtime.wiring import (
+    build_github_port_bundle,
+    build_session_store,
+    build_worktree_port,
+)
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     build_resolution_comment,
@@ -1323,7 +1325,9 @@ def _run_workspace_hooks(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Run repo-owned workspace hook commands in the claimed worktree."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     port.run_workspace_hooks(
         commands,
         worktree_path=worktree_path,
@@ -1418,11 +1422,11 @@ def _fetch_issue_context(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
     """Read issue title, body, and labels via the issue-context boundary."""
-    port = issue_context_port or GitHubCliAdapter(
-        project_owner="",
-        project_number=0,
+    port = issue_context_port or build_github_port_bundle(
+        "",
+        0,
         gh_runner=gh_runner,
-    )
+    ).issue_context
     context = port.get_issue_context(owner, repo, number)
     return {
         "title": context.title,
@@ -1560,7 +1564,9 @@ def _list_repo_worktrees(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Return (worktree_path, branch_name) pairs for a repo root."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     return [(entry.path, entry.branch_name) for entry in port.list_worktrees(str(repo_root))]
 
 
@@ -1571,7 +1577,9 @@ def _worktree_is_clean(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Return True when a worktree has no local changes."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     return port.is_clean(worktree_path)
 
 
@@ -1603,8 +1611,10 @@ def _prepare_worktree(
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
     parsed = parse_issue_ref(issue_ref)
-    store = session_store or SqliteSessionStore(db)
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    store = session_store or build_session_store(db)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     if config.worktree_reuse_enabled:
         repo_root = config.repo_roots.get(parsed.prefix)
         if repo_root is None:
@@ -1677,7 +1687,9 @@ def _create_worktree(
 
     Shells out to wt-create.sh.
     """
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     entry = port.create_issue_worktree(
         issue_ref,
         title,
@@ -1694,7 +1706,9 @@ def _fast_forward_existing_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     port.fast_forward_existing(worktree_path, branch)
 
 
@@ -1711,7 +1725,9 @@ def _reconcile_repair_branch(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> RepairBranchReconcileOutcome:
     """Reconcile a repair branch against its remote and origin/main."""
-    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port = worktree_port or build_worktree_port(
+        subprocess_runner=subprocess_runner
+    )
     return port.reconcile_repair_branch(worktree_path, branch)
 
 
@@ -2190,11 +2206,11 @@ def _list_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequestMatch]:
     """Return open PRs that reference an issue number in the repository."""
-    port = pr_port or GitHubCliAdapter(
-        project_owner="",
-        project_number=0,
+    port = pr_port or build_github_port_bundle(
+        "",
+        0,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     payload = port.list_open_prs_for_issue(f"{owner}/{repo}", issue_number)
     matches: list[OpenPullRequestMatch] = []
     for item in payload:
@@ -3539,37 +3555,51 @@ def _drain_review_queue(
     *,
     pr_port: PullRequestPort | None = None,
     session_store: SessionStorePort | None = None,
-    board_snapshot: CycleBoardSnapshot,
+    board_snapshot: CycleBoardSnapshot | None = None,
     dry_run: bool = False,
     github_memo: CycleGitHubMemo | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
     """Process a bounded batch of queued Review items."""
     if automation_config is None:
-        return ReviewQueueDrainSummary(), board_snapshot
+        return ReviewQueueDrainSummary(), (
+            board_snapshot
+            if board_snapshot is not None
+            else build_cycle_board_snapshot(
+                config.project_owner,
+                config.project_number,
+                gh_runner=gh_runner,
+            )
+        )
 
-    store = session_store or SqliteSessionStore(db)
+    effective_board_snapshot = board_snapshot or build_cycle_board_snapshot(
+        config.project_owner,
+        config.project_number,
+        gh_runner=gh_runner,
+    )
+
+    store = session_store or build_session_store(db)
     now = datetime.now(timezone.utc)
     memo = github_memo or CycleGitHubMemo()
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    effective_pr_port = pr_port or build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=critical_path_config,
         github_memo=memo,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
 
     prepared_batch, empty_summary = _prepare_review_queue_batch(
         config=config,
         store=store,
         critical_path_config=critical_path_config,
-        board_snapshot=board_snapshot,
+        board_snapshot=effective_board_snapshot,
         pr_port=effective_pr_port,
         now=now,
         dry_run=dry_run,
     )
     if empty_summary is not None:
-        return empty_summary, board_snapshot
+        return empty_summary, effective_board_snapshot
     assert prepared_batch is not None
 
     processing_outcome = _process_review_queue_due_groups(
@@ -3579,7 +3609,7 @@ def _drain_review_queue(
         automation_config=automation_config,
         pr_port=effective_pr_port,
         prepared_batch=prepared_batch,
-        board_snapshot=board_snapshot,
+        board_snapshot=effective_board_snapshot,
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
@@ -4207,12 +4237,12 @@ def _recover_interrupted_sessions(
     except ConfigError as err:
         logger.error("Interrupted-session recovery skipped: %s", err)
         return recovered
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    effective_pr_port = pr_port or build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=cp_config,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     effective_review_state_port = review_state_port or effective_pr_port
     effective_board_port = board_port or effective_pr_port
 
@@ -4298,7 +4328,7 @@ def _initialize_cycle_runtime(
     gh_runner: Callable[..., str] | None = None,
 ) -> CycleRuntimeContext:
     """Build cycle-scoped runtime wiring and effective config."""
-    session_store = SqliteSessionStore(db)
+    session_store = build_session_store(db)
 
     cp_config = load_config(config.critical_paths_path)
     try:
@@ -4318,13 +4348,13 @@ def _initialize_cycle_runtime(
     )
     config.poll_interval_seconds = effective_interval
     github_memo = CycleGitHubMemo()
-    pr_port = GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    pr_port = build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=cp_config,
         github_memo=github_memo,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     global_limit = (
         auto_config.global_concurrency
         if auto_config is not None
@@ -4921,7 +4951,7 @@ def _reconcile_board_truth(
     automation_config: BoardAutomationConfig | None,
     db: ConsumerDB,
     *,
-    session_store: SqliteSessionStore | None = None,
+    session_store: SessionStorePort | None = None,
     pr_port: PullRequestPort | None = None,
     review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort | None = None,
@@ -4935,7 +4965,7 @@ def _reconcile_board_truth(
     if automation_config is None:
         return ReconciliationResult()
 
-    store = session_store or SqliteSessionStore(db)
+    store = session_store or build_session_store(db)
     active_workers = store.active_workers()
     active_issue_refs = {worker.issue_ref for worker in active_workers}
     active_repair_issue_refs = {
@@ -4947,12 +4977,12 @@ def _reconcile_board_truth(
     moved_in_progress: list[str] = []
     moved_review: list[str] = []
     moved_blocked: list[str] = []
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=consumer_config.project_owner,
-        project_number=consumer_config.project_number,
+    effective_pr_port = pr_port or build_github_port_bundle(
+        consumer_config.project_owner,
+        consumer_config.project_number,
         config=critical_path_config,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     effective_review_state_port = review_state_port or effective_pr_port
     effective_board_port = board_port or effective_pr_port
 
@@ -5373,16 +5403,16 @@ def _prepare_launch_candidate(
     """Prepare local launch state for an issue before board claim."""
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
-    store = session_store or SqliteSessionStore(db)
-    effective_pr_port = pr_port or GitHubCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+    store = session_store or build_session_store(db)
+    effective_pr_port = pr_port or build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
         config=cp_config,
         github_memo=prepared.github_memo,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
     effective_issue_context_port = issue_context_port or effective_pr_port
-    effective_worktree_port = worktree_port or LocalProcessAdapter(
+    effective_worktree_port = worktree_port or build_worktree_port(
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
     )
@@ -6342,7 +6372,7 @@ def _handoff_execution_to_review(
     if session_status != "success":
         return immediate_review_summary
 
-    handoff_store = SqliteSessionStore(db)
+    handoff_store = build_session_store(db)
     _post_claimed_session_verdict_marker(
         db=db,
         pr_url=pr_url,
@@ -6454,13 +6484,13 @@ def _run_immediate_review_handoff(
     """Run immediate rescue for the just-opened review PR."""
     try:
         review_memo = CycleGitHubMemo()
-        handoff_pr_port = GitHubCliAdapter(
-            project_owner=config.project_owner,
-            project_number=config.project_number,
+        handoff_pr_port = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
             config=critical_path_config,
             github_memo=review_memo,
             gh_runner=gh_runner,
-        )
+        ).pull_requests
         queue_entries = [
             entry
             for entry in store.list_review_queue_items()

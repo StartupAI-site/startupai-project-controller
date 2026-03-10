@@ -10,9 +10,9 @@ The controller works but core modules are too large and entangled:
 
 | Module | Lines | Policy % | Adapter % |
 |--------|-------|----------|-----------|
-| `board_consumer.py` | 6716 | 10.4% | 37.2% |
-| `board_automation.py` | 5359 | 15% | 11% |
-| `board_io.py` | 3051 | 3% | 46% |
+| `board_consumer.py` | 8030 | transitional application shell | low direct shim use |
+| `board_automation.py` | 5595 | transitional application shell | medium adapter coupling |
+| `board_io.py` | 1471 | compatibility/mechanism remainder | shrinking |
 
 Five functions violate the dependency rule by mixing pure policy decisions
 with GitHub transport, SQLite persistence, or subprocess execution. This
@@ -60,7 +60,8 @@ SessionStorePort, WorktreePort, GhRunnerPort.
 Source modules retain thin wrappers delegating to domain functions.
 Re-export shims maintain import compatibility for tests and external
 callers. Config-object parameters are destructured to primitives at the
-orchestration boundary before calling domain functions.
+orchestration boundary before calling domain functions. Runtime wiring is
+assembled per command / per daemon cycle through `runtime/wiring.py`.
 
 ## Migration Status
 
@@ -79,23 +80,32 @@ orchestration boundary before calling domain functions.
   `_prepare_launch_candidate()` delegates to `launch_session_kind()`,
   `_drain_review_queue()` delegates to `requeue_or_escalate()` and
   `blocked_streak_needs_escalation()`.
+- **Composition root**: runtime adapter selection now happens in
+  `runtime/wiring.py`, which builds per-command / per-cycle bundles for
+  GitHub-backed ports, session store access, and worktree/process access.
+- **Shim removal on orchestrators**: runtime orchestrators no longer import
+  `board_io.py`, `consumer_db.py`, or `github_http.py` directly. Their runtime
+  boundary is now canonical domain/ports/runtime wiring plus adapter surfaces.
+- **Graph input cleanup**: `board_graph.py` consumes typed inputs and no longer
+  imports adapters or shim modules directly.
 
 ### Transitional (not yet migrated)
 
-Orchestrators (`board_consumer.py`, `board_automation.py`, `board_graph.py`)
-still import mechanism functions directly from `board_io.py` for GitHub CLI
-operations not yet covered by port methods. These include:
+The remaining transitional surfaces are now mostly **adapter-level** or
+**coordinator-level**, not shim-level:
 
-- Board query functions (`_list_project_items_by_status`, `_snapshot_to_issue_ref`, etc.)
-- Board mutation functions (`_set_status_if_changed`, `_post_comment`, `close_issue`, etc.)
-- PR query functions (`query_open_pull_requests`, `_query_pr_gate_status`, etc.)
-- Snapshot/memo types (`CycleBoardSnapshot`, `CycleGitHubMemo`, `_ProjectItemSnapshot`)
-- Adapter-internal types (`CodexReviewVerdict`, `PullRequestViewPayload`,
-  `MetricEvent`, `RecoveredLease`) remain defined in their source modules
-
-These are marked with `# transitional: mechanism access (see ADR-002)` comments
-in the import statements. Migration to port-based access is tracked as follow-up
-work requiring port protocol extension and composition-root DI wiring.
+- `board_consumer.py` and `board_automation.py` still import a broad helper
+  surface from adapter modules, especially `adapters/github_cli.py`, for
+  capabilities not yet reduced to small port-only method sets.
+- `GitHubCliAdapter` still concentrates too much GitHub board/PR/review
+  mechanism in one adapter implementation and remains the largest remaining
+  mechanism gravity well.
+- `board_io.py` is no longer a primary runtime dependency for orchestrators, but
+  it still contains compatibility wrappers and residual mechanism ownership for
+  unmigrated helper slices.
+- Adapter-internal types such as `CodexReviewVerdict`, `PullRequestViewPayload`,
+  `MetricEvent`, and `RecoveredLease` remain owned by adapter/mechanism modules,
+  not the domain.
 
 ### Ports and adapters — current wiring
 
@@ -104,14 +114,20 @@ covering review queue CRUD, session queries, requeue counts, and active worker
 listing. `SqliteSessionStore` (`adapters/sqlite_store.py`) implements all
 methods by delegation to `ConsumerDB`.
 
-**Composition root**: `_prepare_cycle()` constructs `session_store = SqliteSessionStore(db)`
-and passes it to `_reconcile_board_truth()` and `_drain_review_queue()`. The
-`_cmd_reconcile()` CLI entrypoint also constructs its own store instance.
+**Composition root**: `runtime/wiring.py` builds:
+- a per-command / per-cycle GitHub port bundle
+- a session store adapter
+- a worktree/process adapter
+
+Coordinators consume those bundles instead of choosing concrete adapters inline.
 
 **Wired functions** (read/write via port, not direct `db.` calls):
 - `_reconcile_board_truth()` — `active_workers()`, `latest_session_for_issue()`, `update_session()`
 - `_drain_review_queue()` — `list_review_queue_items()`, `get_requeue_state()`,
   `delete_review_queue_item()`, `increment_requeue_count()`
+- `board_control_plane._tick()` — review queue drain and admission flow through
+  runtime wiring
+- `board_graph.py` — typed input only, no adapter/shim reads
 
 **Not yet wired** (require new ports — M10 scope):
 - `_apply_resolution_action()` — uses metrics, deferred actions, board mutations
@@ -142,12 +158,11 @@ function is retained as a thin delegation shim for external callers.
 
 ### Remaining board_io surface
 
-Board query/mutation functions (`_list_project_items_by_status`,
-`_set_status_if_changed`, `_post_comment`, `close_issue`,
-`query_open_pull_requests`, etc.) and snapshot types (`CycleBoardSnapshot`,
-`_ProjectItemSnapshot`) are still imported directly from `board_io` by
-orchestrators. These require ReviewStatePort, PullRequestPort, and
-BoardMutationPort extensions — tracked for M8/M9.
+`board_io.py` is now a compatibility shell plus residual mechanism host for
+unmigrated helper slices. It is no longer directly imported by runtime
+orchestrators, but it still backs some adapter functionality and compatibility
+tests. Further work should continue moving real mechanism out of `board_io.py`
+until it becomes compatibility-only in practice as well as in intent.
 
 ## Consequences
 
@@ -158,8 +173,9 @@ BoardMutationPort extensions — tracked for M8/M9.
   `_drain_review_queue` access persistence only through the port
 - God-functions are decomposed into focused sub-functions with single responsibilities
 - Re-export shims add temporary maintenance burden (removal tracked separately)
-- Board query/mutation mechanism access remains transitional — orchestrators still
-  call board_io directly for GitHub operations not yet covered by ports
+- Board query/mutation mechanism access is substantially improved — runtime
+  orchestrators no longer call `board_io.py` directly, but some adapter-level
+  helper dependence remains transitional
 
 ## Scope
 

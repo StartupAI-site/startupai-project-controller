@@ -11,7 +11,8 @@ import pytest
 import startupai_controller.board_control_plane as control_plane
 from startupai_controller.board_automation import BoardAutomationConfig, ExecutorRoutingDecision, AdmissionConfig
 from startupai_controller.board_graph import AdmissionDecision
-from startupai_controller.board_io import CycleBoardSnapshot, _ProjectItemSnapshot
+from startupai_controller.adapters.github_types import CycleBoardSnapshot, CycleGitHubMemo
+from startupai_controller.domain.models import IssueSnapshot
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 
@@ -32,32 +33,43 @@ def test_review_scope_refs_filters_to_executor_and_repo(
         critical_paths={},
     )
     snapshots = [
-        _ProjectItemSnapshot(
-            issue_ref="StartupAI-site/startupai-crew#88",
+        IssueSnapshot(
+            issue_ref="crew#88",
             status="Review",
             executor="codex",
-            handoff_to="none",
+            priority="P1",
+            title="Crew review",
+            item_id="ITEM_88",
+            project_id="PROJ_1",
         ),
-        _ProjectItemSnapshot(
-            issue_ref="StartupAI-site/startupai-crew#89",
+        IssueSnapshot(
+            issue_ref="crew#89",
             status="Review",
             executor="human",
-            handoff_to="none",
+            priority="P1",
+            title="Crew human review",
+            item_id="ITEM_89",
+            project_id="PROJ_1",
         ),
-        _ProjectItemSnapshot(
-            issue_ref="StartupAI-site/app.startupai-site#71",
+        IssueSnapshot(
+            issue_ref="app#71",
             status="Review",
             executor="codex",
-            handoff_to="none",
+            priority="P1",
+            title="App review",
+            item_id="ITEM_71",
+            project_id="PROJ_1",
         ),
     ]
-    monkeypatch.setattr(
-        control_plane,
-        "_list_project_items_by_status",
-        lambda *_args, **_kwargs: snapshots,
+    review_state_port = SimpleNamespace(
+        list_issues_by_status=lambda status: snapshots if status == "Review" else []
     )
 
-    review_refs = control_plane._review_scope_refs(config, critical_path_config)
+    review_refs = control_plane._review_scope_refs(
+        config,
+        critical_path_config,
+        review_state_port,
+    )
 
     assert review_refs == ["crew#88"]
 
@@ -116,8 +128,14 @@ def test_tick_skips_review_rescue_when_no_review_items(
     )
     monkeypatch.setattr(
         control_plane,
-        "build_cycle_board_snapshot",
-        lambda *_args, **_kwargs: CycleBoardSnapshot(items=(), by_status={}),
+        "build_github_port_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            pull_requests=SimpleNamespace(),
+            review_state=SimpleNamespace(list_issues_by_status=lambda _status: []),
+            board_mutations=SimpleNamespace(),
+            issue_context=SimpleNamespace(),
+            github_memo=CycleGitHubMemo(),
+        ),
     )
     monkeypatch.setattr(
         control_plane, "_replay_deferred_actions", lambda *_args, **_kwargs: ()

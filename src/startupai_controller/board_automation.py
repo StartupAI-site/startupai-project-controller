@@ -114,9 +114,9 @@ from startupai_controller.board_graph import (
     _issue_sort_key,
     _resolve_issue_coordinates,
     _admission_candidate_rank,
-    _ready_snapshot_rank,
     _count_wip_by_executor,
     _count_wip_by_executor_lane,
+    _ready_snapshot_rank,
     classify_parallelism_snapshot,
     find_unmet_ready_dependencies,
 )
@@ -173,7 +173,9 @@ from startupai_controller.domain.models import (
     ReviewRescueSweep,
     ReviewSnapshot,
     SchedulingDecision,
+    IssueSnapshot,
 )
+from startupai_controller.runtime.wiring import build_github_port_bundle
 
 # ---------------------------------------------------------------------------
 # Port wiring helpers
@@ -187,14 +189,12 @@ def _default_pr_port(
     gh_runner: Callable[..., str] | None = None,
 ) -> _PullRequestPort:
     """Construct a default PullRequestPort adapter from context params."""
-    from startupai_controller.adapters.github_cli import GitHubCliAdapter
-
-    return GitHubCliAdapter(
-        project_owner=project_owner,
-        project_number=project_number,
+    return build_github_port_bundle(
+        project_owner,
+        project_number,
         config=config,
         gh_runner=gh_runner,
-    )
+    ).pull_requests
 
 
 def _default_review_state_port(
@@ -204,14 +204,12 @@ def _default_review_state_port(
     gh_runner: Callable[..., str] | None = None,
 ) -> _ReviewStatePort:
     """Construct a default ReviewStatePort adapter from context params."""
-    from startupai_controller.adapters.github_cli import GitHubCliAdapter
-
-    return GitHubCliAdapter(
-        project_owner=project_owner,
-        project_number=project_number,
+    return build_github_port_bundle(
+        project_owner,
+        project_number,
         config=config,
         gh_runner=gh_runner,
-    )
+    ).review_state
 
 
 def _default_board_mutation_port(
@@ -221,14 +219,12 @@ def _default_board_mutation_port(
     gh_runner: Callable[..., str] | None = None,
 ) -> _BoardMutationPort:
     """Construct a default BoardMutationPort adapter from context params."""
-    from startupai_controller.adapters.github_cli import GitHubCliAdapter
-
-    return GitHubCliAdapter(
-        project_owner=project_owner,
-        project_number=project_number,
-        gh_runner=gh_runner,
+    return build_github_port_bundle(
+        project_owner,
+        project_number,
         config=config,
-    )
+        gh_runner=gh_runner,
+    ).board_mutations
 
 
 # ---------------------------------------------------------------------------
@@ -1916,7 +1912,7 @@ def _load_schedule_ready_state(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[
     bool,
-    list[object],
+    list[IssueSnapshot],
     dict[str, int],
     dict[tuple[str, str], int],
 ]:
@@ -1925,50 +1921,18 @@ def _load_schedule_ready_state(
         board_info_resolver is None
         and board_mutator is None
     ) or review_state_port is not None or board_port is not None
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        wip_items = review_state_port.list_issues_by_status("In Progress")
-        wip_counts: dict[str, int] = {}
-        lane_wip_counts: dict[tuple[str, str], int] = {}
-        for item in wip_items:
-            executor = item.executor.strip().lower()
-            if executor not in VALID_EXECUTORS:
-                continue
-            lane = parse_issue_ref(item.issue_ref).prefix
-            wip_counts[executor] = wip_counts.get(executor, 0) + 1
-            lane_wip_counts[(executor, lane)] = (
-                lane_wip_counts.get((executor, lane), 0) + 1
-            )
-        ready_items = review_state_port.list_issues_by_status("Ready")
-        ready_items = sorted(
-            ready_items,
-            key=lambda snapshot: (
-                0 if in_any_critical_path(config, snapshot.issue_ref) else 1,
-                _priority_rank(snapshot.priority),
-                parse_issue_ref(snapshot.issue_ref).number,
-            ),
-        )
-        return use_ports, ready_items, wip_counts, lane_wip_counts
-
-    wip_counts = _count_wip_by_executor(
-        project_owner, project_number, gh_runner=gh_runner
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
     )
+    wip_items = review_state_port.list_issues_by_status("In Progress")
+    wip_counts = _count_wip_by_executor(wip_items)
     lane_wip_counts: dict[tuple[str, str], int] = {}
     if automation_config is not None:
-        lane_wip_counts = _count_wip_by_executor_lane(
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        )
-    ready_items = _list_project_items_by_status(
-        "Ready", project_owner, project_number, gh_runner=gh_runner
-    )
+        lane_wip_counts = _count_wip_by_executor_lane(config, wip_items)
+    ready_items = review_state_port.list_issues_by_status("Ready")
     ready_items = sorted(
         ready_items,
         key=lambda snapshot: _ready_snapshot_rank(snapshot, config),
@@ -2036,9 +2000,8 @@ def _process_schedule_ready_snapshot(
     lane_wip_counts: dict[tuple[str, str], int],
 ) -> None:
     """Apply scheduling policy to one Ready snapshot."""
-    if use_ports:
-        ref = snapshot.issue_ref
-    else:
+    ref = getattr(snapshot, "issue_ref", None)
+    if ref is None:
         ref = _snapshot_to_issue_ref(snapshot, config)
         if ref is None:
             return
@@ -2247,47 +2210,25 @@ def _load_claim_ready_state(
         board_info_resolver is None
         and board_mutator is None
     ) or review_state_port is not None or board_port is not None
-    if use_ports:
-        state_port = review_state_port or _default_review_state_port(
-            project_owner,
-            project_number,
+    state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    ready_items = state_port.list_issues_by_status("Ready")
+    wip_items = state_port.list_issues_by_status("In Progress")
+    wip_counts = _count_wip_by_executor(wip_items)
+    lane_wip_counts = {}
+    if automation_config is not None:
+        lane_wip_counts = _count_wip_by_executor_lane(
             config,
-            gh_runner=gh_runner,
+            wip_items,
         )
-        wip_items = state_port.list_issues_by_status("In Progress")
-        ready_items = state_port.list_issues_by_status("Ready")
-        wip_counts: dict[str, int] = {}
-        lane_wip_counts: dict[tuple[str, str], int] = {}
-        for item in wip_items:
-            item_executor = item.executor.strip().lower()
-            if item_executor not in VALID_EXECUTORS:
-                continue
-            lane = parse_issue_ref(item.issue_ref).prefix
-            wip_counts[item_executor] = wip_counts.get(item_executor, 0) + 1
-            lane_wip_counts[(item_executor, lane)] = (
-                lane_wip_counts.get((item_executor, lane), 0) + 1
-            )
-    else:
-        ready_items = _list_project_items_by_status(
-            "Ready", project_owner, project_number, gh_runner=gh_runner
-        )
-        wip_counts = _count_wip_by_executor(
-            project_owner, project_number, gh_runner=gh_runner
-        )
-        lane_wip_counts = {}
-        if automation_config is not None:
-            lane_wip_counts = _count_wip_by_executor_lane(
-                config,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
 
     ready_by_ref: dict[str, object] = {}
     for snapshot in ready_items:
-        ref = snapshot.issue_ref if use_ports else _snapshot_to_issue_ref(snapshot, config)
-        if ref is None:
-            continue
+        ref = snapshot.issue_ref
         if not all_prefixes and this_repo_prefix:
             parsed = parse_issue_ref(ref)
             if parsed.prefix != this_repo_prefix:
@@ -2524,19 +2465,26 @@ def enforce_ready_dependency_guard(
     all_prefixes: bool = False,
     dry_run: bool = False,
     status_resolver: Callable[..., str] | None = None,
+    review_state_port: _ReviewStatePort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Block Ready issues with unmet predecessors. Returns corrected refs."""
-    unmet = find_unmet_ready_dependencies(
-        config,
+    review_state_port = review_state_port or _default_review_state_port(
         project_owner,
         project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    unmet = find_unmet_ready_dependencies(
+        config=config,
+        ready_items=review_state_port.list_issues_by_status("Ready"),
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         status_resolver=status_resolver,
-        gh_runner=gh_runner,
+        project_owner=project_owner,
+        project_number=project_number,
     )
     for ref, reason in unmet:
         if not dry_run:
@@ -5609,11 +5557,17 @@ def _cmd_classify_parallelism(
     args: argparse.Namespace, config: CriticalPathConfig
 ) -> int:
     """Handler for classify-parallelism subcommand."""
+    review_state_port = _default_review_state_port(
+        args.project_owner,
+        args.project_number,
+        config,
+    )
     snapshot = classify_parallelism_snapshot(
         config=config,
+        ready_items=review_state_port.list_issues_by_status("Ready"),
+        blocked_items=review_state_port.list_issues_by_status("Blocked"),
         project_owner=args.project_owner,
         project_number=args.project_number,
-        dry_run=args.dry_run,
     )
 
     print(f'PARALLEL_READY={json.dumps(sorted(snapshot["parallel"]))}')

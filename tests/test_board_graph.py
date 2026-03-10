@@ -21,7 +21,7 @@ from startupai_controller.board_graph import (
     find_unmet_ready_dependencies,
     has_structured_acceptance_criteria,
 )
-from startupai_controller.board_io import _ProjectItemSnapshot
+from startupai_controller.domain.models import IssueSnapshot
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,
@@ -67,60 +67,22 @@ def _load(tmp_path: Path) -> CriticalPathConfig:
     return load_config(_write_config(tmp_path))
 
 
-def _empty_project_items_response() -> str:
-    """Build a mock GraphQL response with no items."""
-    return json.dumps(
-        {
-            "data": {
-                "organization": {
-                    "projectV2": {
-                        "items": {
-                            "pageInfo": {"hasNextPage": False, "endCursor": ""},
-                            "nodes": [],
-                        }
-                    }
-                }
-            }
-        }
-    )
-
-
-def _project_items_response(nodes: list[dict]) -> str:
-    """Build a mock GraphQL response for _list_project_items_by_status."""
-    return json.dumps(
-        {
-            "data": {
-                "organization": {
-                    "projectV2": {
-                        "items": {
-                            "pageInfo": {"hasNextPage": False, "endCursor": ""},
-                            "nodes": nodes,
-                        }
-                    }
-                }
-            }
-        }
-    )
-
-
-def _make_node(
-    repo: str = "StartupAI-site/startupai-crew",
-    number: int = 84,
+def _make_snapshot(
+    issue_ref: str = "crew#84",
     status: str = "Ready",
     executor: str = "claude",
     priority: str = "P0",
-) -> dict:
-    """Build a single project item node for mock responses."""
-    return {
-        "fieldValueByName": {"name": status},
-        "executorField": {"name": executor},
-        "handoffField": {"name": "none"},
-        "priorityField": {"name": priority},
-        "content": {
-            "number": number,
-            "repository": {"nameWithOwner": repo},
-        },
-    }
+) -> IssueSnapshot:
+    """Build a typed issue snapshot for graph-level tests."""
+    return IssueSnapshot(
+        issue_ref=issue_ref,
+        status=status,
+        executor=executor,
+        priority=priority,
+        title="Example",
+        item_id="ITEM",
+        project_id="PROJECT",
+    )
 
 
 # -- _issue_sort_key tests ---------------------------------------------------
@@ -157,20 +119,8 @@ def test_resolve_issue_coordinates_unknown_prefix(tmp_path: Path) -> None:
 def test_ready_snapshot_rank_critical_path_first(tmp_path: Path) -> None:
     """Critical-path item ranks before non-critical."""
     config = _load(tmp_path)
-    critical = _ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#84",
-        status="Ready",
-        executor="claude",
-        handoff_to="none",
-        priority="P0",
-    )
-    non_critical = _ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#999",
-        status="Ready",
-        executor="claude",
-        handoff_to="none",
-        priority="P0",
-    )
+    critical = _make_snapshot(issue_ref="crew#84")
+    non_critical = _make_snapshot(issue_ref="crew#999")
     assert _ready_snapshot_rank(critical, config) < _ready_snapshot_rank(
         non_critical, config
     )
@@ -179,20 +129,8 @@ def test_ready_snapshot_rank_critical_path_first(tmp_path: Path) -> None:
 def test_ready_snapshot_rank_priority_tiebreak(tmp_path: Path) -> None:
     """Same critical status, P0 ranks before P2."""
     config = _load(tmp_path)
-    p0 = _ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#84",
-        status="Ready",
-        executor="claude",
-        handoff_to="none",
-        priority="P0",
-    )
-    p2 = _ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#85",
-        status="Ready",
-        executor="claude",
-        handoff_to="none",
-        priority="P2",
-    )
+    p0 = _make_snapshot(issue_ref="crew#84", priority="P0")
+    p2 = _make_snapshot(issue_ref="crew#85", priority="P2")
     assert _ready_snapshot_rank(p0, config) < _ready_snapshot_rank(p2, config)
 
 
@@ -226,27 +164,19 @@ def test_admission_watermarks_follow_global_concurrency() -> None:
 
 def test_count_wip_by_executor(tmp_path: Path) -> None:
     """Injected board snapshot produces correct per-executor counts."""
-    nodes = [
-        _make_node(number=84, executor="claude", status="In Progress"),
-        _make_node(number=85, executor="claude", status="In Progress"),
-        _make_node(number=86, executor="codex", status="In Progress"),
+    items = [
+        _make_snapshot(issue_ref="crew#84", executor="claude", status="In Progress"),
+        _make_snapshot(issue_ref="crew#85", executor="claude", status="In Progress"),
+        _make_snapshot(issue_ref="crew#86", executor="codex", status="In Progress"),
     ]
-    counts = _count_wip_by_executor(
-        "StartupAI-site",
-        1,
-        gh_runner=lambda args: _project_items_response(nodes),
-    )
+    counts = _count_wip_by_executor(items)
     assert counts["claude"] == 2
     assert counts["codex"] == 1
 
 
 def test_count_wip_by_executor_empty() -> None:
     """Empty board returns empty dict."""
-    counts = _count_wip_by_executor(
-        "StartupAI-site",
-        1,
-        gh_runner=lambda args: _empty_project_items_response(),
-    )
+    counts = _count_wip_by_executor([])
     assert counts == {}
 
 
@@ -256,22 +186,12 @@ def test_count_wip_by_executor_empty() -> None:
 def test_count_wip_by_executor_lane(tmp_path: Path) -> None:
     """Injected board snapshot produces correct per-lane counts."""
     config = _load(tmp_path)
-    nodes = [
-        _make_node(number=84, executor="claude", status="In Progress"),
-        _make_node(
-            repo="StartupAI-site/app.startupai-site",
-            number=149,
-            executor="claude",
-            status="In Progress",
-        ),
-        _make_node(number=85, executor="codex", status="In Progress"),
+    items = [
+        _make_snapshot(issue_ref="crew#84", executor="claude", status="In Progress"),
+        _make_snapshot(issue_ref="app#149", executor="claude", status="In Progress"),
+        _make_snapshot(issue_ref="crew#85", executor="codex", status="In Progress"),
     ]
-    counts = _count_wip_by_executor_lane(
-        config,
-        "StartupAI-site",
-        1,
-        gh_runner=lambda args: _project_items_response(nodes),
-    )
+    counts = _count_wip_by_executor_lane(config, items)
     assert counts[("claude", "crew")] == 1
     assert counts[("claude", "app")] == 1
     assert counts[("codex", "crew")] == 1
@@ -286,11 +206,12 @@ def test_classify_parallelism_snapshot_outputs_expected_keys(
     """Result contains parallel/waiting/blocked/non_graph keys."""
     config = _load(tmp_path)
     result = classify_parallelism_snapshot(
-        config,
-        "StartupAI-site",
-        1,
+        config=config,
+        ready_items=[],
+        blocked_items=[],
         status_resolver=lambda *_: "Done",
-        gh_runner=lambda args: _empty_project_items_response(),
+        project_owner="StartupAI-site",
+        project_number=1,
     )
     assert "parallel" in result
     assert "waiting_on_dependency" in result
@@ -305,14 +226,14 @@ def test_find_unmet_ready_dependencies_returns_pairs(tmp_path: Path) -> None:
     """Ready item with unmet predecessor returns (ref, reason) pair."""
     config = _load(tmp_path)
     # crew#85 depends on crew#84 — if crew#84 is not Done, crew#85 is unmet
-    node = _make_node(number=85, executor="claude", status="Ready")
+    item = _make_snapshot(issue_ref="crew#85", executor="claude", status="Ready")
     result = find_unmet_ready_dependencies(
-        config,
-        "StartupAI-site",
-        1,
+        config=config,
+        ready_items=[item],
         all_prefixes=True,
         status_resolver=lambda *_: "Ready",  # predecessor not Done
-        gh_runner=lambda args: _project_items_response([node]),
+        project_owner="StartupAI-site",
+        project_number=1,
     )
     refs = [ref for ref, _ in result]
     assert "crew#85" in refs
@@ -327,14 +248,14 @@ def test_find_unmet_ready_dependencies_skips_non_graph(
     """Non-graph Ready item is not in results."""
     config = _load(tmp_path)
     # crew#999 is not in any critical path
-    node = _make_node(number=999, executor="claude", status="Ready")
+    item = _make_snapshot(issue_ref="crew#999", executor="claude", status="Ready")
     result = find_unmet_ready_dependencies(
-        config,
-        "StartupAI-site",
-        1,
+        config=config,
+        ready_items=[item],
         all_prefixes=True,
         status_resolver=lambda *_: "Ready",
-        gh_runner=lambda args: _project_items_response([node]),
+        project_owner="StartupAI-site",
+        project_number=1,
     )
     refs = [ref for ref, _ in result]
     assert "crew#999" not in refs
@@ -345,19 +266,14 @@ def test_find_unmet_ready_dependencies_filters_this_repo_prefix(
 ) -> None:
     """this_repo_prefix='crew' excludes app items."""
     config = _load(tmp_path)
-    app_node = _make_node(
-        repo="StartupAI-site/app.startupai-site",
-        number=153,
-        executor="claude",
-        status="Ready",
-    )
+    app_item = _make_snapshot(issue_ref="app#153", executor="claude", status="Ready")
     result = find_unmet_ready_dependencies(
-        config,
-        "StartupAI-site",
-        1,
+        config=config,
+        ready_items=[app_item],
         this_repo_prefix="crew",
         status_resolver=lambda *_: "Ready",
-        gh_runner=lambda args: _project_items_response([app_node]),
+        project_owner="StartupAI-site",
+        project_number=1,
     )
     refs = [ref for ref, _ in result]
     assert "app#153" not in refs
@@ -368,19 +284,14 @@ def test_find_unmet_ready_dependencies_all_prefixes_includes_other_repo(
 ) -> None:
     """all_prefixes=True includes cross-repo items."""
     config = _load(tmp_path)
-    app_node = _make_node(
-        repo="StartupAI-site/app.startupai-site",
-        number=153,
-        executor="claude",
-        status="Ready",
-    )
+    app_item = _make_snapshot(issue_ref="app#153", executor="claude", status="Ready")
     result = find_unmet_ready_dependencies(
-        config,
-        "StartupAI-site",
-        1,
+        config=config,
+        ready_items=[app_item],
         all_prefixes=True,
         status_resolver=lambda *_: "Ready",  # predecessor not Done
-        gh_runner=lambda args: _project_items_response([app_node]),
+        project_owner="StartupAI-site",
+        project_number=1,
     )
     refs = [ref for ref, _ in result]
     assert "app#153" in refs
@@ -392,14 +303,14 @@ def test_find_unmet_ready_dependencies_status_resolver_drives_result(
     """Custom status_resolver returning 'Done' means no unmet deps."""
     config = _load(tmp_path)
     # crew#85 depends on crew#84 — if status_resolver says "Done", deps are met
-    node = _make_node(number=85, executor="claude", status="Ready")
+    item = _make_snapshot(issue_ref="crew#85", executor="claude", status="Ready")
     result = find_unmet_ready_dependencies(
-        config,
-        "StartupAI-site",
-        1,
+        config=config,
+        ready_items=[item],
         all_prefixes=True,
         status_resolver=lambda *_: "Done",  # all predecessors Done
-        gh_runner=lambda args: _project_items_response([node]),
+        project_owner="StartupAI-site",
+        project_number=1,
     )
     refs = [ref for ref, _ in result]
     assert "crew#85" not in refs
