@@ -4113,53 +4113,38 @@ def review_rescue(
     board_port: _BoardMutationPort | None = None,
 ) -> ReviewRescueResult:
     """Reconcile one PR in Review back toward self-healing merge flow."""
-    if pr_port is None:
-        pr_port = _default_pr_port(project_owner, project_number, config, gh_runner)
-    if review_state_port is None:
-        review_state_port = _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner,
-        )
-    if board_port is None:
-        board_port = _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner,
-        )
+    pr_port, review_state_port, board_port = _resolve_review_rescue_ports(
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        gh_runner=gh_runner,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+    )
 
-    if snapshot is None:
-        snapshot = _build_review_snapshot(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            config=config,
-            automation_config=automation_config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=dry_run,
-            gh_runner=gh_runner,
-        )
-    # Phase 1: Handle cancelled checks via port
-    rerun_checks: list[str] = []
-    if snapshot.rescue_cancelled:
-        for check_name in sorted(snapshot.rescue_cancelled):
-            observation = snapshot.gate_status.checks.get(check_name)
-            if observation is None:
-                continue
-            if _rerun_check_observation(
-                pr_repo, observation, dry_run=dry_run, pr_port=pr_port
-            ):
-                rerun_checks.append(check_name)
-        if rerun_checks:
-            return ReviewRescueResult(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                rerun_checks=tuple(rerun_checks),
-            )
+    snapshot = _resolve_review_rescue_snapshot(
+        snapshot=snapshot,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
 
-    # Phase 2: Domain policy decision (cancelled checks already handled above)
+    rerun_result = _rerun_cancelled_review_checks(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        snapshot=snapshot,
+        dry_run=dry_run,
+        pr_port=pr_port,
+    )
+    if rerun_result is not None:
+        return rerun_result
+
     action, reason = rescue_decision(
         review_refs=tuple(snapshot.review_refs),
         has_cancelled_checks=False,
@@ -4176,22 +4161,145 @@ def review_rescue(
         rescue_missing=snapshot.rescue_missing,
         auto_merge_enabled=snapshot.gate_status.auto_merge_enabled,
     )
+    return _apply_review_rescue_decision(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        snapshot=snapshot,
+        action=action,
+        reason=reason,
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+    )
 
-    # Phase 3: Execute the decision via ports
+
+def _resolve_review_rescue_ports(
+    *,
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    gh_runner: Callable[..., str] | None,
+    pr_port: _PullRequestPort | None,
+    review_state_port: _ReviewStatePort | None,
+    board_port: _BoardMutationPort | None,
+) -> tuple[_PullRequestPort, _ReviewStatePort, _BoardMutationPort]:
+    """Resolve the effective ports for the review rescue use case."""
+    effective_pr_port = pr_port or _default_pr_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner,
+    )
+    effective_review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner,
+    )
+    effective_board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner,
+    )
+    return effective_pr_port, effective_review_state_port, effective_board_port
+
+
+def _resolve_review_rescue_snapshot(
+    *,
+    snapshot: ReviewSnapshot | None,
+    pr_repo: str,
+    pr_number: int,
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    project_owner: str,
+    project_number: int,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewSnapshot:
+    """Load the review snapshot when the caller did not provide one."""
+    if snapshot is not None:
+        return snapshot
+    return _build_review_snapshot(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+
+
+def _rerun_cancelled_review_checks(
+    *,
+    pr_repo: str,
+    pr_number: int,
+    snapshot: ReviewSnapshot,
+    dry_run: bool,
+    pr_port: _PullRequestPort,
+) -> ReviewRescueResult | None:
+    """Handle the cancelled-check rerun phase before domain policy."""
+    if not snapshot.rescue_cancelled:
+        return None
+    rerun_checks: list[str] = []
+    for check_name in sorted(snapshot.rescue_cancelled):
+        observation = snapshot.gate_status.checks.get(check_name)
+        if observation is None:
+            continue
+        if _rerun_check_observation(
+            pr_repo,
+            observation,
+            dry_run=dry_run,
+            pr_port=pr_port,
+        ):
+            rerun_checks.append(check_name)
+    if not rerun_checks:
+        return None
+    return ReviewRescueResult(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        rerun_checks=tuple(rerun_checks),
+    )
+
+
+def _apply_review_rescue_decision(
+    *,
+    pr_repo: str,
+    pr_number: int,
+    snapshot: ReviewSnapshot,
+    action: str,
+    reason: str | None,
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    project_owner: str,
+    project_number: int,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+    pr_port: _PullRequestPort,
+    review_state_port: _ReviewStatePort,
+    board_port: _BoardMutationPort,
+) -> ReviewRescueResult:
+    """Apply the domain rescue decision through the port boundary."""
     if action == "skipped":
         return ReviewRescueResult(
             pr_repo=pr_repo,
             pr_number=pr_number,
             skipped_reason=reason,
         )
-
     if action == "blocked":
         return ReviewRescueResult(
             pr_repo=pr_repo,
             pr_number=pr_number,
             blocked_reason=reason,
         )
-
     if action in ("requeue_conflicting", "requeue_failed"):
         requeued_refs = _requeue_local_review_failures(
             pr_repo=pr_repo,
@@ -4216,7 +4324,6 @@ def review_rescue(
             pr_number=pr_number,
             blocked_reason=reason,
         )
-
     if action == "enable_automerge":
         code, _msg = automerge_review(
             pr_repo=pr_repo,
@@ -4237,8 +4344,6 @@ def review_rescue(
             auto_merge_enabled=code == 0,
             blocked_reason=None if code == 0 else "automerge-not-enabled",
         )
-
-    # Unreachable — all rescue_decision actions handled above
     return ReviewRescueResult(
         pr_repo=pr_repo,
         pr_number=pr_number,
