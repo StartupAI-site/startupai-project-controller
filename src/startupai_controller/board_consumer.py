@@ -17,9 +17,7 @@ Exit codes: 0 success, 2 no-op, 3 config error, 4 API error.
 
 from __future__ import annotations
 
-import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import os
@@ -37,17 +35,18 @@ from typing import Any, Callable
 
 
 from startupai_controller.board_automation import (
-    BoardAutomationConfig,
-    _build_review_snapshot_from_payload,
     admission_summary_payload,
     admit_backlog_items,
     mark_issues_done,
     _set_blocked_with_reason,
     claim_ready_issue,
-    load_automation_config,
     review_rescue,
     route_protected_queue_executors,
     sync_review_state,
+)
+from startupai_controller.board_automation_config import (
+    BoardAutomationConfig,
+    load_automation_config,
 )
 from startupai_controller.board_graph import (
     _ready_snapshot_rank,
@@ -71,36 +70,39 @@ from startupai_controller.consumer_workflow import (
 from startupai_controller.adapters.github_cli import (  # canonical adapter surface (ADR-002)
     CycleBoardSnapshot,
     CycleGitHubMemo,
+    GitHubCliAdapter,
     LinkedIssue,
     _ProjectItemSnapshot,
     _comment_exists,
     build_cycle_board_snapshot,
-    memoized_query_pull_request_view_payloads,
-    memoized_query_pull_request_state_probes,
-    memoized_query_required_status_checks,
     _list_project_items_by_status,
     _marker_for,
     _post_comment,
-    _run_gh,
     _set_status_if_changed,
     _snapshot_to_issue_ref,
     clear_cycle_board_snapshot_cache,
     close_issue,
     enable_pull_request_automerge,
-    gh_reason_code,
     rerun_actions_run,
-    review_state_digest_from_payload,
-    review_state_digest_from_probe,
 )
+from startupai_controller.adapters.github_transport import _run_gh, gh_reason_code
 from startupai_controller.adapters.github_http_adapter import (  # canonical: transport stats
     begin_request_stats,
     end_request_stats,
 )
+from startupai_controller.adapters.local_process import LocalProcessAdapter
 from startupai_controller.adapters.sqlite_store import ConsumerDB
 from startupai_controller.adapters.sqlite_store import (  # canonical: adapter-internal types
     MetricEvent,
     RecoveredLease,
 )
+from startupai_controller.adapters.sqlite_store import SqliteSessionStore
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.domain.resolution_policy import (
     NON_AUTO_CLOSE_RESOLUTION_KINDS,
     build_resolution_comment,
@@ -111,19 +113,21 @@ from startupai_controller.domain.resolution_policy import (
 from startupai_controller.domain.models import (
     ClaimReadyResult,
     CycleResult,
+    IssueSnapshot,
     OpenPullRequestMatch,
+    IssueContext,
     RepairBranchReconcileOutcome,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
     ReviewQueueEntry,
     ReviewSnapshot,
     SessionInfo,
+    WorktreeEntry,
 )
 from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
     parse_pr_url as _parse_pr_url,
 )
-from startupai_controller.adapters.sqlite_store import SqliteSessionStore
 from startupai_controller.domain.review_queue_policy import (
     DEFAULT_REVIEW_QUEUE_BATCH_SIZE,
     DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
@@ -309,6 +313,122 @@ class PreparedLaunchContext:
     dependency_summary: str
     branch_reconcile_state: str | None = None
     branch_reconcile_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ClaimedSessionContext:
+    """Claimed and started local session ready for Codex execution."""
+
+    session_id: str
+    effective_max_retries: int
+    slot_id: int
+
+
+@dataclass(frozen=True)
+class SessionExecutionOutcome:
+    """Outcome of executing a claimed local session."""
+
+    session_status: str
+    failure_reason: str | None
+    pr_url: str | None
+    has_commits: bool
+    codex_result: dict[str, Any] | None
+    should_transition_to_review: bool
+    immediate_review_summary: ReviewQueueDrainSummary
+    resolution_evaluation: ResolutionEvaluation | None = None
+    done_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PrCreationOutcome:
+    """PR creation/salvage result for a claimed session."""
+
+    pr_url: str | None
+    has_commits: bool
+    session_status: str
+    failure_reason: str | None
+
+
+@dataclass(frozen=True)
+class PreparedReviewQueueBatch:
+    """Prepared review-queue workset for one drain cycle."""
+
+    review_refs: frozenset[str]
+    queue_items: tuple[ReviewQueueEntry, ...]
+    due_items: tuple[ReviewQueueEntry, ...]
+    due_pr_groups: tuple[tuple[tuple[str, int], tuple[ReviewQueueEntry, ...]], ...]
+    selected_snapshot_entries: tuple[ReviewQueueEntry, ...]
+    seeded: tuple[str, ...]
+    removed: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReviewQueueProcessingOutcome:
+    """Processed review-queue results for a prepared batch."""
+
+    due_count: int
+    verdict_backfilled: tuple[str, ...]
+    rerun: tuple[str, ...]
+    auto_merge_enabled: tuple[str, ...]
+    requeued: tuple[str, ...]
+    blocked: tuple[str, ...]
+    skipped: tuple[str, ...]
+    escalated: tuple[str, ...]
+    partial_failure: bool
+    error: str | None
+    updated_snapshot: CycleBoardSnapshot
+
+
+@dataclass(frozen=True)
+class PreparedDueReviewProcessing:
+    """Prepared changed due-review groups ready for rescue processing."""
+
+    due_items: tuple[ReviewQueueEntry, ...]
+    due_pr_groups: tuple[tuple[tuple[str, int], tuple[ReviewQueueEntry, ...]], ...]
+    snapshots: dict[tuple[str, int], ReviewSnapshot]
+    verdict_backfilled: tuple[str, ...]
+    partial_failure: bool
+    error: str | None
+
+
+@dataclass(frozen=True)
+class ReviewGroupProcessingOutcome:
+    """Outcome of processing one due PR group from the review queue."""
+
+    rerun: tuple[str, ...]
+    auto_merge_enabled: tuple[str, ...]
+    requeued: tuple[str, ...]
+    blocked: tuple[str, ...]
+    skipped: tuple[str, ...]
+    escalated: tuple[str, ...]
+    updated_snapshot: CycleBoardSnapshot
+    partial_failure: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class CycleRuntimeContext:
+    """Cycle-scoped runtime wiring and configuration."""
+
+    session_store: SessionStorePort
+    cp_config: CriticalPathConfig
+    auto_config: BoardAutomationConfig | None
+    main_workflows: dict[str, WorkflowDefinition]
+    workflow_statuses: dict[str, Any]
+    dispatchable_repo_prefixes: tuple[str, ...]
+    effective_interval: int
+    global_limit: int
+    github_memo: CycleGitHubMemo
+    pr_port: PullRequestPort
+
+
+@dataclass(frozen=True)
+class SelectedLaunchCandidate:
+    """A Ready issue selected for launch preparation."""
+
+    issue_ref: str
+    repo_prefix: str
+    main_workflow: WorkflowDefinition
 
 
 # RepairBranchReconcileOutcome: re-exported from domain.models
@@ -1074,8 +1194,10 @@ def _set_issue_handoff_target(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    from startupai_controller.adapters.github_cli import _set_single_select_field
-    from startupai_controller.promote_ready import _query_issue_board_info
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_board_info,
+        _set_single_select_field,
+    )
 
     resolve_info = board_info_resolver or _query_issue_board_info
     info = resolve_info(issue_ref, config, project_owner, project_number)
@@ -1197,33 +1319,17 @@ def _run_workspace_hooks(
     worktree_path: str,
     issue_ref: str,
     branch_name: str,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Run repo-owned workspace hook commands in the claimed worktree."""
-    if not commands:
-        return
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    env = os.environ.copy()
-    env.update(
-        {
-            "STARTUPAI_ISSUE_REF": issue_ref,
-            "STARTUPAI_WORKTREE_PATH": worktree_path,
-            "STARTUPAI_BRANCH_NAME": branch_name,
-        }
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port.run_workspace_hooks(
+        commands,
+        worktree_path=worktree_path,
+        issue_ref=issue_ref,
+        branch_name=branch_name,
     )
-    for command in commands:
-        result = runner(
-            ["bash", "-lc", command],
-            cwd=worktree_path,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                f"workspace hook failed for '{command}' (exit {result.returncode}): {detail}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -1308,24 +1414,22 @@ def _fetch_issue_context(
     repo: str,
     number: int,
     *,
+    issue_context_port: IssueContextPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
-    """Read issue title, body, and labels via gh api."""
-    output = _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}",
-            "--jq",
-            '{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}',
-        ],
+    """Read issue title, body, and labels via the issue-context boundary."""
+    port = issue_context_port or GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
         gh_runner=gh_runner,
     )
-    try:
-        return json.loads(output)
-    except json.JSONDecodeError as err:
-        raise GhQueryError(
-            f"Failed parsing issue context for {owner}/{repo}#{number}"
-        ) from err
+    context = port.get_issue_context(owner, repo, number)
+    return {
+        "title": context.title,
+        "body": context.body,
+        "labels": list(context.labels),
+        "updated_at": context.updated_at,
+    }
 
 
 def _snapshot_for_issue(
@@ -1366,6 +1470,7 @@ def _hydrate_issue_context(
     snapshot: _ProjectItemSnapshot | None,
     config: ConsumerConfig,
     db: ConsumerDB,
+    issue_context_port: IssueContextPort | None = None,
     gh_runner: Callable[..., str] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -1407,7 +1512,13 @@ def _hydrate_issue_context(
         issue_ref=issue_ref,
         now=current,
     )
-    context = _fetch_issue_context(owner, repo, number, gh_runner=gh_runner)
+    context = _fetch_issue_context(
+        owner,
+        repo,
+        number,
+        issue_context_port=issue_context_port,
+        gh_runner=gh_runner,
+    )
     context.setdefault("title", snapshot.title if snapshot is not None else f"issue-{number}")
     context.setdefault("body", "")
     labels = context.get("labels")
@@ -1445,63 +1556,35 @@ def _hydrate_issue_context(
 def _list_repo_worktrees(
     repo_root: Path,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Return (worktree_path, branch_name) pairs for a repo root."""
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    result = runner(
-        ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(_git_command_detail(result))
-
-    records: list[tuple[str, str]] = []
-    path = ""
-    branch = ""
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            if path and branch:
-                records.append((path, branch))
-            path = ""
-            branch = ""
-            continue
-        if line.startswith("worktree "):
-            path = line.split(" ", 1)[1].strip()
-        elif line.startswith("branch "):
-            ref = line.split(" ", 1)[1].strip()
-            branch = ref.removeprefix("refs/heads/")
-    if path and branch:
-        records.append((path, branch))
-    return records
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    return [(entry.path, entry.branch_name) for entry in port.list_worktrees(str(repo_root))]
 
 
 def _worktree_is_clean(
     worktree_path: str,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Return True when a worktree has no local changes."""
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    result = runner(
-        ["git", "-C", worktree_path, "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0 and not result.stdout.strip()
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    return port.is_clean(worktree_path)
 
 
 def _worktree_ownership_is_safe(
-    db: ConsumerDB,
+    store: SessionStorePort,
     issue_ref: str,
     worktree_path: str,
 ) -> bool:
     """Return True when a clean worktree is safe to adopt for an issue."""
-    for worker in db.active_workers():
+    for worker in store.active_workers():
         if worker.worktree_path == worktree_path and worker.issue_ref != issue_ref:
             return False
-    latest = db.latest_session_for_worktree(worktree_path)
+    latest = store.latest_session_for_worktree(worktree_path)
     if latest is None:
         return True
     return latest.issue_ref == issue_ref
@@ -1514,11 +1597,14 @@ def _prepare_worktree(
     db: ConsumerDB,
     *,
     branch_name_override: str | None = None,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
     parsed = parse_issue_ref(issue_ref)
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
+    store = session_store or SqliteSessionStore(db)
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
     if config.worktree_reuse_enabled:
         repo_root = config.repo_roots.get(parsed.prefix)
         if repo_root is None:
@@ -1531,7 +1617,7 @@ def _prepare_worktree(
         try:
             worktree_records = _list_repo_worktrees(
                 repo_root,
-                subprocess_runner=runner,
+                worktree_port=port,
             )
         except RuntimeError as err:
             logger.warning(
@@ -1543,21 +1629,17 @@ def _prepare_worktree(
         for worktree_path, branch_name in worktree_records:
             if branch_name != target_branch:
                 continue
-            if not _worktree_is_clean(worktree_path, subprocess_runner=runner):
+            if not _worktree_is_clean(worktree_path, worktree_port=port):
                 raise WorktreePrepareError(
                     "worktree_in_use",
                     f"existing worktree is dirty for {target_branch}: {worktree_path}",
                 )
-            if not _worktree_ownership_is_safe(db, issue_ref, worktree_path):
+            if not _worktree_ownership_is_safe(store, issue_ref, worktree_path):
                 raise WorktreePrepareError(
                     "worktree_in_use",
                     f"existing worktree ownership is ambiguous for {target_branch}: {worktree_path}",
                 )
-            _fast_forward_existing_worktree(
-                worktree_path,
-                target_branch,
-                subprocess_runner=runner,
-            )
+            port.fast_forward_existing(worktree_path, target_branch)
             _record_metric(
                 db,
                 config,
@@ -1572,7 +1654,8 @@ def _prepare_worktree(
         title,
         config,
         branch_name_override=branch_name_override,
-        subprocess_runner=runner,
+        worktree_port=port,
+        subprocess_runner=subprocess_runner,
     )
 
 
@@ -1587,144 +1670,32 @@ def _create_worktree(
     config: ConsumerConfig,
     *,
     branch_name_override: str | None = None,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create a worktree for the issue. Returns (worktree_path, branch_name).
 
     Shells out to wt-create.sh.
     """
-    parsed = parse_issue_ref(issue_ref)
-    # Slugify title: lowercase, replace non-alnum with hyphen, truncate
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
-    branch = branch_name_override or f"feat/{parsed.number}-{slug}"
-    worktree_branch_arg = branch_name_override or f"feat/{slug}"
-    repo_prefix = parsed.prefix  # "crew"
-    if branch_name_override:
-        expected_worktree_path = os.path.expanduser(
-            f"~/projects/worktrees/{repo_prefix}/{branch_name_override}"
-        )
-    else:
-        expected_worktree_path = os.path.expanduser(
-            f"~/projects/worktrees/{repo_prefix}/feat/{parsed.number}-{slug}"
-        )
-
-    runner = subprocess_runner or (
-        lambda args, **kw: subprocess.run(args, **kw)
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    entry = port.create_issue_worktree(
+        issue_ref,
+        title,
+        branch_name_override=branch_name_override,
     )
-    wt_script = os.path.expanduser(
-        "~/.claude/skills/worktree/scripts/wt-create.sh"
-    )
-    result = runner(
-        [
-            wt_script,
-            repo_prefix,
-            worktree_branch_arg,
-            "--agent",
-            "board-consumer",
-            "--issue",
-            str(parsed.number),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        if (
-            "Worktree already exists at" in result.stderr
-            and os.path.isdir(expected_worktree_path)
-        ):
-            branch_result = runner(
-                ["git", "-C", expected_worktree_path, "branch", "--show-current"],
-                capture_output=True,
-                text=True,
-            )
-            if branch_result.returncode == 0:
-                current_branch = branch_result.stdout.strip()
-                if current_branch == branch:
-                    _fast_forward_existing_worktree(
-                        expected_worktree_path,
-                        branch,
-                        subprocess_runner=runner,
-                    )
-                    return expected_worktree_path, branch
-        raise RuntimeError(
-            f"wt-create.sh failed (exit {result.returncode}): {result.stderr}"
-        )
-
-    # Parse worktree path from output (last line: "Worktree ready: /path")
-    worktree_path = ""
-    for line in result.stdout.splitlines():
-        if line.startswith("Worktree ready:"):
-            worktree_path = line.split(":", 1)[1].strip()
-            break
-
-    if not worktree_path:
-        # Fallback: construct expected path
-        worktree_path = expected_worktree_path
-
-    return worktree_path, branch
+    return entry.path, entry.branch_name
 
 
 def _fast_forward_existing_worktree(
     worktree_path: str,
     branch: str,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    runner = subprocess_runner or (
-        lambda args, **kw: subprocess.run(args, **kw)
-    )
-
-    status_result = runner(
-        ["git", "-C", worktree_path, "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    if status_result.returncode != 0 or status_result.stdout.strip():
-        return
-
-    fetch_result = runner(
-        ["git", "-C", worktree_path, "fetch", "origin", branch],
-        capture_output=True,
-        text=True,
-    )
-    if fetch_result.returncode != 0:
-        return
-
-    counts_result = runner(
-        [
-            "git",
-            "-C",
-            worktree_path,
-            "rev-list",
-            "--left-right",
-            "--count",
-            f"HEAD...origin/{branch}",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if counts_result.returncode != 0:
-        return
-
-    parts = counts_result.stdout.strip().split()
-    if len(parts) != 2:
-        return
-
-    ahead, behind = (int(parts[0]), int(parts[1]))
-    if behind == 0 or ahead != 0:
-        return
-
-    ff_result = runner(
-        ["git", "-C", worktree_path, "merge", "--ff-only", f"origin/{branch}"],
-        capture_output=True,
-        text=True,
-    )
-    if ff_result.returncode != 0:
-        detail = ff_result.stderr.strip() or ff_result.stdout.strip() or "unknown-error"
-        raise RuntimeError(
-            f"existing worktree fast-forward failed for {branch}: {detail}"
-        )
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    port.fast_forward_existing(worktree_path, branch)
 
 
 def _git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
@@ -1736,96 +1707,12 @@ def _reconcile_repair_branch(
     worktree_path: str,
     branch: str,
     *,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> RepairBranchReconcileOutcome:
     """Reconcile a repair branch against its remote and origin/main."""
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-
-    def run_git(*args: str) -> subprocess.CompletedProcess[str]:
-        return runner(
-            ["git", "-C", worktree_path, *args],
-            capture_output=True,
-            text=True,
-        )
-
-    checkout_result = run_git("checkout", branch)
-    if checkout_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"checkout-branch:{_git_command_detail(checkout_result)}",
-        )
-
-    status_result = run_git("status", "--porcelain")
-    if status_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"status:{_git_command_detail(status_result)}",
-        )
-    if status_result.stdout.strip():
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            "worktree-dirty-before-repair-reconcile",
-        )
-
-    fetch_result = run_git("fetch", "origin", "main", branch)
-    if fetch_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"fetch:{_git_command_detail(fetch_result)}",
-        )
-
-    counts_result = run_git(
-        "rev-list",
-        "--left-right",
-        "--count",
-        f"HEAD...origin/{branch}",
-    )
-    if counts_result.returncode != 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"branch-sync:{_git_command_detail(counts_result)}",
-        )
-
-    parts = counts_result.stdout.strip().split()
-    if len(parts) != 2:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            f"branch-sync:unexpected-rev-list-output:{counts_result.stdout.strip()}",
-        )
-
-    ahead, behind = (int(parts[0]), int(parts[1]))
-    synced_remote_branch = False
-    if ahead > 0 and behind > 0:
-        return RepairBranchReconcileOutcome(
-            "reconcile_setup_failed",
-            "repair-branch-diverged-from-origin",
-        )
-    if ahead == 0 and behind > 0:
-        ff_result = run_git("merge", "--ff-only", f"origin/{branch}")
-        if ff_result.returncode != 0:
-            return RepairBranchReconcileOutcome(
-                "reconcile_setup_failed",
-                f"fast-forward-branch:{_git_command_detail(ff_result)}",
-            )
-        synced_remote_branch = True
-
-    merge_main_result = run_git("merge", "--no-edit", "origin/main")
-    if merge_main_result.returncode == 0:
-        detail = _git_command_detail(merge_main_result)
-        if "Already up to date." in detail:
-            return RepairBranchReconcileOutcome(
-                "fast_forwarded_repair_branch" if synced_remote_branch else "up_to_date"
-            )
-        return RepairBranchReconcileOutcome("merged_main")
-
-    merge_head_result = run_git("rev-parse", "-q", "--verify", "MERGE_HEAD")
-    if merge_head_result.returncode == 0:
-        return RepairBranchReconcileOutcome("conflicted_main_merge")
-
-    return RepairBranchReconcileOutcome(
-        "reconcile_setup_failed",
-        f"merge-main:{_git_command_detail(merge_main_result)}",
-    )
+    port = worktree_port or LocalProcessAdapter(subprocess_runner=subprocess_runner)
+    return port.reconcile_repair_branch(worktree_path, branch)
 
 
 # ---------------------------------------------------------------------------
@@ -2299,41 +2186,26 @@ def _list_open_pr_candidates(
     repo: str,
     issue_number: int,
     *,
+    pr_port: PullRequestPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequestMatch]:
     """Return open PRs that reference an issue number in the repository."""
-    output = _run_gh(
-        [
-            "pr",
-            "list",
-            "--repo",
-            f"{owner}/{repo}",
-            "--state",
-            "open",
-            "--search",
-            f"Closes #{issue_number}",
-            "--json",
-            "number,url,body,author,headRefName",
-        ],
+    port = pr_port or GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
         gh_runner=gh_runner,
     )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as err:
-        raise GhQueryError(
-            f"Failed parsing PR search results for {owner}/{repo}#{issue_number}"
-        ) from err
-
+    payload = port.list_open_prs_for_issue(f"{owner}/{repo}", issue_number)
     matches: list[OpenPullRequestMatch] = []
     for item in payload:
-        body = str(item.get("body") or "")
+        body = item.body
         matches.append(
             OpenPullRequestMatch(
-                url=str(item.get("url") or ""),
-                number=int(item.get("number") or 0),
-                author=str(((item.get("author") or {}).get("login") or "")).strip().lower(),
+                url=item.url,
+                number=item.number,
+                author=item.author,
                 body=body,
-                branch_name=str(item.get("headRefName") or "").strip(),
+                branch_name=item.head_ref_name,
                 provenance=_parse_consumer_provenance(body),
             )
         )
@@ -2348,6 +2220,7 @@ def _classify_open_pr_candidates(
     automation_config: BoardAutomationConfig,
     *,
     expected_branch: str | None = None,
+    pr_port: PullRequestPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, OpenPullRequestMatch | None, str]:
     """Classify open PRs for an issue as adoptable, ambiguous, non-local, or none."""
@@ -2355,6 +2228,7 @@ def _classify_open_pr_candidates(
         owner,
         repo,
         issue_number,
+        pr_port=pr_port,
         gh_runner=gh_runner,
     )
     return _classify_pr_candidates_pure(
@@ -2526,7 +2400,7 @@ def _group_review_queue_entries_by_pr(
 
 
 def _repark_unchanged_review_queue_entries(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     *,
     now: datetime,
@@ -2544,7 +2418,7 @@ def _repark_unchanged_review_queue_entries(
         if entry.last_result == "partial_failure":
             retry_seconds = max(DEFAULT_REVIEW_QUEUE_RETRY_SECONDS, retry_seconds)
         _apply_review_queue_result(
-            db,
+            store,
             entry,
             synthetic_result,
             now=now,
@@ -2566,8 +2440,7 @@ def _review_queue_state_probe_candidates(
 def _partition_review_queue_entries_by_probe_change(
     entries: list[ReviewQueueEntry],
     *,
-    github_memo: CycleGitHubMemo,
-    gh_runner: Callable[..., str] | None = None,
+    pr_port: PullRequestPort,
 ) -> tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]:
     """Split queued review entries into changed vs unchanged probe state."""
     unchanged: list[ReviewQueueEntry] = []
@@ -2581,16 +2454,13 @@ def _partition_review_queue_entries_by_probe_change(
             continue
         numbers_by_repo.setdefault(entry.pr_repo, []).append(entry.pr_number)
 
-    digests: dict[tuple[str, int], str] = {}
-    for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
-        probes = memoized_query_pull_request_state_probes(
-            github_memo,
-            pr_repo,
-            tuple(sorted(set(pr_numbers))),
-            gh_runner=gh_runner,
-        )
-        for pr_number, probe in probes.items():
-            digests[(pr_repo, pr_number)] = review_state_digest_from_probe(probe)
+    digests = pr_port.review_state_digests(
+        [
+            (pr_repo, pr_number)
+            for pr_repo, pr_numbers in sorted(numbers_by_repo.items())
+            for pr_number in sorted(set(pr_numbers))
+        ]
+    )
 
     for entry in entries:
         if not (
@@ -2611,12 +2481,11 @@ def _partition_review_queue_entries_by_probe_change(
 
 
 def _wakeup_changed_review_queue_entries(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     *,
     now: datetime,
-    github_memo: CycleGitHubMemo,
-    gh_runner: Callable[..., str] | None = None,
+    pr_port: PullRequestPort,
     dry_run: bool = False,
 ) -> tuple[str, ...]:
     """Promote parked review entries whose lightweight PR state has changed."""
@@ -2629,15 +2498,14 @@ def _wakeup_changed_review_queue_entries(
         return ()
     changed, _unchanged = _partition_review_queue_entries_by_probe_change(
         candidates,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
+        pr_port=pr_port,
     )
     if not changed:
         return ()
     if not dry_run:
         next_attempt_at = now.isoformat()
         for entry in changed:
-            db.reschedule_review_queue_item(
+            store.reschedule_review_queue_item(
                 entry.issue_ref,
                 next_attempt_at=next_attempt_at,
                 now=now,
@@ -2649,12 +2517,10 @@ def _build_review_snapshots_for_queue_entries(
     *,
     queue_entries: list[ReviewQueueEntry],
     review_refs: set[str],
-    automation_config: BoardAutomationConfig,
-    gh_runner: Callable[..., str] | None = None,
-    github_memo: CycleGitHubMemo | None = None,
+    pr_port: PullRequestPort,
+    trusted_codex_actors: frozenset[str],
 ) -> dict[tuple[str, int], ReviewSnapshot]:
     """Build one review snapshot per unique PR for queued review entries."""
-    memo = github_memo or CycleGitHubMemo()
     review_refs_by_pr: dict[tuple[str, int], list[str]] = {}
     for entry in queue_entries:
         if entry.issue_ref not in review_refs:
@@ -2662,48 +2528,21 @@ def _build_review_snapshots_for_queue_entries(
         review_refs_by_pr.setdefault((entry.pr_repo, entry.pr_number), []).append(
             entry.issue_ref
         )
-
-    snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
-    numbers_by_repo: dict[str, list[int]] = {}
-    for pr_repo, pr_number in review_refs_by_pr:
-        numbers_by_repo.setdefault(pr_repo, []).append(pr_number)
-
-    for pr_repo, pr_numbers in sorted(numbers_by_repo.items()):
-        payloads = memoized_query_pull_request_view_payloads(
-            memo,
-            pr_repo,
-            tuple(sorted(set(pr_numbers))),
-            gh_runner=gh_runner,
-        )
-        for pr_number in sorted(set(pr_numbers)):
-            refs = review_refs_by_pr[(pr_repo, pr_number)]
-            payload = payloads.get(pr_number)
-            if payload is None:
-                raise GhQueryError(
-                    f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
-                )
-            required_checks = memoized_query_required_status_checks(
-                memo,
-                pr_repo,
-                payload.base_ref_name or "main",
-                gh_runner=gh_runner,
-            )
-            snapshots[(pr_repo, pr_number)] = _build_review_snapshot_from_payload(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                review_refs=tuple(sorted(set(refs))),
-                pr_payload=payload,
-                automation_config=automation_config,
-                required_checks=required_checks,
-            )
-    return snapshots
+    return pr_port.review_snapshots(
+        {
+            pr_key: tuple(sorted(set(refs)))
+            for pr_key, refs in review_refs_by_pr.items()
+        },
+        trusted_codex_actors=trusted_codex_actors,
+    )
 
 
 def _backfill_review_verdicts_from_snapshots(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     snapshots: dict[tuple[str, int], ReviewSnapshot],
     *,
+    pr_port: PullRequestPort,
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
@@ -2715,9 +2554,9 @@ def _backfill_review_verdicts_from_snapshots(
         if snapshot is None:
             continue
         session = (
-            db.get_session(entry.source_session_id)
+            store.get_session(entry.source_session_id)
             if entry.source_session_id
-            else db.latest_session_for_issue(entry.issue_ref)
+            else store.latest_session_for_issue(entry.issue_ref)
         )
         if session is None:
             continue
@@ -2739,13 +2578,19 @@ def _backfill_review_verdicts_from_snapshots(
         if _marker_already_present(marker, seen_markers):
             continue
         try:
-            posted = _post_pr_codex_verdict(
-                session.pr_url,
-                session.id,
-                comment_checker=lambda *args, **kwargs: False,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
+            if comment_poster is None and gh_runner is None:
+                posted = pr_port.post_codex_verdict_if_missing(
+                    session.pr_url,
+                    session.id,
+                )
+            else:
+                posted = _post_pr_codex_verdict(
+                    session.pr_url,
+                    session.id,
+                    comment_checker=lambda *args, **kwargs: False,
+                    comment_poster=comment_poster,
+                    gh_runner=gh_runner,
+                )
         except (GhQueryError, Exception) as err:
             logger.warning(
                 "Review verdict backfill failed for %s (%s): %s",
@@ -2761,9 +2606,10 @@ def _backfill_review_verdicts_from_snapshots(
 
 
 def _pre_backfill_verdicts_for_due_prs(
-    db: ConsumerDB,
+    store: SessionStorePort,
     due_items: list[ReviewQueueEntry],
     *,
+    pr_port: PullRequestPort | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -2778,9 +2624,9 @@ def _pre_backfill_verdicts_for_due_prs(
             continue
         try:
             session = (
-                db.get_session(entry.source_session_id)
+                store.get_session(entry.source_session_id)
                 if entry.source_session_id
-                else db.latest_session_for_issue(entry.issue_ref)
+                else store.latest_session_for_issue(entry.issue_ref)
             )
             if session is None:
                 continue
@@ -2791,13 +2637,24 @@ def _pre_backfill_verdicts_for_due_prs(
                 entry_pr_url=entry.pr_url,
             ):
                 continue
-            posted = _post_pr_codex_verdict(
-                session.pr_url,
-                session.id,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
+            if (
+                pr_port is not None
+                and comment_checker is None
+                and comment_poster is None
+                and gh_runner is None
+            ):
+                posted = pr_port.post_codex_verdict_if_missing(
+                    session.pr_url,
+                    session.id,
+                )
+            else:
+                posted = _post_pr_codex_verdict(
+                    session.pr_url,
+                    session.id,
+                    comment_checker=comment_checker,
+                    comment_poster=comment_poster,
+                    gh_runner=gh_runner,
+                )
             if posted:
                 backfilled.append(entry.issue_ref)
         except Exception as err:
@@ -2863,7 +2720,7 @@ def _review_queue_retry_seconds_for_partial_failure(
 
 
 def _queue_review_item(
-    db: ConsumerDB,
+    store: SessionStorePort,
     issue_ref: str,
     pr_url: str,
     *,
@@ -2875,7 +2732,7 @@ def _queue_review_item(
     if parsed is None:
         return None
     owner, repo, pr_number = parsed
-    db.enqueue_review_item(
+    store.enqueue_review_item(
         issue_ref,
         pr_url=pr_url,
         pr_repo=f"{owner}/{repo}",
@@ -2884,7 +2741,7 @@ def _queue_review_item(
         next_attempt_at=(now or datetime.now(timezone.utc)).isoformat(),
         now=now,
     )
-    return db.get_review_queue_item(issue_ref)
+    return store.get_review_queue_item(issue_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -2894,7 +2751,7 @@ def _queue_review_item(
 
 
 def _apply_review_queue_result(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entry: ReviewQueueEntry,
     result: Any,
     *,
@@ -2926,7 +2783,7 @@ def _apply_review_queue_result(
         return False
 
     if result.auto_merge_enabled:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="auto_merge_enabled",
@@ -2939,7 +2796,7 @@ def _apply_review_queue_result(
         return False
 
     if result.rerun_checks:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="rerun_checks",
@@ -2957,7 +2814,7 @@ def _apply_review_queue_result(
             entry.blocked_streak,
             entry.blocked_class,
         )
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="blocked",
@@ -2970,7 +2827,7 @@ def _apply_review_queue_result(
         return needs_escalation
 
     if result.skipped_reason:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="skipped",
@@ -2982,7 +2839,7 @@ def _apply_review_queue_result(
         )
         return False
 
-    db.update_review_queue_item(
+    store.update_review_queue_item(
         entry.issue_ref,
         next_attempt_at=next_attempt_at,
         last_result="processed",
@@ -2996,7 +2853,7 @@ def _apply_review_queue_result(
 
 
 def _apply_review_queue_partial_failure(
-    db: ConsumerDB,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     *,
     config: ConsumerConfig,
@@ -3012,7 +2869,7 @@ def _apply_review_queue_partial_failure(
         delay_seconds=_review_queue_retry_seconds_for_partial_failure(config, error),
     )
     for entry in entries:
-        db.update_review_queue_item(
+        store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="partial_failure",
@@ -3048,116 +2905,18 @@ def _update_board_snapshot_statuses(
     )
 
 
-# ---------------------------------------------------------------------------
-# _drain_review_queue sub-functions: focused extraction from god-function
-# ---------------------------------------------------------------------------
-
-
-def _prune_stale_review_entries(
-    db: ConsumerDB,
-    review_refs: set[str],
-    existing_entries: list[ReviewQueueEntry],
+def _prepare_review_queue_batch(
     *,
-    dry_run: bool = False,
-) -> list[str]:
-    """Remove queue entries for issues no longer in Review scope."""
-    removed: list[str] = []
-    for entry in existing_entries:
-        if entry.issue_ref in review_refs:
-            continue
-        if not dry_run:
-            db.delete_review_queue_item(entry.issue_ref)
-        removed.append(entry.issue_ref)
-    return removed
-
-
-def _seed_new_review_entries(
-    db: ConsumerDB,
-    review_refs: set[str],
-    existing_refs: set[str],
-    *,
-    dry_run: bool = False,
-    now: datetime | None = None,
-) -> list[str]:
-    """Seed queue entries for Review issues not yet tracked."""
-    seeded: list[str] = []
-    for issue_ref in sorted(review_refs):
-        if issue_ref in existing_refs:
-            continue
-        latest_session = db.latest_session_for_issue(issue_ref)
-        if latest_session is None or not latest_session.pr_url:
-            continue
-        if not dry_run:
-            if _queue_review_item(
-                db,
-                issue_ref,
-                latest_session.pr_url,
-                session_id=latest_session.id,
-                now=now,
-            ) is None:
-                continue
-        seeded.append(issue_ref)
-    return seeded
-
-
-def _reconcile_review_queue_identity(
-    db: ConsumerDB,
-    review_refs: set[str],
-    *,
-    now: datetime | None = None,
-) -> None:
-    """Reconcile queue rows and requeue counters against current PR identity.
-
-    When the active session's PR URL changes, update the queue entry and
-    reset the requeue counter to avoid false escalation.
-    """
-    for entry in db.list_review_queue_items():
-        if entry.issue_ref not in review_refs:
-            continue
-        current_pr_url = entry.pr_url
-        latest_session = db.latest_session_for_issue(entry.issue_ref)
-        if latest_session is not None and latest_session.pr_url:
-            current_pr_url = latest_session.pr_url
-        if current_pr_url != entry.pr_url:
-            parsed = _parse_pr_url(current_pr_url)
-            if parsed is None:
-                continue
-            owner, repo, pr_number = parsed
-            db.enqueue_review_item(
-                entry.issue_ref,
-                pr_url=current_pr_url,
-                pr_repo=f"{owner}/{repo}",
-                pr_number=pr_number,
-                source_session_id=(
-                    latest_session.id if latest_session is not None else entry.source_session_id
-                ),
-                next_attempt_at=entry.next_attempt_at,
-                now=now,
-            )
-        _count, stored_pr_url = db.get_requeue_state(entry.issue_ref)
-        if stored_pr_url is not None and stored_pr_url != current_pr_url:
-            db.reset_requeue_count(entry.issue_ref)
-
-
-def _drain_review_queue(
     config: ConsumerConfig,
-    db: ConsumerDB,
+    store: SessionStorePort,
     critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig | None,
-    *,
-    session_store: SqliteSessionStore | None = None,
     board_snapshot: CycleBoardSnapshot,
-    dry_run: bool = False,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
-    """Process a bounded batch of queued Review items."""
-    if automation_config is None:
-        return ReviewQueueDrainSummary(), board_snapshot
-
-    store = session_store or SqliteSessionStore(db)
-    now = datetime.now(timezone.utc)
-    review_refs = set(
+    pr_port: PullRequestPort,
+    now: datetime,
+    dry_run: bool,
+) -> tuple[PreparedReviewQueueBatch | None, ReviewQueueDrainSummary | None]:
+    """Prepare the bounded review-queue workset for one drain cycle."""
+    review_refs = frozenset(
         _review_scope_issue_refs(
             config,
             critical_path_config,
@@ -3167,87 +2926,128 @@ def _drain_review_queue(
     existing_entries = store.list_review_queue_items()
     existing_refs = {entry.issue_ref for entry in existing_entries}
 
-    # Phase 1: Prune stale entries, seed new ones, reconcile identity
-    # Helpers accept ConsumerDB | SqliteSessionStore (duck typing on shared methods)
-    removed = _prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
-    seeded = _seed_new_review_entries(store, review_refs, existing_refs, dry_run=dry_run, now=now)
+    removed = tuple(
+        _prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
+    )
+    seeded = tuple(
+        _seed_new_review_entries(
+            store,
+            review_refs,
+            existing_refs,
+            dry_run=dry_run,
+            now=now,
+        )
+    )
     if not dry_run:
         _reconcile_review_queue_identity(store, review_refs, now=now)
 
-    queue_items = [
-        entry for entry in store.list_review_queue_items() if entry.issue_ref in review_refs
-    ]
+    queue_items = tuple(
+        entry
+        for entry in store.list_review_queue_items()
+        if entry.issue_ref in review_refs
+    )
     if not review_refs and not queue_items:
-        return (
-            ReviewQueueDrainSummary(
-                queued_count=0,
-                due_count=0,
-                removed=tuple(removed),
-                skipped=("control-plane:no-review-items",),
-            ),
-            board_snapshot,
+        return None, ReviewQueueDrainSummary(
+            queued_count=0,
+            due_count=0,
+            removed=removed,
+            skipped=("control-plane:no-review-items",),
         )
-    memo = github_memo or CycleGitHubMemo()
+
     try:
         _wakeup_changed_review_queue_entries(
-            db,
-            queue_items,
+            store,
+            list(queue_items),
             now=now,
-            github_memo=memo,
-            gh_runner=gh_runner,
+            pr_port=pr_port,
             dry_run=dry_run,
         )
     except GhQueryError as err:
         logger.warning("Review queue wakeup probe failed: %s", err)
-        memo = github_memo or CycleGitHubMemo()
+
     if not dry_run:
-        queue_items = [
-            entry for entry in store.list_review_queue_items() if entry.issue_ref in review_refs
-        ]
-    queue_pr_groups = dict(_group_review_queue_entries_by_pr(queue_items))
-    due_entries_all = [
-        entry
-        for entry in queue_items
-        if entry.next_attempt_datetime() <= now
-    ]
-    due_pr_groups = _group_review_queue_entries_by_pr(due_entries_all)[
+        queue_items = tuple(
+            entry
+            for entry in store.list_review_queue_items()
+            if entry.issue_ref in review_refs
+        )
+
+    queue_pr_groups = dict(_group_review_queue_entries_by_pr(list(queue_items)))
+    due_items = tuple(
+        entry for entry in queue_items if entry.next_attempt_datetime() <= now
+    )
+    due_pr_groups_list = _group_review_queue_entries_by_pr(list(due_items))[
         :DEFAULT_REVIEW_QUEUE_BATCH_SIZE
     ]
-    due_items = [entry for _pr_key, entries in due_pr_groups for entry in entries]
-    selected_snapshot_entries = [
+    due_items = tuple(
+        entry for _pr_key, entries in due_pr_groups_list for entry in entries
+    )
+    due_pr_keys = {pr_key for pr_key, _entries in due_pr_groups_list}
+    selected_snapshot_entries = tuple(
         entry
         for pr_key, entries in queue_pr_groups.items()
-        if pr_key in {group_key for group_key, _group_entries in due_pr_groups}
+        if pr_key in due_pr_keys
         for entry in entries
+    )
+
+    return (
+        PreparedReviewQueueBatch(
+            review_refs=review_refs,
+            queue_items=queue_items,
+            due_items=due_items,
+            due_pr_groups=tuple(
+                (pr_key, tuple(entries)) for pr_key, entries in due_pr_groups_list
+            ),
+            selected_snapshot_entries=selected_snapshot_entries,
+            seeded=seeded,
+            removed=removed,
+        ),
+        None,
+    )
+
+
+def _prepare_due_review_processing(
+    *,
+    store: SessionStorePort,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    prepared_batch: PreparedReviewQueueBatch,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> PreparedDueReviewProcessing:
+    """Prepare the changed due-review groups and snapshots for rescue processing."""
+    due_items = list(prepared_batch.due_items)
+    due_pr_groups = [
+        (pr_key, list(entries)) for pr_key, entries in prepared_batch.due_pr_groups
     ]
+    selected_snapshot_entries = list(prepared_batch.selected_snapshot_entries)
 
     pre_backfilled: tuple[str, ...] = ()
     if not dry_run and due_items:
         pre_backfilled = _pre_backfill_verdicts_for_due_prs(
-            db, due_items, gh_runner=gh_runner,
+            store,
+            due_items,
+            pr_port=pr_port,
+            gh_runner=gh_runner,
         )
 
     verdict_backfilled: tuple[str, ...] = ()
-    rerun: list[str] = []
-    auto_merge_enabled: list[str] = []
-    requeued: list[str] = []
-    blocked: list[str] = []
-    skipped: list[str] = []
-    escalated: list[str] = []
     partial_failure = False
     error: str | None = None
-    updated_snapshot = board_snapshot
     snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
+
     if due_pr_groups:
         try:
-            changed_due_items, unchanged_due_items = _partition_review_queue_entries_by_probe_change(
-                due_items,
-                github_memo=memo,
-                gh_runner=gh_runner,
+            changed_due_items, unchanged_due_items = (
+                _partition_review_queue_entries_by_probe_change(
+                    due_items,
+                    pr_port=pr_port,
+                )
             )
             if unchanged_due_items and not dry_run:
                 _repark_unchanged_review_queue_entries(
-                    db,
+                    store,
                     unchanged_due_items,
                     now=now,
                 )
@@ -3268,42 +3068,149 @@ def _drain_review_queue(
             if due_pr_groups:
                 snapshots = _build_review_snapshots_for_queue_entries(
                     queue_entries=selected_snapshot_entries,
-                    review_refs=review_refs,
-                    automation_config=automation_config,
-                    gh_runner=gh_runner,
-                    github_memo=memo,
+                    review_refs=set(prepared_batch.review_refs),
+                    pr_port=pr_port,
+                    trusted_codex_actors=frozenset(
+                        automation_config.trusted_codex_actors
+                    ),
                 )
         except GhQueryError as err:
             partial_failure = True
             error = str(err)
+
         if not dry_run and not partial_failure:
             secondary_backfilled = _backfill_review_verdicts_from_snapshots(
-                db,
+                store,
                 due_items,
                 snapshots,
+                pr_port=pr_port,
                 gh_runner=gh_runner,
             )
             verdict_backfilled = tuple(
                 dict.fromkeys(pre_backfilled + secondary_backfilled)
             )
 
-    from startupai_controller.adapters.github_cli import GitHubCliAdapter as _GhCliAdapter
+    return PreparedDueReviewProcessing(
+        due_items=tuple(due_items),
+        due_pr_groups=tuple(
+            (pr_key, tuple(entries)) for pr_key, entries in due_pr_groups
+        ),
+        snapshots=snapshots,
+        verdict_backfilled=verdict_backfilled,
+        partial_failure=partial_failure,
+        error=error,
+    )
 
-    _drain_pr_port = _GhCliAdapter(
-        project_owner=config.project_owner,
-        project_number=config.project_number,
+
+def _process_due_review_group(
+    *,
+    config: ConsumerConfig,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    pr_repo: str,
+    pr_number: int,
+    entries: tuple[ReviewQueueEntry, ...],
+    snapshot: ReviewSnapshot | None,
+    updated_snapshot: CycleBoardSnapshot,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewGroupProcessingOutcome:
+    """Process one due PR group from the review queue."""
+    if snapshot is None:
+        return ReviewGroupProcessingOutcome(
+            rerun=(),
+            auto_merge_enabled=(),
+            requeued=(),
+            blocked=(),
+            skipped=(),
+            escalated=(),
+            updated_snapshot=updated_snapshot,
+            partial_failure=True,
+            error=f"missing-review-snapshot:{pr_repo}#{pr_number}",
+        )
+
+    rescue_result = _run_review_rescue_for_group(
+        config=config,
+        critical_path_config=critical_path_config,
+        automation_config=automation_config,
+        pr_port=pr_port,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        snapshot=snapshot,
+        dry_run=dry_run,
         gh_runner=gh_runner,
     )
-    for (pr_repo, pr_number), entries in due_pr_groups:
-        if partial_failure:
-            break
-        snapshot = snapshots.get((pr_repo, pr_number))
-        if snapshot is None:
-            partial_failure = True
-            error = error or f"missing-review-snapshot:{pr_repo}#{pr_number}"
-            break
-        try:
-            result = review_rescue(
+    if rescue_result.partial_failure:
+        return ReviewGroupProcessingOutcome(
+            rerun=(),
+            auto_merge_enabled=(),
+            requeued=(),
+            blocked=(),
+            skipped=(),
+            escalated=(),
+            updated_snapshot=updated_snapshot,
+            partial_failure=True,
+            error=rescue_result.error,
+        )
+
+    escalated = _apply_review_queue_group_result(
+        store=store,
+        critical_path_config=critical_path_config,
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        pr_port=pr_port,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        entries=entries,
+        result=rescue_result.result,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+    return _summarize_review_group_outcome(
+        critical_path_config=critical_path_config,
+        store=store,
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        entries=entries,
+        result=rescue_result.result,
+        updated_snapshot=updated_snapshot,
+        escalated=escalated,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+
+
+@dataclass(frozen=True)
+class ReviewRescueExecution:
+    """Result of executing rescue logic for one review PR."""
+
+    result: ReviewRescueResult
+    partial_failure: bool = False
+    error: str | None = None
+
+
+def _run_review_rescue_for_group(
+    *,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    pr_repo: str,
+    pr_number: int,
+    snapshot: ReviewSnapshot,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewRescueExecution:
+    """Run rescue logic for one due review group."""
+    try:
+        return ReviewRescueExecution(
+            result=review_rescue(
                 pr_repo=pr_repo,
                 pr_number=pr_number,
                 config=critical_path_config,
@@ -3313,99 +3220,214 @@ def _drain_review_queue(
                 dry_run=dry_run,
                 snapshot=snapshot,
                 gh_runner=gh_runner,
-                pr_port=_drain_pr_port,
+                pr_port=pr_port,
             )
-        except GhQueryError as err:
-            partial_failure = True
-            error = str(err)
-            break
+        )
+    except GhQueryError as err:
+        return ReviewRescueExecution(
+            result=ReviewRescueResult(),
+            partial_failure=True,
+            error=str(err),
+        )
 
-        if not dry_run:
-            probe = memo.review_state_probes.get((pr_repo, pr_number))
-            if probe is not None:
-                state_digest = review_state_digest_from_probe(probe)
-            else:
-                payload = memo.review_pull_requests.get((pr_repo, pr_number))
-                state_digest = (
-                    review_state_digest_from_payload(payload)
-                    if payload is not None
-                    else None
-                )
-            for entry in entries:
-                needs_escalation = _apply_review_queue_result(
-                    store,
-                    entry,
-                    result,
-                    now=now,
-                    last_state_digest=state_digest,
-                )
-                if needs_escalation:
+
+def _apply_review_queue_group_result(
+    *,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    pr_port: PullRequestPort,
+    pr_repo: str,
+    pr_number: int,
+    entries: tuple[ReviewQueueEntry, ...],
+    result: ReviewRescueResult,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[str, ...]:
+    """Persist one review-group result and return escalated issue refs."""
+    if dry_run:
+        return ()
+
+    escalated: list[str] = []
+    state_digest = pr_port.review_state_digests([(pr_repo, pr_number)]).get(
+        (pr_repo, pr_number)
+    )
+    for entry in entries:
+        needs_escalation = _apply_review_queue_result(
+            store,
+            entry,
+            result,
+            now=now,
+            last_state_digest=state_digest,
+        )
+        if needs_escalation:
+            _escalate_to_claude(
+                entry.issue_ref,
+                critical_path_config,
+                project_owner,
+                project_number,
+                reason=f"review queue blocked escalation: {result.blocked_reason}",
+                gh_runner=gh_runner,
+            )
+            store.delete_review_queue_item(entry.issue_ref)
+            escalated.append(entry.issue_ref)
+    return tuple(escalated)
+
+
+def _summarize_review_group_outcome(
+    *,
+    critical_path_config: CriticalPathConfig,
+    store: SessionStorePort,
+    project_owner: str,
+    project_number: int,
+    pr_repo: str,
+    pr_number: int,
+    entries: tuple[ReviewQueueEntry, ...],
+    result: ReviewRescueResult,
+    updated_snapshot: CycleBoardSnapshot,
+    escalated: tuple[str, ...],
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewGroupProcessingOutcome:
+    """Build the public outcome for one processed review group."""
+    escalated_refs = list(escalated)
+    requeued: list[str] = []
+    blocked: list[str] = []
+    skipped: list[str] = []
+    rerun: list[str] = []
+    auto_merge_enabled: list[str] = []
+
+    pr_ref = f"{pr_repo}#{pr_number}"
+    if result.rerun_checks:
+        rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
+    elif result.auto_merge_enabled:
+        auto_merge_enabled.append(pr_ref)
+    elif result.requeued_refs:
+        for issue_ref in result.requeued_refs:
+            entry = next((e for e in entries if e.issue_ref == issue_ref), None)
+            pr_url = entry.pr_url if entry is not None else ""
+            requeue_count, _ = store.get_requeue_state(issue_ref)
+            if _requeue_or_escalate(requeue_count) == "escalate":
+                if not dry_run:
                     _escalate_to_claude(
-                        entry.issue_ref,
+                        issue_ref,
                         critical_path_config,
-                        config.project_owner,
-                        config.project_number,
-                        reason=f"review queue blocked escalation: "
-                               f"{result.blocked_reason}",
+                        project_owner,
+                        project_number,
+                        reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
+                        f"{result.blocked_reason or 'persistent check failure / conflict'}",
                         gh_runner=gh_runner,
                     )
-                    store.delete_review_queue_item(entry.issue_ref)
-                    escalated.append(entry.issue_ref)
-        pr_ref = f"{pr_repo}#{pr_number}"
-        if result.rerun_checks:
-            rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
-        elif result.auto_merge_enabled:
-            auto_merge_enabled.append(pr_ref)
-        elif result.requeued_refs:
-            for issue_ref in result.requeued_refs:
-                entry = next((e for e in entries if e.issue_ref == issue_ref), None)
-                pr_url = entry.pr_url if entry is not None else ""
-                requeue_count, _ = store.get_requeue_state(issue_ref)
-                if _requeue_or_escalate(requeue_count) == "escalate":
-                    if not dry_run:
-                        _escalate_to_claude(
-                            issue_ref,
-                            critical_path_config,
-                            config.project_owner,
-                            config.project_number,
-                            reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
-                                   f"{result.blocked_reason or 'persistent check failure / conflict'}",
-                            gh_runner=gh_runner,
-                        )
-                        store.delete_review_queue_item(issue_ref)
-                    escalated.append(issue_ref)
-                else:
-                    if not dry_run:
-                        store.increment_requeue_count(issue_ref, pr_url)
-                        store.delete_review_queue_item(issue_ref)
-                    requeued.append(issue_ref)
-            requeued_this_group = [r for r in result.requeued_refs if r not in escalated]
-            if requeued_this_group:
-                updated_snapshot = _update_board_snapshot_statuses(
-                    updated_snapshot,
-                    critical_path_config,
-                    {ref: "Ready" for ref in requeued_this_group},
-                )
-        elif result.blocked_reason:
-            blocked.append(f"{pr_ref}:{result.blocked_reason}")
-        elif result.skipped_reason:
-            skipped.append(f"{pr_ref}:{result.skipped_reason}")
+                    store.delete_review_queue_item(issue_ref)
+                escalated_refs.append(issue_ref)
+            else:
+                if not dry_run:
+                    store.increment_requeue_count(issue_ref, pr_url)
+                    store.delete_review_queue_item(issue_ref)
+                requeued.append(issue_ref)
+        requeued_this_group = [
+            ref for ref in result.requeued_refs if ref not in escalated_refs
+        ]
+        if requeued_this_group:
+            updated_snapshot = _update_board_snapshot_statuses(
+                updated_snapshot,
+                critical_path_config,
+                {ref: "Ready" for ref in requeued_this_group},
+            )
+    elif result.blocked_reason:
+        blocked.append(f"{pr_ref}:{result.blocked_reason}")
+    elif result.skipped_reason:
+        skipped.append(f"{pr_ref}:{result.skipped_reason}")
+
+    return ReviewGroupProcessingOutcome(
+        rerun=tuple(rerun),
+        auto_merge_enabled=tuple(auto_merge_enabled),
+        requeued=tuple(requeued),
+        blocked=tuple(blocked),
+        skipped=tuple(skipped),
+        escalated=tuple(escalated_refs),
+        updated_snapshot=updated_snapshot,
+    )
+
+
+def _process_review_queue_due_groups(
+    *,
+    config: ConsumerConfig,
+    store: SessionStorePort,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    pr_port: PullRequestPort,
+    prepared_batch: PreparedReviewQueueBatch,
+    board_snapshot: CycleBoardSnapshot,
+    now: datetime,
+    dry_run: bool,
+    gh_runner: Callable[..., str] | None = None,
+) -> ReviewQueueProcessingOutcome:
+    """Process the due PR groups for a prepared review-queue batch."""
+    prepared_due_processing = _prepare_due_review_processing(
+        store=store,
+        automation_config=automation_config,
+        pr_port=pr_port,
+        prepared_batch=prepared_batch,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+
+    rerun: list[str] = []
+    auto_merge_enabled: list[str] = []
+    requeued: list[str] = []
+    blocked: list[str] = []
+    skipped: list[str] = []
+    escalated: list[str] = []
+    partial_failure = prepared_due_processing.partial_failure
+    error = prepared_due_processing.error
+    updated_snapshot = board_snapshot
+
+    for (pr_repo, pr_number), entries in prepared_due_processing.due_pr_groups:
+        if partial_failure:
+            break
+        group_outcome = _process_due_review_group(
+            config=config,
+            store=store,
+            critical_path_config=critical_path_config,
+            automation_config=automation_config,
+            pr_port=pr_port,
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            entries=entries,
+            snapshot=prepared_due_processing.snapshots.get((pr_repo, pr_number)),
+            updated_snapshot=updated_snapshot,
+            now=now,
+            dry_run=dry_run,
+            gh_runner=gh_runner,
+        )
+        if group_outcome.partial_failure:
+            partial_failure = True
+            error = group_outcome.error
+            break
+        rerun.extend(group_outcome.rerun)
+        auto_merge_enabled.extend(group_outcome.auto_merge_enabled)
+        requeued.extend(group_outcome.requeued)
+        blocked.extend(group_outcome.blocked)
+        skipped.extend(group_outcome.skipped)
+        escalated.extend(group_outcome.escalated)
+        updated_snapshot = group_outcome.updated_snapshot
 
     if partial_failure and not dry_run:
         _apply_review_queue_partial_failure(
             store,
-            due_items,
+            list(prepared_due_processing.due_items),
             config=config,
             error=error,
             now=now,
         )
 
-    summary = ReviewQueueDrainSummary(
-        queued_count=len(queue_items),
-        due_count=len(due_items),
-        seeded=tuple(seeded),
-        removed=tuple(removed),
-        verdict_backfilled=verdict_backfilled,
+    return ReviewQueueProcessingOutcome(
+        due_count=len(prepared_due_processing.due_items),
+        verdict_backfilled=prepared_due_processing.verdict_backfilled,
         rerun=tuple(rerun),
         auto_merge_enabled=tuple(auto_merge_enabled),
         requeued=tuple(requeued),
@@ -3414,8 +3436,171 @@ def _drain_review_queue(
         escalated=tuple(escalated),
         partial_failure=partial_failure,
         error=error,
+        updated_snapshot=updated_snapshot,
     )
-    return summary, updated_snapshot
+
+
+# ---------------------------------------------------------------------------
+# _drain_review_queue sub-functions: focused extraction from god-function
+# ---------------------------------------------------------------------------
+
+
+def _prune_stale_review_entries(
+    store: SessionStorePort,
+    review_refs: set[str],
+    existing_entries: list[ReviewQueueEntry],
+    *,
+    dry_run: bool = False,
+) -> list[str]:
+    """Remove queue entries for issues no longer in Review scope."""
+    removed: list[str] = []
+    for entry in existing_entries:
+        if entry.issue_ref in review_refs:
+            continue
+        if not dry_run:
+            store.delete_review_queue_item(entry.issue_ref)
+        removed.append(entry.issue_ref)
+    return removed
+
+
+def _seed_new_review_entries(
+    store: SessionStorePort,
+    review_refs: set[str],
+    existing_refs: set[str],
+    *,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> list[str]:
+    """Seed queue entries for Review issues not yet tracked."""
+    seeded: list[str] = []
+    for issue_ref in sorted(review_refs):
+        if issue_ref in existing_refs:
+            continue
+        latest_session = store.latest_session_for_issue(issue_ref)
+        if latest_session is None or not latest_session.pr_url:
+            continue
+        if not dry_run:
+            if _queue_review_item(
+                store,
+                issue_ref,
+                latest_session.pr_url,
+                session_id=latest_session.id,
+                now=now,
+            ) is None:
+                continue
+        seeded.append(issue_ref)
+    return seeded
+
+
+def _reconcile_review_queue_identity(
+    store: SessionStorePort,
+    review_refs: set[str],
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Reconcile queue rows and requeue counters against current PR identity.
+
+    When the active session's PR URL changes, update the queue entry and
+    reset the requeue counter to avoid false escalation.
+    """
+    for entry in store.list_review_queue_items():
+        if entry.issue_ref not in review_refs:
+            continue
+        current_pr_url = entry.pr_url
+        latest_session = store.latest_session_for_issue(entry.issue_ref)
+        if latest_session is not None and latest_session.pr_url:
+            current_pr_url = latest_session.pr_url
+        if current_pr_url != entry.pr_url:
+            parsed = _parse_pr_url(current_pr_url)
+            if parsed is None:
+                continue
+            owner, repo, pr_number = parsed
+            store.enqueue_review_item(
+                entry.issue_ref,
+                pr_url=current_pr_url,
+                pr_repo=f"{owner}/{repo}",
+                pr_number=pr_number,
+                source_session_id=(
+                    latest_session.id if latest_session is not None else entry.source_session_id
+                ),
+                next_attempt_at=entry.next_attempt_at,
+                now=now,
+            )
+        _count, stored_pr_url = store.get_requeue_state(entry.issue_ref)
+        if stored_pr_url is not None and stored_pr_url != current_pr_url:
+            store.reset_requeue_count(entry.issue_ref)
+
+
+def _drain_review_queue(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
+    *,
+    pr_port: PullRequestPort | None = None,
+    session_store: SessionStorePort | None = None,
+    board_snapshot: CycleBoardSnapshot,
+    dry_run: bool = False,
+    github_memo: CycleGitHubMemo | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
+    """Process a bounded batch of queued Review items."""
+    if automation_config is None:
+        return ReviewQueueDrainSummary(), board_snapshot
+
+    store = session_store or SqliteSessionStore(db)
+    now = datetime.now(timezone.utc)
+    memo = github_memo or CycleGitHubMemo()
+    effective_pr_port = pr_port or GitHubCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=critical_path_config,
+        github_memo=memo,
+        gh_runner=gh_runner,
+    )
+
+    prepared_batch, empty_summary = _prepare_review_queue_batch(
+        config=config,
+        store=store,
+        critical_path_config=critical_path_config,
+        board_snapshot=board_snapshot,
+        pr_port=effective_pr_port,
+        now=now,
+        dry_run=dry_run,
+    )
+    if empty_summary is not None:
+        return empty_summary, board_snapshot
+    assert prepared_batch is not None
+
+    processing_outcome = _process_review_queue_due_groups(
+        config=config,
+        store=store,
+        critical_path_config=critical_path_config,
+        automation_config=automation_config,
+        pr_port=effective_pr_port,
+        prepared_batch=prepared_batch,
+        board_snapshot=board_snapshot,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+    )
+
+    summary = ReviewQueueDrainSummary(
+        queued_count=len(prepared_batch.queue_items),
+        due_count=processing_outcome.due_count,
+        seeded=prepared_batch.seeded,
+        removed=prepared_batch.removed,
+        verdict_backfilled=processing_outcome.verdict_backfilled,
+        rerun=processing_outcome.rerun,
+        auto_merge_enabled=processing_outcome.auto_merge_enabled,
+        requeued=processing_outcome.requeued,
+        blocked=processing_outcome.blocked,
+        skipped=processing_outcome.skipped,
+        escalated=processing_outcome.escalated,
+        partial_failure=processing_outcome.partial_failure,
+        error=processing_outcome.error,
+    )
+    return summary, processing_outcome.updated_snapshot
 
 
 def _replay_deferred_actions(
@@ -3423,6 +3608,9 @@ def _replay_deferred_actions(
     config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
     *,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     comment_checker: Callable[..., bool] | None = None,
@@ -3432,105 +3620,20 @@ def _replay_deferred_actions(
     """Replay queued control-plane actions after GitHub recovery."""
     replayed: list[int] = []
     for action in db.list_deferred_actions():
-        payload = action.payload
         try:
-            if action.action_type == "set_status":
-                issue_ref = str(payload["issue_ref"])
-                to_status = str(payload["to_status"])
-                from_statuses = {
-                    str(value) for value in payload.get("from_statuses", [])
-                }
-                blocked_reason = payload.get("blocked_reason")
-                if to_status == "Blocked":
-                    _set_blocked_with_reason(
-                        issue_ref,
-                        str(blocked_reason or "deferred-control-plane"),
-                        critical_path_config,
-                        config.project_owner,
-                        config.project_number,
-                        gh_runner=gh_runner,
-                    )
-                elif to_status == "Review":
-                    _transition_issue_to_review(
-                        issue_ref,
-                        critical_path_config,
-                        config.project_owner,
-                        config.project_number,
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                elif to_status == "In Progress":
-                    _transition_issue_to_in_progress(
-                        issue_ref,
-                        critical_path_config,
-                        config.project_owner,
-                        config.project_number,
-                        from_statuses=from_statuses,
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                elif to_status == "Ready":
-                    _return_issue_to_ready(
-                        issue_ref,
-                        critical_path_config,
-                        config.project_owner,
-                        config.project_number,
-                        from_statuses=from_statuses,
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                else:
-                    raise GhQueryError(
-                        f"Unsupported deferred status target: {to_status}"
-                    )
-            elif action.action_type == "post_verdict_marker":
-                _post_pr_codex_verdict(
-                    str(payload["pr_url"]),
-                    str(payload["session_id"]),
-                    comment_checker=comment_checker,
-                    comment_poster=comment_poster,
-                    gh_runner=gh_runner,
-                )
-            elif action.action_type == "post_issue_comment":
-                issue_ref = str(payload["issue_ref"])
-                owner, repo, number = _resolve_issue_coordinates(
-                    issue_ref,
-                    critical_path_config,
-                )
-                poster = comment_poster or _post_comment
-                poster(
-                    owner,
-                    repo,
-                    number,
-                    str(payload["body"]),
-                    gh_runner=gh_runner,
-                )
-            elif action.action_type == "close_issue":
-                issue_ref = str(payload["issue_ref"])
-                owner, repo, number = _resolve_issue_coordinates(
-                    issue_ref,
-                    critical_path_config,
-                )
-                close_issue(owner, repo, number, gh_runner=gh_runner)
-            elif action.action_type == "rerun_check":
-                rerun_actions_run(
-                    str(payload["pr_repo"]),
-                    int(payload["run_id"]),
-                    gh_runner=gh_runner,
-                )
-            elif action.action_type == "enable_automerge":
-                enable_pull_request_automerge(
-                    str(payload["pr_repo"]),
-                    int(payload["pr_number"]),
-                    gh_runner=gh_runner,
-                )
-            else:
-                raise GhQueryError(
-                    f"Unsupported deferred action type: {action.action_type}"
-                )
+            _replay_deferred_action(
+                action=action,
+                config=config,
+                critical_path_config=critical_path_config,
+                pr_port=pr_port,
+                review_state_port=review_state_port,
+                board_port=board_port,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                comment_checker=comment_checker,
+                comment_poster=comment_poster,
+                gh_runner=gh_runner,
+            )
         except GhQueryError:
             raise
         except Exception as error:
@@ -3545,6 +3648,230 @@ def _replay_deferred_actions(
     if replayed:
         _clear_degraded(db)
     return tuple(replayed)
+
+
+def _replay_deferred_action(
+    *,
+    action: DeferredAction,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    pr_port: PullRequestPort | None,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Execute one deferred control-plane action."""
+    payload = action.payload
+    if action.action_type == "set_status":
+        _replay_deferred_status_action(
+            payload=payload,
+            config=config,
+            critical_path_config=critical_path_config,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        return
+    if action.action_type == "post_verdict_marker":
+        _replay_deferred_verdict_marker(
+            payload=payload,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+        return
+    if action.action_type == "post_issue_comment":
+        _replay_deferred_issue_comment(
+            payload=payload,
+            critical_path_config=critical_path_config,
+            board_port=board_port,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+        return
+    if action.action_type == "close_issue":
+        _replay_deferred_issue_close(
+            payload=payload,
+            critical_path_config=critical_path_config,
+            board_port=board_port,
+            gh_runner=gh_runner,
+        )
+        return
+    if action.action_type == "rerun_check":
+        _replay_deferred_check_rerun(
+            payload=payload,
+            pr_port=pr_port,
+            gh_runner=gh_runner,
+        )
+        return
+    if action.action_type == "enable_automerge":
+        _replay_deferred_automerge_enable(
+            payload=payload,
+            pr_port=pr_port,
+            gh_runner=gh_runner,
+        )
+        return
+    raise GhQueryError(f"Unsupported deferred action type: {action.action_type}")
+
+
+def _replay_deferred_status_action(
+    *,
+    payload: dict[str, Any],
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Replay a deferred issue status transition."""
+    issue_ref = str(payload["issue_ref"])
+    to_status = str(payload["to_status"])
+    from_statuses = {str(value) for value in payload.get("from_statuses", [])}
+    blocked_reason = payload.get("blocked_reason")
+    if to_status == "Blocked":
+        _set_blocked_with_reason(
+            issue_ref,
+            str(blocked_reason or "deferred-control-plane"),
+            critical_path_config,
+            config.project_owner,
+            config.project_number,
+            gh_runner=gh_runner,
+        )
+        return
+    if to_status == "Review":
+        _transition_issue_to_review(
+            issue_ref,
+            critical_path_config,
+            config.project_owner,
+            config.project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        return
+    if to_status == "In Progress":
+        _transition_issue_to_in_progress(
+            issue_ref,
+            critical_path_config,
+            config.project_owner,
+            config.project_number,
+            from_statuses=from_statuses,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        return
+    if to_status == "Ready":
+        _return_issue_to_ready(
+            issue_ref,
+            critical_path_config,
+            config.project_owner,
+            config.project_number,
+            from_statuses=from_statuses,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        return
+    raise GhQueryError(f"Unsupported deferred status target: {to_status}")
+
+
+def _replay_deferred_verdict_marker(
+    *,
+    payload: dict[str, Any],
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Replay a deferred PR verdict marker post."""
+    _post_pr_codex_verdict(
+        str(payload["pr_url"]),
+        str(payload["session_id"]),
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+
+
+def _replay_deferred_issue_comment(
+    *,
+    payload: dict[str, Any],
+    critical_path_config: CriticalPathConfig,
+    board_port: BoardMutationPort | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Replay a deferred issue comment post."""
+    issue_ref = str(payload["issue_ref"])
+    owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
+    body = str(payload["body"])
+    if board_port is not None:
+        board_port.post_issue_comment(f"{owner}/{repo}", number, body)
+        return
+    poster = comment_poster or _post_comment
+    poster(owner, repo, number, body, gh_runner=gh_runner)
+
+
+def _replay_deferred_issue_close(
+    *,
+    payload: dict[str, Any],
+    critical_path_config: CriticalPathConfig,
+    board_port: BoardMutationPort | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Replay a deferred issue close."""
+    issue_ref = str(payload["issue_ref"])
+    owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
+    if board_port is not None:
+        board_port.close_issue(f"{owner}/{repo}", number)
+        return
+    close_issue(owner, repo, number, gh_runner=gh_runner)
+
+
+def _replay_deferred_check_rerun(
+    *,
+    payload: dict[str, Any],
+    pr_port: PullRequestPort | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Replay a deferred failed-check rerun request."""
+    pr_repo = str(payload["pr_repo"])
+    check_name = str(payload.get("check_name") or "")
+    run_id = int(payload["run_id"])
+    if pr_port is not None:
+        if not pr_port.rerun_failed_check(pr_repo, check_name, run_id):
+            raise GhQueryError(
+                f"Failed rerunning check for {pr_repo} run {run_id}"
+            )
+        return
+    rerun_actions_run(pr_repo, run_id, gh_runner=gh_runner)
+
+
+def _replay_deferred_automerge_enable(
+    *,
+    payload: dict[str, Any],
+    pr_port: PullRequestPort | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Replay a deferred auto-merge enablement."""
+    pr_repo = str(payload["pr_repo"])
+    pr_number = int(payload["pr_number"])
+    if pr_port is not None:
+        pr_port.enable_automerge(pr_repo, pr_number)
+        return
+    enable_pull_request_automerge(pr_repo, pr_number, gh_runner=gh_runner)
 
 
 # ---------------------------------------------------------------------------
@@ -3585,22 +3912,32 @@ def _transition_issue_to_in_progress(
     project_number: int,
     *,
     from_statuses: set[str] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move an actively running local repair back into In Progress."""
-    changed, old_status = _set_status_if_changed(
-        issue_ref,
-        from_statuses or {"Review"},
-        "In Progress",
-        config,
-        project_owner,
-        project_number,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+    if review_state_port is not None and board_port is not None:
+        old_status = review_state_port.get_issue_status(issue_ref)
+        if old_status in (from_statuses or {"Review"}):
+            board_port.set_issue_status(issue_ref, "In Progress")
+            changed = True
+        else:
+            changed = False
+    else:
+        changed, old_status = _set_status_if_changed(
+            issue_ref,
+            from_statuses or {"Review"},
+            "In Progress",
+            config,
+            project_owner,
+            project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
     if changed or old_status == "In Progress":
         return
     raise GhQueryError(
@@ -3615,22 +3952,32 @@ def _return_issue_to_ready(
     project_number: int,
     *,
     from_statuses: set[str] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
-    changed, old_status = _set_status_if_changed(
-        issue_ref,
-        from_statuses or {"In Progress"},
-        "Ready",
-        config,
-        project_owner,
-        project_number,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+    if review_state_port is not None and board_port is not None:
+        old_status = review_state_port.get_issue_status(issue_ref)
+        if old_status in (from_statuses or {"In Progress"}):
+            board_port.set_issue_status(issue_ref, "Ready")
+            changed = True
+        else:
+            changed = False
+    else:
+        changed, old_status = _set_status_if_changed(
+            issue_ref,
+            from_statuses or {"In Progress"},
+            "Ready",
+            config,
+            project_owner,
+            project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
     if changed or old_status == "Ready":
         return
     raise GhQueryError(
@@ -3638,11 +3985,214 @@ def _return_issue_to_ready(
     )
 
 
+def _reconcile_active_repair_review_items(
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    *,
+    active_repair_issue_refs: set[str],
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[_ProjectItemSnapshot | IssueSnapshot], str | None],
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> list[str]:
+    """Return active repair items that should move from Review back to In Progress."""
+    moved_in_progress: list[str] = []
+    review_items = (
+        board_snapshot.items_with_status("Review")
+        if board_snapshot is not None
+        else review_state_port.list_issues_by_status("Review")
+    )
+    for snapshot in review_items:
+        issue_ref = issue_ref_for_snapshot(snapshot)
+        if issue_ref is None:
+            continue
+        parsed = parse_issue_ref(issue_ref)
+        if parsed.prefix not in consumer_config.repo_prefixes:
+            continue
+        if snapshot.executor.strip().lower() != consumer_config.executor:
+            continue
+        if issue_ref not in active_repair_issue_refs:
+            continue
+
+        if not dry_run:
+            _transition_issue_to_in_progress(
+                issue_ref,
+                critical_path_config,
+                consumer_config.project_owner,
+                consumer_config.project_number,
+                review_state_port=review_state_port,
+                board_port=board_port,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                gh_runner=gh_runner,
+            )
+        moved_in_progress.append(issue_ref)
+    return moved_in_progress
+
+
+def _reconcile_single_in_progress_item(
+    issue_ref: str,
+    *,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> str:
+    """Reconcile one stale In Progress item and return its target lane."""
+    owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
+    latest_session = store.latest_session_for_issue(issue_ref)
+    expected_branch = latest_session.branch_name if latest_session else None
+    classification, pr_match, reason = _classify_open_pr_candidates(
+        issue_ref,
+        owner,
+        repo,
+        number,
+        automation_config,
+        expected_branch=expected_branch,
+        pr_port=pr_port,
+        gh_runner=gh_runner,
+    )
+    target = reconcile_in_progress_decision(
+        classification,
+        has_latest_session=latest_session is not None,
+        session_kind=latest_session.session_kind if latest_session else None,
+        session_status=latest_session.status if latest_session else None,
+    )
+
+    if target == "ready":
+        if classification == "adoptable" and pr_match is not None:
+            if latest_session is not None and not dry_run:
+                store.update_session(latest_session.id, pr_url=pr_match.url)
+        if not dry_run:
+            _return_issue_to_ready(
+                issue_ref,
+                critical_path_config,
+                consumer_config.project_owner,
+                consumer_config.project_number,
+                from_statuses={"In Progress"},
+                review_state_port=review_state_port,
+                board_port=board_port,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                gh_runner=gh_runner,
+            )
+        return "ready"
+
+    if target == "review":
+        if latest_session is not None and pr_match is not None and not dry_run:
+            store.update_session(
+                latest_session.id,
+                pr_url=pr_match.url,
+                phase="review",
+            )
+        if not dry_run:
+            _transition_issue_to_review(
+                issue_ref,
+                critical_path_config,
+                consumer_config.project_owner,
+                consumer_config.project_number,
+                review_state_port=review_state_port,
+                board_port=board_port,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                gh_runner=gh_runner,
+            )
+        return "review"
+
+    if not dry_run:
+        _set_blocked_with_reason(
+            issue_ref,
+            f"execution-authority:{reason}",
+            critical_path_config,
+            consumer_config.project_owner,
+            consumer_config.project_number,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            gh_runner=gh_runner,
+        )
+    return "blocked"
+
+
+def _reconcile_stale_in_progress_items(
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    *,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[_ProjectItemSnapshot | IssueSnapshot], str | None],
+    active_issue_refs: set[str],
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> tuple[list[str], list[str], list[str]]:
+    """Reconcile stale In Progress items back to their truthful lanes."""
+    moved_ready: list[str] = []
+    moved_review: list[str] = []
+    moved_blocked: list[str] = []
+    in_progress = (
+        board_snapshot.items_with_status("In Progress")
+        if board_snapshot is not None
+        else review_state_port.list_issues_by_status("In Progress")
+    )
+    for snapshot in in_progress:
+        issue_ref = issue_ref_for_snapshot(snapshot)
+        if issue_ref is None:
+            continue
+        parsed = parse_issue_ref(issue_ref)
+        if parsed.prefix not in consumer_config.repo_prefixes:
+            continue
+        if snapshot.executor.strip().lower() != consumer_config.executor:
+            continue
+        if issue_ref in active_issue_refs:
+            continue
+
+        target = _reconcile_single_in_progress_item(
+            issue_ref,
+            consumer_config=consumer_config,
+            critical_path_config=critical_path_config,
+            automation_config=automation_config,
+            store=store,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+            dry_run=dry_run,
+        )
+        if target == "ready":
+            moved_ready.append(issue_ref)
+        elif target == "review":
+            moved_review.append(issue_ref)
+        else:
+            moved_blocked.append(issue_ref)
+    return moved_ready, moved_review, moved_blocked
+
+
 def _recover_interrupted_sessions(
     config: ConsumerConfig,
     db: ConsumerDB,
     *,
     automation_config: BoardAutomationConfig | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -3657,6 +4207,14 @@ def _recover_interrupted_sessions(
     except ConfigError as err:
         logger.error("Interrupted-session recovery skipped: %s", err)
         return recovered
+    effective_pr_port = pr_port or GitHubCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=cp_config,
+        gh_runner=gh_runner,
+    )
+    effective_review_state_port = review_state_port or effective_pr_port
+    effective_board_port = board_port or effective_pr_port
 
     for lease in recovered:
         try:
@@ -3669,6 +4227,7 @@ def _recover_interrupted_sessions(
                     number,
                     automation_config or load_automation_config(config.automation_config_path),
                     expected_branch=lease.branch_name,
+                    pr_port=effective_pr_port,
                     gh_runner=gh_runner,
                 )
             except GhQueryError:
@@ -3681,6 +4240,8 @@ def _recover_interrupted_sessions(
                     config.project_owner,
                     config.project_number,
                     from_statuses={"In Progress", "Review"},
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -3691,6 +4252,8 @@ def _recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -3701,6 +4264,8 @@ def _recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     board_info_resolver=board_info_resolver,
                     board_mutator=board_mutator,
                     gh_runner=gh_runner,
@@ -3712,6 +4277,8 @@ def _recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
+                    review_state_port=effective_review_state_port,
+                    board_port=effective_board_port,
                     gh_runner=gh_runner,
                 )
         except (GhQueryError, Exception) as err:
@@ -3724,26 +4291,14 @@ def _recover_interrupted_sessions(
     return recovered
 
 
-def _prepare_cycle(
+def _initialize_cycle_runtime(
     config: ConsumerConfig,
     db: ConsumerDB,
     *,
-    dry_run: bool = False,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
-) -> PreparedCycleContext:
-    """Run control-plane preflight once for a daemon tick."""
-    # Composition root: construct port instances for this cycle
+) -> CycleRuntimeContext:
+    """Build cycle-scoped runtime wiring and effective config."""
     session_store = SqliteSessionStore(db)
-
-    request_stats_token = begin_request_stats()
-    timings_ms: dict[str, int] = {}
-    expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
-    if expired:
-        logger.info("Expired stale leases: %s", expired)
 
     cp_config = load_config(config.critical_paths_path)
     try:
@@ -3763,23 +4318,75 @@ def _prepare_cycle(
     )
     config.poll_interval_seconds = effective_interval
     github_memo = CycleGitHubMemo()
+    pr_port = GitHubCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=cp_config,
+        github_memo=github_memo,
+        gh_runner=gh_runner,
+    )
+    global_limit = (
+        auto_config.global_concurrency
+        if auto_config is not None
+        else config.global_concurrency
+    )
 
-    if config.deferred_replay_enabled and not dry_run:
-        phase_started = time.monotonic()
-        replayed_actions = _replay_deferred_actions(
-            db,
-            config,
-            cp_config,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-        )
-        timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
-        if replayed_actions:
-            logger.info("Replayed deferred control-plane actions: %s", replayed_actions)
+    return CycleRuntimeContext(
+        session_store=session_store,
+        cp_config=cp_config,
+        auto_config=auto_config,
+        main_workflows=main_workflows,
+        workflow_statuses=workflow_statuses,
+        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
+        effective_interval=effective_interval,
+        global_limit=global_limit,
+        github_memo=github_memo,
+        pr_port=pr_port,
+    )
 
+
+def _run_deferred_replay_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    timings_ms: dict[str, int],
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> None:
+    """Replay deferred actions for the cycle when enabled."""
+    if not config.deferred_replay_enabled or dry_run:
+        return
+    phase_started = time.monotonic()
+    replayed_actions = _replay_deferred_actions(
+        db,
+        config,
+        runtime.cp_config,
+        pr_port=runtime.pr_port,
+        review_state_port=runtime.pr_port,
+        board_port=runtime.pr_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+    timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
+    if replayed_actions:
+        logger.info("Replayed deferred control-plane actions: %s", replayed_actions)
+
+
+def _load_board_snapshot_phase(
+    config: ConsumerConfig,
+    *,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+) -> CycleBoardSnapshot:
+    """Load the cycle board snapshot."""
     phase_started = time.monotonic()
     board_snapshot = build_cycle_board_snapshot(
         config.project_owner,
@@ -3787,11 +4394,24 @@ def _prepare_cycle(
         gh_runner=gh_runner,
     )
     timings_ms["board_snapshot"] = int((time.monotonic() - phase_started) * 1000)
+    return board_snapshot
 
+
+def _run_executor_routing_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> None:
+    """Normalize executor routing for the protected queue."""
     phase_started = time.monotonic()
     routing_decision = route_protected_queue_executors(
-        cp_config,
-        auto_config,
+        runtime.cp_config,
+        runtime.auto_config,
         config.project_owner,
         config.project_number,
         dry_run=dry_run,
@@ -3807,13 +4427,29 @@ def _prepare_cycle(
             routing_decision.routed,
         )
 
+
+def _run_reconciliation_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Run truthful board reconciliation for the cycle."""
     phase_started = time.monotonic()
     reconciliation = _reconcile_board_truth(
         config,
-        cp_config,
-        auto_config,
+        runtime.cp_config,
+        runtime.auto_config,
         db,
-        session_store=session_store,
+        session_store=runtime.session_store,
+        pr_port=runtime.pr_port,
+        review_state_port=runtime.pr_port,
+        board_port=runtime.pr_port,
         board_snapshot=board_snapshot,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
@@ -3827,19 +4463,32 @@ def _prepare_cycle(
         or reconciliation.moved_in_progress
         or reconciliation.moved_review
         or reconciliation.moved_blocked
-        ):
+    ):
         logger.info("Board reconciliation: %s", reconciliation)
 
+
+def _run_review_queue_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
+    """Drain the review queue for the current cycle."""
     phase_started = time.monotonic()
-    review_queue_summary, board_snapshot = _drain_review_queue(
+    review_queue_summary, updated_snapshot = _drain_review_queue(
         config,
         db,
-        cp_config,
-        auto_config,
-        session_store=session_store,
+        runtime.cp_config,
+        runtime.auto_config,
+        pr_port=runtime.pr_port,
+        session_store=runtime.session_store,
         board_snapshot=board_snapshot,
         dry_run=dry_run,
-        github_memo=github_memo,
+        github_memo=runtime.github_memo,
         gh_runner=gh_runner,
     )
     timings_ms["review_queue"] = int((time.monotonic() - phase_started) * 1000)
@@ -3861,24 +4510,39 @@ def _prepare_cycle(
         or review_queue_summary.skipped
     ):
         logger.info("Review queue: %s", review_queue_summary)
+    return review_queue_summary, updated_snapshot
 
+
+def _run_admission_phase(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    board_snapshot: CycleBoardSnapshot,
+    timings_ms: dict[str, int],
+    gh_runner: Callable[..., str] | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Run backlog admission for the current cycle."""
     phase_started = time.monotonic()
     admission_decision = admit_backlog_items(
-        cp_config,
-        auto_config,
+        runtime.cp_config,
+        runtime.auto_config,
         config.project_owner,
         config.project_number,
-        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
+        dispatchable_repo_prefixes=runtime.dispatchable_repo_prefixes,
         active_lease_issue_refs=tuple(db.active_lease_issue_refs()),
         dry_run=dry_run,
         board_snapshot=board_snapshot,
-        github_memo=github_memo,
+        github_memo=runtime.github_memo,
         gh_runner=gh_runner,
     )
     timings_ms["admission"] = int((time.monotonic() - phase_started) * 1000)
     admission_summary = admission_summary_payload(
         admission_decision,
-        enabled=bool(auto_config is not None and auto_config.admission.enabled),
+        enabled=bool(
+            runtime.auto_config is not None and runtime.auto_config.admission.enabled
+        ),
     )
     if admission_decision.admitted:
         if not dry_run:
@@ -3888,10 +4552,121 @@ def _prepare_cycle(
         logger.warning("Backlog admission partial failure: %s", admission_decision.error)
     if not dry_run:
         _persist_admission_summary(db, admission_summary)
+    return admission_summary
 
-    global_limit = (
-        auto_config.global_concurrency if auto_config is not None else config.global_concurrency
+
+def _execute_prepare_cycle_phases(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    runtime: CycleRuntimeContext,
+    *,
+    dry_run: bool = False,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[CycleBoardSnapshot, ReviewQueueDrainSummary, dict[str, Any], dict[str, int]]:
+    """Execute the preflight phases for one cycle."""
+    timings_ms: dict[str, int] = {}
+
+    _run_deferred_replay_phase(
+        config,
+        db,
+        runtime,
+        timings_ms=timings_ms,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
     )
+    board_snapshot = _load_board_snapshot_phase(
+        config,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+    )
+    _run_executor_routing_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
+    )
+    _run_reconciliation_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    review_queue_summary, board_snapshot = _run_review_queue_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
+    )
+    admission_summary = _run_admission_phase(
+        config,
+        db,
+        runtime,
+        board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
+    )
+
+    return board_snapshot, review_queue_summary, admission_summary, timings_ms
+
+
+def _prepare_cycle(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    *,
+    dry_run: bool = False,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> PreparedCycleContext:
+    """Run control-plane preflight once for a daemon tick."""
+    request_stats_token = begin_request_stats()
+    expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
+    if expired:
+        logger.info("Expired stale leases: %s", expired)
+
+    runtime = _initialize_cycle_runtime(
+        config,
+        db,
+        gh_runner=gh_runner,
+    )
+    (
+        board_snapshot,
+        review_queue_summary,
+        admission_summary,
+        timings_ms,
+    ) = _execute_prepare_cycle_phases(
+        config,
+        db,
+        runtime,
+        dry_run=dry_run,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+
     request_stats = end_request_stats(request_stats_token)
     github_request_counts = {
         "graphql": request_stats.graphql,
@@ -3909,10 +4684,13 @@ def _prepare_cycle(
         for snapshot in board_snapshot.items_with_status("Ready"):
             if snapshot.executor.strip().lower() != config.executor:
                 continue
-            issue_ref = _snapshot_to_issue_ref(snapshot, cp_config)
+            issue_ref = _snapshot_to_issue_ref(snapshot, runtime.cp_config)
             if issue_ref is None:
                 continue
-            if parse_issue_ref(issue_ref).prefix not in dispatchable_repo_prefixes:
+            if (
+                parse_issue_ref(issue_ref).prefix
+                not in runtime.dispatchable_repo_prefixes
+            ):
                 continue
             ready_for_executor += 1
         _record_metric(
@@ -3922,21 +4700,21 @@ def _prepare_cycle(
             payload={
                 "ready_for_executor": ready_for_executor,
                 "active_leases": db.active_lease_count(),
-                "global_limit": global_limit,
+                "global_limit": runtime.global_limit,
                 "degraded": db.get_control_value(CONTROL_KEY_DEGRADED) == "true",
             },
         )
 
     return PreparedCycleContext(
-        cp_config=cp_config,
-        auto_config=auto_config,
-        main_workflows=main_workflows,
-        workflow_statuses=workflow_statuses,
-        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
-        effective_interval=effective_interval,
-        global_limit=global_limit,
+        cp_config=runtime.cp_config,
+        auto_config=runtime.auto_config,
+        main_workflows=runtime.main_workflows,
+        workflow_statuses=runtime.workflow_statuses,
+        dispatchable_repo_prefixes=runtime.dispatchable_repo_prefixes,
+        effective_interval=runtime.effective_interval,
+        global_limit=runtime.global_limit,
         board_snapshot=board_snapshot,
-        github_memo=github_memo,
+        github_memo=runtime.github_memo,
         admission_summary=admission_summary,
         review_queue_summary=review_queue_summary,
         timings_ms=timings_ms,
@@ -4016,8 +4794,10 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    from startupai_controller.adapters.github_cli import _set_single_select_field
-    from startupai_controller.promote_ready import _query_issue_board_info
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_board_info,
+        _set_single_select_field,
+    )
 
     marker = _marker_for("consumer-escalation", issue_ref)
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
@@ -4142,6 +4922,9 @@ def _reconcile_board_truth(
     db: ConsumerDB,
     *,
     session_store: SqliteSessionStore | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     dry_run: bool = False,
     board_snapshot: CycleBoardSnapshot | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
@@ -4164,132 +4947,56 @@ def _reconcile_board_truth(
     moved_in_progress: list[str] = []
     moved_review: list[str] = []
     moved_blocked: list[str] = []
+    effective_pr_port = pr_port or GitHubCliAdapter(
+        project_owner=consumer_config.project_owner,
+        project_number=consumer_config.project_number,
+        config=critical_path_config,
+        gh_runner=gh_runner,
+    )
+    effective_review_state_port = review_state_port or effective_pr_port
+    effective_board_port = board_port or effective_pr_port
 
-    review_items = (
-        board_snapshot.items_with_status("Review")
-        if board_snapshot is not None
-        else _list_project_items_by_status(
-            "Review",
-            consumer_config.project_owner,
-            consumer_config.project_number,
+    def _issue_ref_for_snapshot(
+        snapshot: _ProjectItemSnapshot | IssueSnapshot,
+    ) -> str | None:
+        if isinstance(snapshot, IssueSnapshot):
+            return snapshot.issue_ref
+        return _snapshot_to_issue_ref(snapshot, critical_path_config)
+
+    moved_in_progress.extend(
+        _reconcile_active_repair_review_items(
+            consumer_config,
+            critical_path_config,
+            active_repair_issue_refs=active_repair_issue_refs,
+            review_state_port=effective_review_state_port,
+            board_port=effective_board_port,
+            board_snapshot=board_snapshot,
+            issue_ref_for_snapshot=_issue_ref_for_snapshot,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
             gh_runner=gh_runner,
+            dry_run=dry_run,
         )
     )
-    for snapshot in review_items:
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
-        if issue_ref is None:
-            continue
-        parsed = parse_issue_ref(issue_ref)
-        if parsed.prefix not in consumer_config.repo_prefixes:
-            continue
-        if snapshot.executor.strip().lower() != consumer_config.executor:
-            continue
-        if issue_ref not in active_repair_issue_refs:
-            continue
-
-        if not dry_run:
-            _transition_issue_to_in_progress(
-                issue_ref,
-                critical_path_config,
-                consumer_config.project_owner,
-                consumer_config.project_number,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-        moved_in_progress.append(issue_ref)
-
-    in_progress = (
-        board_snapshot.items_with_status("In Progress")
-        if board_snapshot is not None
-        else _list_project_items_by_status(
-            "In Progress",
-            consumer_config.project_owner,
-            consumer_config.project_number,
-            gh_runner=gh_runner,
-        )
+    ready_refs, review_refs, blocked_refs = _reconcile_stale_in_progress_items(
+        consumer_config,
+        critical_path_config,
+        automation_config,
+        store=store,
+        pr_port=effective_pr_port,
+        review_state_port=effective_review_state_port,
+        board_port=effective_board_port,
+        board_snapshot=board_snapshot,
+        issue_ref_for_snapshot=_issue_ref_for_snapshot,
+        active_issue_refs=active_issue_refs,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        dry_run=dry_run,
     )
-    for snapshot in in_progress:
-        issue_ref = _snapshot_to_issue_ref(snapshot, critical_path_config)
-        if issue_ref is None:
-            continue
-        parsed = parse_issue_ref(issue_ref)
-        if parsed.prefix not in consumer_config.repo_prefixes:
-            continue
-        if snapshot.executor.strip().lower() != consumer_config.executor:
-            continue
-        if issue_ref in active_issue_refs:
-            continue
-
-        owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
-        latest_session = store.latest_session_for_issue(issue_ref)
-        expected_branch = latest_session.branch_name if latest_session else None
-        classification, pr_match, reason = _classify_open_pr_candidates(
-            issue_ref,
-            owner,
-            repo,
-            number,
-            automation_config,
-            expected_branch=expected_branch,
-            gh_runner=gh_runner,
-        )
-        # Domain policy: decide target status based on classification + session
-        target = reconcile_in_progress_decision(
-            classification,
-            has_latest_session=latest_session is not None,
-            session_kind=latest_session.session_kind if latest_session else None,
-            session_status=latest_session.status if latest_session else None,
-        )
-
-        if target == "ready":
-            if classification == "adoptable" and pr_match is not None:
-                if latest_session is not None and not dry_run:
-                    store.update_session(latest_session.id, pr_url=pr_match.url)
-            if not dry_run:
-                _return_issue_to_ready(
-                    issue_ref,
-                    critical_path_config,
-                    consumer_config.project_owner,
-                    consumer_config.project_number,
-                    from_statuses={"In Progress"},
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-            moved_ready.append(issue_ref)
-            continue
-
-        if target == "review":
-            if latest_session is not None and pr_match is not None and not dry_run:
-                store.update_session(
-                    latest_session.id,
-                    pr_url=pr_match.url,
-                    phase="review",
-                )
-            if not dry_run:
-                _transition_issue_to_review(
-                    issue_ref,
-                    critical_path_config,
-                    consumer_config.project_owner,
-                    consumer_config.project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-            moved_review.append(issue_ref)
-            continue
-
-        # target == "blocked"
-        if not dry_run:
-            _set_blocked_with_reason(
-                issue_ref,
-                f"execution-authority:{reason}",
-                critical_path_config,
-                consumer_config.project_owner,
-                consumer_config.project_number,
-                gh_runner=gh_runner,
-            )
-        moved_blocked.append(issue_ref)
+    moved_ready.extend(ready_refs)
+    moved_review.extend(review_refs)
+    moved_blocked.extend(blocked_refs)
 
     return ReconciliationResult(
         moved_ready=tuple(moved_ready),
@@ -4347,6 +5054,8 @@ def _setup_launch_worktree(
     config: ConsumerConfig,
     cp_config: CriticalPathConfig,
     db: ConsumerDB,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     board_info_resolver: Callable | None = None,
     board_mutator: Callable[..., None] | None = None,
@@ -4364,6 +5073,8 @@ def _setup_launch_worktree(
             config,
             db,
             branch_name_override=repair_branch_name,
+            session_store=session_store,
+            worktree_port=worktree_port,
             subprocess_runner=subprocess_runner,
         )
     except WorktreePrepareError as err:
@@ -4417,6 +5128,7 @@ def _setup_launch_worktree(
         reconcile_outcome = _reconcile_repair_branch(
             worktree_path,
             branch_name,
+            worktree_port=worktree_port,
             subprocess_runner=subprocess_runner,
         )
         branch_reconcile_state = reconcile_outcome.state
@@ -4490,30 +5202,31 @@ def _resolve_launch_runtime(
     return workflow_definition, effective_consumer_config
 
 
-def _prepare_launch_candidate(
+def _resolve_launch_candidate_metadata(
     issue_ref: str,
     *,
-    config: ConsumerConfig,
-    prepared: PreparedCycleContext,
-    db: ConsumerDB,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> PreparedLaunchContext:
-    """Prepare local launch state for an issue before board claim."""
-    cp_config = prepared.cp_config
-    auto_config = prepared.auto_config
+    cp_config: CriticalPathConfig,
+    auto_config: BoardAutomationConfig | None,
+    board_snapshot: CycleBoardSnapshot,
+    pr_port: PullRequestPort,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[
+    str,
+    str,
+    str,
+    int,
+    _ProjectItemSnapshot | None,
+    str,
+    str | None,
+    str | None,
+]:
+    """Resolve launch candidate identity and repair-session metadata."""
     candidate_prefix = parse_issue_ref(issue_ref).prefix
     owner, repo, number = _resolve_issue_coordinates(issue_ref, cp_config)
-    snapshot = _snapshot_for_issue(prepared.board_snapshot, issue_ref, cp_config)
-
+    snapshot = _snapshot_for_issue(board_snapshot, issue_ref, cp_config)
+    session_kind = "new_work"
     repair_pr_url: str | None = None
     repair_branch_name: str | None = None
-    classification: str | None = None
-    pr_match: OpenPullRequestMatch | None = None
-    session_kind = "new_work"
     if auto_config is not None:
         classification, pr_match, _reason = _classify_open_pr_candidates(
             issue_ref,
@@ -4521,13 +5234,38 @@ def _prepare_launch_candidate(
             repo,
             number,
             auto_config,
+            pr_port=pr_port,
             gh_runner=gh_runner,
         )
         session_kind = _launch_session_kind(classification, pr_match)
         if session_kind == "repair" and pr_match is not None:
             repair_pr_url = pr_match.url
             repair_branch_name = pr_match.branch_name
+    return (
+        candidate_prefix,
+        owner,
+        repo,
+        number,
+        snapshot,
+        session_kind,
+        repair_pr_url,
+        repair_branch_name,
+    )
 
+
+def _resolve_launch_issue_context(
+    issue_ref: str,
+    *,
+    owner: str,
+    repo: str,
+    number: int,
+    snapshot: _ProjectItemSnapshot | None,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    issue_context_port: IssueContextPort,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[IssueContext, str]:
+    """Hydrate launch issue context and compute the launch title."""
     context = _hydrate_issue_context(
         issue_ref,
         owner=owner,
@@ -4536,40 +5274,32 @@ def _prepare_launch_candidate(
         snapshot=snapshot,
         config=config,
         db=db,
+        issue_context_port=issue_context_port,
         gh_runner=gh_runner,
     )
-    title = str(context.get("title") or (snapshot.title if snapshot is not None else f"issue-{number}"))
-
-    # Phase 2: Set up worktree and reconcile repair branch
-    worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error = (
-        _setup_launch_worktree(
-            issue_ref,
-            title,
-            session_kind,
-            repair_branch_name,
-            config=config,
-            cp_config=cp_config,
-            db=db,
-            subprocess_runner=subprocess_runner,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
+    title = str(
+        context.get("title")
+        or (snapshot.title if snapshot is not None else f"issue-{number}")
     )
+    return context, title
 
-    # Phase 3: Resolve workflow and effective config
-    workflow_definition, effective_consumer_config = _resolve_launch_runtime(
-        candidate_prefix,
-        worktree_path,
-        config=config,
-        prepared=prepared,
-    )
 
+def _run_launch_workspace_hooks(
+    workflow_definition: WorkflowDefinition,
+    *,
+    worktree_path: str,
+    issue_ref: str,
+    branch_name: str,
+    worktree_port: WorktreePort,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+) -> None:
+    """Run launch workspace hooks around the prepared worktree."""
     _run_workspace_hooks(
         workflow_definition.runtime.workspace_hooks.get("after_create", ()),
         worktree_path=worktree_path,
         issue_ref=issue_ref,
         branch_name=branch_name,
+        worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
     )
     _run_workspace_hooks(
@@ -4577,16 +5307,32 @@ def _prepare_launch_candidate(
         worktree_path=worktree_path,
         issue_ref=issue_ref,
         branch_name=branch_name,
+        worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
     )
 
-    dependency_summary = _build_dependency_summary(
-        issue_ref,
-        cp_config,
-        config.project_owner,
-        config.project_number,
-        status_resolver=status_resolver,
-    )
+
+def _assemble_prepared_launch_context(
+    issue_ref: str,
+    *,
+    candidate_prefix: str,
+    owner: str,
+    repo: str,
+    number: int,
+    title: str,
+    context: IssueContext,
+    session_kind: str,
+    repair_pr_url: str | None,
+    repair_branch_name: str | None,
+    worktree_path: str,
+    branch_name: str,
+    workflow_definition: WorkflowDefinition,
+    effective_consumer_config: ConsumerConfig,
+    dependency_summary: str | None,
+    branch_reconcile_state: str | None,
+    branch_reconcile_error: str | None,
+) -> PreparedLaunchContext:
+    """Create the final launch context for a prepared candidate."""
     return PreparedLaunchContext(
         issue_ref=issue_ref,
         repo_prefix=candidate_prefix,
@@ -4605,6 +5351,1572 @@ def _prepare_launch_candidate(
         dependency_summary=dependency_summary,
         branch_reconcile_state=branch_reconcile_state,
         branch_reconcile_error=branch_reconcile_error,
+    )
+
+
+def _prepare_launch_candidate(
+    issue_ref: str,
+    *,
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    db: ConsumerDB,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver: Callable | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+    pr_port: PullRequestPort | None = None,
+    issue_context_port: IssueContextPort | None = None,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
+) -> PreparedLaunchContext:
+    """Prepare local launch state for an issue before board claim."""
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    store = session_store or SqliteSessionStore(db)
+    effective_pr_port = pr_port or GitHubCliAdapter(
+        project_owner=config.project_owner,
+        project_number=config.project_number,
+        config=cp_config,
+        github_memo=prepared.github_memo,
+        gh_runner=gh_runner,
+    )
+    effective_issue_context_port = issue_context_port or effective_pr_port
+    effective_worktree_port = worktree_port or LocalProcessAdapter(
+        subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+    )
+    (
+        candidate_prefix,
+        owner,
+        repo,
+        number,
+        snapshot,
+        session_kind,
+        repair_pr_url,
+        repair_branch_name,
+    ) = _resolve_launch_candidate_metadata(
+        issue_ref,
+        cp_config=cp_config,
+        auto_config=auto_config,
+        board_snapshot=prepared.board_snapshot,
+        pr_port=effective_pr_port,
+        gh_runner=gh_runner,
+    )
+    context, title = _resolve_launch_issue_context(
+        issue_ref,
+        owner=owner,
+        repo=repo,
+        number=number,
+        snapshot=snapshot,
+        config=config,
+        db=db,
+        issue_context_port=effective_issue_context_port,
+        gh_runner=gh_runner,
+    )
+
+    worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error = (
+        _setup_launch_worktree(
+            issue_ref,
+            title,
+            session_kind,
+            repair_branch_name,
+            config=config,
+            cp_config=cp_config,
+            db=db,
+            session_store=store,
+            worktree_port=effective_worktree_port,
+            subprocess_runner=subprocess_runner,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+    )
+
+    workflow_definition, effective_consumer_config = _resolve_launch_runtime(
+        candidate_prefix,
+        worktree_path,
+        config=config,
+        prepared=prepared,
+    )
+    _run_launch_workspace_hooks(
+        workflow_definition,
+        worktree_path=worktree_path,
+        issue_ref=issue_ref,
+        branch_name=branch_name,
+        worktree_port=effective_worktree_port,
+        subprocess_runner=subprocess_runner,
+    )
+
+    dependency_summary = _build_dependency_summary(
+        issue_ref,
+        cp_config,
+        config.project_owner,
+        config.project_number,
+        status_resolver=status_resolver,
+    )
+    return _assemble_prepared_launch_context(
+        issue_ref,
+        candidate_prefix=candidate_prefix,
+        owner=owner,
+        repo=repo,
+        number=number,
+        title=title,
+        context=context,
+        session_kind=session_kind,
+        repair_pr_url=repair_pr_url,
+        repair_branch_name=repair_branch_name,
+        worktree_path=worktree_path,
+        branch_name=branch_name,
+        workflow_definition=workflow_definition,
+        effective_consumer_config=effective_consumer_config,
+        dependency_summary=dependency_summary,
+        branch_reconcile_state=branch_reconcile_state,
+        branch_reconcile_error=branch_reconcile_error,
+    )
+
+
+def _select_launch_candidate_for_cycle(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    target_issue: str | None,
+    status_resolver: Callable[..., str] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]:
+    """Select a launch candidate and validate its immediate launchability."""
+    try:
+        candidate = _select_candidate_for_cycle(
+            config,
+            db,
+            prepared,
+            target_issue=target_issue,
+            status_resolver=status_resolver,
+            gh_runner=gh_runner,
+        )
+    except GhQueryError as err:
+        logger.error("Ready-item selection failed: %s", err)
+        if not _maybe_activate_claim_suppression(
+            db,
+            config,
+            scope="preflight",
+            error=err,
+        ):
+            _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
+        return None, CycleResult(action="error", reason=f"selection-error:{err}")
+    except Exception as err:
+        logger.exception("Unexpected selection failure")
+        return None, CycleResult(
+            action="error", reason=f"selection-unexpected-error:{err}"
+        )
+
+    if not candidate:
+        idle_reason = (
+            "no-dispatchable-repos"
+            if not prepared.dispatchable_repo_prefixes
+            else "no-ready-for-executor"
+        )
+        return None, CycleResult(action="idle", reason=idle_reason)
+
+    candidate_prefix = parse_issue_ref(candidate).prefix
+    main_workflow = prepared.main_workflows.get(candidate_prefix)
+    if main_workflow is None:
+        status = prepared.workflow_statuses.get(candidate_prefix)
+        reason = status.disabled_reason if status is not None else "workflow-missing"
+        return None, CycleResult(
+            action="idle",
+            issue_ref=candidate,
+            reason=f"repo-dispatch-disabled:{reason}",
+        )
+
+    base_seconds, max_seconds = _effective_retry_backoff(config, main_workflow)
+    if _retry_backoff_active(
+        db,
+        candidate,
+        base_seconds=base_seconds,
+        max_seconds=max_seconds,
+    ):
+        return None, CycleResult(
+            action="idle",
+            issue_ref=candidate,
+            reason=f"retry-backoff:{base_seconds}:{max_seconds}",
+        )
+
+    return (
+        SelectedLaunchCandidate(
+            issue_ref=candidate,
+            repo_prefix=candidate_prefix,
+            main_workflow=main_workflow,
+        ),
+        None,
+    )
+
+
+def _prepare_selected_launch_candidate(
+    *,
+    selected_candidate: SelectedLaunchCandidate,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
+    """Prepare the selected candidate into launch-ready local context."""
+    candidate = selected_candidate.issue_ref
+    _record_metric(db, config, "candidate_selected", issue_ref=candidate)
+    try:
+        return (
+            _prepare_launch_candidate(
+                candidate,
+                config=config,
+                prepared=prepared,
+                db=db,
+                subprocess_runner=subprocess_runner,
+                status_resolver=status_resolver,
+                board_info_resolver=board_info_resolver,
+                board_mutator=board_mutator,
+                gh_runner=gh_runner,
+            ),
+            None,
+        )
+    except GhQueryError as err:
+        return _handle_selected_launch_query_error(
+            candidate=candidate,
+            err=err,
+            config=config,
+            db=db,
+        )
+    except WorkflowConfigError as err:
+        return _handle_selected_launch_workflow_config_error(
+            candidate=candidate,
+            err=err,
+            config=config,
+            db=db,
+            cp_config=prepared.cp_config,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+    except WorktreePrepareError as err:
+        return _handle_selected_launch_worktree_error(
+            candidate=candidate,
+            err=err,
+            config=config,
+            db=db,
+        )
+    except RuntimeError as err:
+        return _handle_selected_launch_runtime_error(
+            candidate=candidate,
+            err=err,
+            config=config,
+            db=db,
+            cp_config=prepared.cp_config,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+
+
+def _handle_selected_launch_query_error(
+    *,
+    candidate: str,
+    err: GhQueryError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+) -> tuple[None, CycleResult]:
+    """Handle GitHub/query failures during selected launch preparation."""
+    _record_metric(
+        db,
+        config,
+        "context_hydration_failed",
+        issue_ref=candidate,
+        payload={"reason": gh_reason_code(err), "detail": str(err)},
+    )
+    if _maybe_activate_claim_suppression(
+        db,
+        config,
+        scope="hydration",
+        error=err,
+    ):
+        return None, CycleResult(
+            action="idle",
+            issue_ref=candidate,
+            reason="claim-suppressed:hydration",
+        )
+    _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=f"launch-prep:{err}",
+    )
+
+
+def _handle_selected_launch_workflow_config_error(
+    *,
+    candidate: str,
+    err: WorkflowConfigError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[None, CycleResult]:
+    """Handle invalid workflow configuration during launch preparation."""
+    _block_prelaunch_issue(
+        candidate,
+        f"workflow-config:{err}",
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "workflow_config_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=f"workflow-config:{err}",
+    )
+
+
+def _handle_selected_launch_worktree_error(
+    *,
+    candidate: str,
+    err: WorktreePrepareError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+) -> tuple[None, CycleResult]:
+    """Handle worktree preparation failures for a selected launch candidate."""
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": err.reason_code, "detail": err.detail},
+    )
+    reason = (
+        err.detail
+        if err.reason_code == "repair_reconcile_error"
+        else f"{err.reason_code}:{err.detail}"
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=reason,
+    )
+
+
+def _handle_selected_launch_runtime_error(
+    *,
+    candidate: str,
+    err: RuntimeError,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[None, CycleResult]:
+    """Handle workflow-hook runtime failures during launch preparation."""
+    _block_prelaunch_issue(
+        candidate,
+        f"workflow-hook:{err}",
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "workflow_hook_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        reason=f"workflow-hook:{err}",
+    )
+
+
+def _resolve_launch_context_for_cycle(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext | None,
+    target_issue: str | None,
+    dry_run: bool,
+    status_resolver: Callable[..., str] | None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
+    """Resolve or prepare launch-ready work for this cycle."""
+    if launch_context is not None:
+        return launch_context, None
+
+    selected_candidate, cycle_result = _select_launch_candidate_for_cycle(
+        config=config,
+        db=db,
+        prepared=prepared,
+        target_issue=target_issue,
+        status_resolver=status_resolver,
+        gh_runner=gh_runner,
+    )
+    if cycle_result is not None:
+        return None, cycle_result
+
+    if dry_run:
+        logger.info(
+            "[dry-run] Would prepare, claim, and execute: %s",
+            selected_candidate.issue_ref,
+        )
+        return None, CycleResult(
+            action="claimed",
+            issue_ref=selected_candidate.issue_ref,
+            reason="dry-run",
+        )
+
+    return _prepare_selected_launch_candidate(
+        selected_candidate=selected_candidate,
+        config=config,
+        db=db,
+        prepared=prepared,
+        subprocess_runner=subprocess_runner,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+
+
+@dataclass(frozen=True)
+class PendingClaimContext:
+    """Session state prepared for board claim after local launch prep."""
+
+    session_id: str
+    effective_max_retries: int
+
+
+def _open_pending_claim_session(
+    *,
+    db: ConsumerDB,
+    launch_context: PreparedLaunchContext,
+    executor: str,
+    slot_id: int,
+) -> tuple[PendingClaimContext | None, CycleResult | None]:
+    """Create the session record and acquire the lease for a launch-ready issue."""
+    candidate = launch_context.issue_ref
+    session_id = db.create_session(
+        candidate,
+        repo_prefix=launch_context.repo_prefix,
+        executor=executor,
+        slot_id=slot_id,
+        phase="launch_ready",
+        session_kind=launch_context.session_kind,
+        repair_pr_url=launch_context.repair_pr_url,
+    )
+    db.update_session(session_id, provenance_id=session_id, phase="launch_ready")
+    now = datetime.now(timezone.utc)
+    try:
+        lease_acquired = db.acquire_lease(candidate, session_id, slot_id=slot_id, now=now)
+    except TypeError:
+        lease_acquired = db.acquire_lease(candidate, session_id, now=now)
+    if not lease_acquired:
+        _complete_session(
+            db,
+            session_id,
+            candidate,
+            status="aborted",
+            failure_reason="lease_conflict",
+        )
+        return None, CycleResult(
+            action="idle",
+            issue_ref=candidate,
+            session_id=session_id,
+            reason="lease-conflict",
+        )
+    return PendingClaimContext(
+        session_id=session_id,
+        effective_max_retries=launch_context.effective_consumer_config.max_retries,
+    ), None
+
+
+def _enforce_claim_retry_ceiling(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    launch_context: PreparedLaunchContext,
+    pending_claim: PendingClaimContext,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> CycleResult | None:
+    """Abort and escalate if the issue already exhausted its retry ceiling."""
+    candidate = launch_context.issue_ref
+    retries = db.count_retries(candidate)
+    if retries < pending_claim.effective_max_retries:
+        return None
+    db.release_lease(candidate)
+    _complete_session(
+        db,
+        pending_claim.session_id,
+        candidate,
+        status="failed",
+        failure_reason="max_retries_exceeded",
+    )
+    try:
+        _escalate_to_claude(
+            candidate,
+            cp_config,
+            config.project_owner,
+            config.project_number,
+            reason=f"max retries ({pending_claim.effective_max_retries}) exceeded",
+            board_info_resolver=board_info_resolver,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception) as err:
+        logger.error("Escalation failed: %s", err)
+    return CycleResult(
+        action="error",
+        issue_ref=candidate,
+        session_id=pending_claim.session_id,
+        reason="max-retries-exceeded",
+    )
+
+
+def _attempt_launch_context_claim(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    pending_claim: PendingClaimContext,
+    slot_id: int,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[ClaimReadyResult | None, CycleResult | None]:
+    """Claim board ownership for a launch-ready issue."""
+    candidate = launch_context.issue_ref
+    _record_metric(
+        db,
+        config,
+        "claim_attempted",
+        issue_ref=candidate,
+        payload={"slot_id": slot_id},
+    )
+    try:
+        claim_result = _claim_launch_ready_issue(
+            candidate,
+            config=config,
+            prepared=prepared,
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+    except GhQueryError as err:
+        return _handle_launch_claim_api_failure(
+            candidate,
+            err,
+            config=config,
+            db=db,
+            pending_claim=pending_claim,
+        )
+    except Exception as err:
+        return _handle_launch_claim_unexpected_failure(
+            candidate,
+            err,
+            config=config,
+            db=db,
+            pending_claim=pending_claim,
+        )
+
+    if claim_result.claimed:
+        return claim_result, None
+    return _handle_launch_claim_rejection(
+        candidate,
+        claim_result,
+        config=config,
+        db=db,
+        pending_claim=pending_claim,
+    )
+
+
+def _claim_launch_ready_issue(
+    candidate: str,
+    *,
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> ClaimReadyResult:
+    """Execute the actual board claim for a launch-ready issue."""
+    return claim_ready_issue(
+        prepared.cp_config,
+        config.project_owner,
+        config.project_number,
+        executor=config.executor,
+        issue_ref=candidate,
+        all_prefixes=True,
+        automation_config=prepared.auto_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        status_resolver=status_resolver,
+    )
+
+
+def _handle_launch_claim_api_failure(
+    candidate: str,
+    err: GhQueryError,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
+    """Handle a GitHub/API failure while claiming a launch-ready issue."""
+    logger.error("Claim failed after launch prep for %s: %s", candidate, err)
+    if not _maybe_activate_claim_suppression(
+        db,
+        config,
+        scope="claim",
+        error=err,
+    ):
+        _mark_degraded(db, f"claim-error:{gh_reason_code(err)}:{err}")
+    db.release_lease(candidate)
+    _complete_session(
+        db,
+        pending_claim.session_id,
+        candidate,
+        status="failed",
+        failure_reason="api_error",
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "claim_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        session_id=pending_claim.session_id,
+        reason=f"claim-error:{err}",
+    )
+
+
+def _handle_launch_claim_unexpected_failure(
+    candidate: str,
+    err: Exception,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
+    """Handle an unexpected local failure while claiming a launch-ready issue."""
+    logger.exception("Unexpected claim failure after launch prep for %s", candidate)
+    db.release_lease(candidate)
+    _complete_session(
+        db,
+        pending_claim.session_id,
+        candidate,
+        status="failed",
+        failure_reason="consumer_error",
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": "claim_unexpected_error", "detail": str(err)},
+    )
+    return None, CycleResult(
+        action="error",
+        issue_ref=candidate,
+        session_id=pending_claim.session_id,
+        reason=f"claim-unexpected-error:{err}",
+    )
+
+
+def _handle_launch_claim_rejection(
+    candidate: str,
+    claim_result: ClaimReadyResult,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
+    """Handle a non-exception claim rejection for a launch-ready issue."""
+    db.release_lease(candidate)
+    terminal_status = (
+        "aborted"
+        if claim_result.reason in {"wip-limit", "status-not-ready:In Progress"}
+        else "failed"
+    )
+    failure_reason = {
+        "wip-limit": "claim_rejected_wip_limit",
+        "status-not-ready:In Progress": "claim_rejected_status_changed",
+    }.get(claim_result.reason, "claim_rejected")
+    _complete_session(
+        db,
+        pending_claim.session_id,
+        candidate,
+        status=terminal_status,
+        failure_reason=failure_reason,
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_start_failed",
+        issue_ref=candidate,
+        payload={"reason": failure_reason},
+    )
+    return None, CycleResult(
+        action="idle",
+        issue_ref=candidate,
+        session_id=pending_claim.session_id,
+        reason=f"claim-rejected:{claim_result.reason}",
+    )
+
+
+def _mark_claimed_session_running(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    launch_context: PreparedLaunchContext,
+    pending_claim: PendingClaimContext,
+    slot_id: int,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    cp_config: CriticalPathConfig,
+    gh_runner: Callable[..., str] | None,
+) -> ClaimedSessionContext:
+    """Persist the durable-start state and post the claim marker."""
+    candidate = launch_context.issue_ref
+    _record_successful_github_mutation(db)
+    _record_metric(db, config, "claim_succeeded", issue_ref=candidate)
+    db.update_session(
+        pending_claim.session_id,
+        status="running",
+        slot_id=slot_id,
+        worktree_path=launch_context.worktree_path,
+        branch_name=launch_context.branch_name,
+        phase="running",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        session_kind=launch_context.session_kind,
+        repair_pr_url=launch_context.repair_pr_url,
+        branch_reconcile_state=launch_context.branch_reconcile_state,
+        branch_reconcile_error=launch_context.branch_reconcile_error,
+    )
+    _record_metric(
+        db,
+        config,
+        "worker_durable_start",
+        issue_ref=candidate,
+        payload={"slot_id": slot_id, "worktree_path": launch_context.worktree_path},
+    )
+    try:
+        _post_consumer_claim_comment(
+            candidate,
+            pending_claim.session_id,
+            launch_context.repo_prefix,
+            launch_context.branch_name,
+            config.executor,
+            cp_config,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception) as err:
+        logger.error("Consumer claim marker failed: %s", err)
+    return ClaimedSessionContext(
+        session_id=pending_claim.session_id,
+        effective_max_retries=pending_claim.effective_max_retries,
+        slot_id=slot_id,
+    )
+
+
+def _claim_launch_context(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    slot_id: int,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
+    """Claim board ownership and start a durable running session."""
+    cp_config = prepared.cp_config
+    candidate = launch_context.issue_ref
+    pending_claim, cycle_result = _open_pending_claim_session(
+        db=db,
+        launch_context=launch_context,
+        executor=config.executor,
+        slot_id=slot_id,
+    )
+    if cycle_result is not None:
+        return None, cycle_result
+
+    retry_ceiling_result = _enforce_claim_retry_ceiling(
+        config=config,
+        db=db,
+        launch_context=launch_context,
+        pending_claim=pending_claim,
+        cp_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+    if retry_ceiling_result is not None:
+        return None, retry_ceiling_result
+
+    _claim_result, cycle_result = _attempt_launch_context_claim(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        pending_claim=pending_claim,
+        slot_id=slot_id,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+    if cycle_result is not None:
+        return None, cycle_result
+
+    return (
+        _mark_claimed_session_running(
+            config=config,
+            db=db,
+            launch_context=launch_context,
+            pending_claim=pending_claim,
+            slot_id=slot_id,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            cp_config=cp_config,
+            gh_runner=gh_runner,
+        ),
+        None,
+    )
+
+
+def _session_status_from_codex_result(
+    exit_code: int,
+    codex_result: dict[str, Any] | None,
+) -> tuple[str, str | None]:
+    """Map Codex exit/result into session status and failure reason."""
+    if exit_code == 0 and codex_result and codex_result.get("outcome") == "success":
+        return "success", None
+    if exit_code == 124:
+        return "timeout", "timeout"
+    if codex_result and codex_result.get("outcome") in {"failed", "blocked"}:
+        return "failed", "validation_failed"
+    return "failed", "codex_error"
+
+
+def _create_pr_for_execution_result(
+    *,
+    config: ConsumerConfig,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    codex_result: dict[str, Any] | None,
+    session_status: str,
+    failure_reason: str | None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    gh_runner: Callable[..., str] | None,
+) -> PrCreationOutcome:
+    """Reuse or create a PR from claimed-session output."""
+    pr_url = codex_result.get("pr_url") if codex_result else None
+    has_commits = False
+    updated_session_status = session_status
+    updated_failure_reason = failure_reason
+
+    try:
+        has_commits = _has_commits_on_branch(
+            launch_context.worktree_path,
+            launch_context.branch_name,
+            subprocess_runner=subprocess_runner,
+        )
+        if has_commits:
+            pr_url = _create_or_update_pr(
+                launch_context.worktree_path,
+                launch_context.branch_name,
+                launch_context.number,
+                launch_context.owner,
+                launch_context.repo,
+                launch_context.title,
+                config,
+                issue_ref=launch_context.issue_ref,
+                session_id=claimed_context.session_id,
+                gh_runner=gh_runner,
+            )
+    except (GhQueryError, Exception) as err:
+        logger.error("PR creation failed: %s", err)
+        if updated_session_status == "success":
+            updated_session_status = "failed"
+        updated_failure_reason = "pr_error"
+
+    return PrCreationOutcome(
+        pr_url=pr_url,
+        has_commits=has_commits,
+        session_status=updated_session_status,
+        failure_reason=updated_failure_reason,
+    )
+
+
+def _handoff_execution_to_review(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    session_id: str,
+    pr_url: str,
+    session_status: str,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewQueueDrainSummary:
+    """Transition a claimed session into Review and perform immediate rescue."""
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    candidate = launch_context.issue_ref
+
+    _transition_claimed_session_to_review(
+        db=db,
+        issue_ref=candidate,
+        session_id=session_id,
+        config=config,
+        critical_path_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    _record_metric(db, config, "session_transition_review", issue_ref=candidate)
+
+    immediate_review_summary = ReviewQueueDrainSummary()
+    if session_status != "success":
+        return immediate_review_summary
+
+    handoff_store = SqliteSessionStore(db)
+    _post_claimed_session_verdict_marker(
+        db=db,
+        pr_url=pr_url,
+        session_id=session_id,
+        gh_runner=gh_runner,
+    )
+    queue_entry = _queue_claimed_session_for_review(
+        store=handoff_store,
+        issue_ref=candidate,
+        pr_url=pr_url,
+        session_id=session_id,
+    )
+    if queue_entry is None or auto_config is None:
+        return immediate_review_summary
+
+    return _run_immediate_review_handoff(
+        config=config,
+        critical_path_config=cp_config,
+        automation_config=auto_config,
+        store=handoff_store,
+        queue_entry=queue_entry,
+        gh_runner=gh_runner,
+        db=db,
+    )
+
+
+def _transition_claimed_session_to_review(
+    *,
+    db: ConsumerDB,
+    issue_ref: str,
+    session_id: str,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Move one claimed issue into Review or queue the transition on failure."""
+    try:
+        _transition_issue_to_review(
+            issue_ref,
+            critical_path_config,
+            config.project_owner,
+            config.project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        _record_successful_github_mutation(db)
+    except (GhQueryError, Exception) as err:
+        logger.error("Review transition failed: %s", err)
+        _mark_degraded(db, f"review-transition:{err}")
+        _queue_status_transition(
+            db,
+            issue_ref,
+            to_status="Review",
+            from_statuses={"In Progress"},
+        )
+        db.update_session(session_id, phase="review")
+
+
+def _post_claimed_session_verdict_marker(
+    *,
+    db: ConsumerDB,
+    pr_url: str,
+    session_id: str,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Post the codex verdict marker for a newly handed-off review PR."""
+    try:
+        _post_pr_codex_verdict(
+            pr_url,
+            session_id,
+            gh_runner=gh_runner,
+        )
+        _record_successful_github_mutation(db)
+    except (GhQueryError, Exception) as err:
+        logger.error("PR codex verdict comment failed: %s", err)
+        _mark_degraded(db, f"verdict-marker:{err}")
+        _queue_verdict_marker(db, pr_url, session_id)
+
+
+def _queue_claimed_session_for_review(
+    *,
+    store: SessionStorePort,
+    issue_ref: str,
+    pr_url: str,
+    session_id: str,
+) -> ReviewQueueEntry | None:
+    """Queue one claimed session for immediate review handling."""
+    return _queue_review_item(
+        store,
+        issue_ref,
+        pr_url,
+        session_id=session_id,
+    )
+
+
+def _run_immediate_review_handoff(
+    *,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    store: SessionStorePort,
+    queue_entry: ReviewQueueEntry,
+    gh_runner: Callable[..., str] | None,
+    db: ConsumerDB,
+) -> ReviewQueueDrainSummary:
+    """Run immediate rescue for the just-opened review PR."""
+    try:
+        review_memo = CycleGitHubMemo()
+        handoff_pr_port = GitHubCliAdapter(
+            project_owner=config.project_owner,
+            project_number=config.project_number,
+            config=critical_path_config,
+            github_memo=review_memo,
+            gh_runner=gh_runner,
+        )
+        queue_entries = [
+            entry
+            for entry in store.list_review_queue_items()
+            if entry.pr_repo == queue_entry.pr_repo
+            and entry.pr_number == queue_entry.pr_number
+        ]
+        review_snapshots = _build_review_snapshots_for_queue_entries(
+            queue_entries=queue_entries,
+            review_refs={entry.issue_ref for entry in queue_entries},
+            pr_port=handoff_pr_port,
+            trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
+        )
+        snapshot = review_snapshots.get((queue_entry.pr_repo, queue_entry.pr_number))
+        result = review_rescue(
+            pr_repo=queue_entry.pr_repo,
+            pr_number=queue_entry.pr_number,
+            config=critical_path_config,
+            automation_config=automation_config,
+            project_owner=config.project_owner,
+            project_number=config.project_number,
+            dry_run=False,
+            snapshot=snapshot,
+            gh_runner=gh_runner,
+        )
+        state_digest = handoff_pr_port.review_state_digests(
+            [(queue_entry.pr_repo, queue_entry.pr_number)]
+        ).get((queue_entry.pr_repo, queue_entry.pr_number))
+        for entry in queue_entries or [queue_entry]:
+            _apply_review_queue_result(
+                store,
+                entry,
+                result,
+                last_state_digest=state_digest,
+            )
+        pr_ref = f"{queue_entry.pr_repo}#{queue_entry.pr_number}"
+        return ReviewQueueDrainSummary(
+            queued_count=len(queue_entries) or 1,
+            due_count=len(queue_entries) or 1,
+            rerun=(
+                (f"{pr_ref}:{','.join(result.rerun_checks)}",)
+                if result.rerun_checks
+                else ()
+            ),
+            auto_merge_enabled=((pr_ref,) if result.auto_merge_enabled else ()),
+            requeued=result.requeued_refs,
+            blocked=((f"{pr_ref}:{result.blocked_reason}",) if result.blocked_reason else ()),
+            skipped=((f"{pr_ref}:{result.skipped_reason}",) if result.skipped_reason else ()),
+        )
+    except GhQueryError as err:
+        logger.warning(
+            "Immediate review clearance failed for %s: %s",
+            queue_entry.issue_ref,
+            err,
+        )
+        _mark_degraded(db, f"review-queue:{gh_reason_code(err)}:{err}")
+        return ReviewQueueDrainSummary()
+
+
+def _handle_non_review_execution_outcome(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    session_id: str,
+    session_status: str,
+    codex_result: dict[str, Any] | None,
+    has_commits: bool,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_poster: Callable[..., None] | None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[str, ResolutionEvaluation | None, str | None]:
+    """Handle non-review outcomes for a claimed session."""
+    cp_config = prepared.cp_config
+    candidate = launch_context.issue_ref
+    resolution_evaluation: ResolutionEvaluation | None = None
+    done_reason: str | None = None
+    updated_session_status = session_status
+
+    if session_status == "success" and not has_commits:
+        resolution_evaluation = _verify_resolution_payload(
+            candidate,
+            codex_result.get("resolution") if codex_result else None,
+            config=launch_context.effective_consumer_config,
+            workflows=prepared.main_workflows,
+            subprocess_runner=subprocess_runner,
+            gh_runner=gh_runner,
+        )
+        done_reason = _apply_resolution_action(
+            candidate,
+            resolution_evaluation,
+            session_id=session_id,
+            db=db,
+            config=config,
+            critical_path_config=cp_config,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+        if done_reason == "already_resolved":
+            _record_metric(db, config, "session_transition_done", issue_ref=candidate)
+        return updated_session_status, resolution_evaluation, done_reason
+
+    try:
+        _return_issue_to_ready(
+            candidate,
+            cp_config,
+            config.project_owner,
+            config.project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        _record_successful_github_mutation(db)
+    except (GhQueryError, Exception) as err:
+        logger.error("Ready reset failed after non-PR session: %s", err)
+        _mark_degraded(db, f"ready-reset:{err}")
+        _queue_status_transition(
+            db,
+            candidate,
+            to_status="Ready",
+            from_statuses={"In Progress", "Review"},
+        )
+    if session_status == "failed" and not has_commits and codex_result is None:
+        updated_session_status = "aborted"
+    return updated_session_status, resolution_evaluation, done_reason
+
+
+def _final_phase_for_claimed_session(
+    *,
+    launch_context: PreparedLaunchContext,
+    execution_outcome: SessionExecutionOutcome,
+) -> str:
+    """Determine the final persisted phase for a claimed session."""
+    review_requeued = (
+        execution_outcome.should_transition_to_review
+        and launch_context.issue_ref in execution_outcome.immediate_review_summary.requeued
+    )
+    final_phase = (
+        "completed"
+        if review_requeued
+        else (
+            "review"
+            if execution_outcome.should_transition_to_review
+            else "completed"
+        )
+    )
+    if execution_outcome.session_status in {"failed", "timeout"} and not execution_outcome.pr_url:
+        final_phase = "blocked"
+    if (
+        execution_outcome.resolution_evaluation is not None
+        and execution_outcome.done_reason != "already_resolved"
+    ):
+        final_phase = "blocked"
+    if (
+        launch_context.session_kind == "repair"
+        and execution_outcome.session_status in {"failed", "timeout"}
+    ):
+        final_phase = "completed"
+    return final_phase
+
+
+def _persist_claimed_session_completion(
+    *,
+    db: ConsumerDB,
+    session_id: str,
+    issue_ref: str,
+    execution_outcome: SessionExecutionOutcome,
+    final_phase: str,
+) -> None:
+    """Persist the final session record for a claimed execution outcome."""
+    resolution_evaluation = execution_outcome.resolution_evaluation
+    codex_result = execution_outcome.codex_result
+    _complete_session(
+        db,
+        session_id,
+        issue_ref,
+        status=execution_outcome.session_status,
+        failure_reason=execution_outcome.failure_reason,
+        outcome_json=json.dumps(codex_result) if codex_result else None,
+        pr_url=execution_outcome.pr_url,
+        phase=final_phase,
+        resolution_kind=(
+            resolution_evaluation.resolution_kind
+            if resolution_evaluation is not None
+            else None
+        ),
+        verification_class=(
+            resolution_evaluation.verification_class
+            if resolution_evaluation is not None
+            else None
+        ),
+        resolution_evidence_json=(
+            json.dumps(resolution_evaluation.evidence, sort_keys=True)
+            if resolution_evaluation is not None
+            else None
+        ),
+        resolution_action=(
+            resolution_evaluation.final_action
+            if resolution_evaluation is not None
+            else None
+        ),
+        done_reason=execution_outcome.done_reason,
+    )
+
+
+def _post_claimed_session_result_comment(
+    *,
+    issue_ref: str,
+    session_id: str,
+    codex_result: dict[str, Any] | None,
+    cp_config: CriticalPathConfig,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Post the session result comment when Codex produced structured output."""
+    if not codex_result:
+        return
+    try:
+        _post_result_comment(
+            issue_ref,
+            codex_result,
+            session_id,
+            cp_config,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception) as err:
+        logger.error("Result comment failed: %s", err)
+
+
+def _maybe_escalate_claimed_session_failure(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    issue_ref: str,
+    effective_max_retries: int,
+    session_status: str,
+    codex_result: dict[str, Any] | None,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: Callable | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Escalate terminal failed/timeout sessions once retry ceiling is reached."""
+    if session_status not in {"failed", "timeout"}:
+        return
+    new_retries = db.count_retries(issue_ref)
+    if new_retries < effective_max_retries:
+        return
+    try:
+        escalation_reason = ""
+        if codex_result:
+            escalation_reason = codex_result.get("blocker_reason") or codex_result.get(
+                "summary", ""
+            )
+        _escalate_to_claude(
+            issue_ref,
+            cp_config,
+            config.project_owner,
+            config.project_number,
+            reason=escalation_reason or f"max retries ({effective_max_retries}) exceeded",
+            board_info_resolver=board_info_resolver,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+    except (GhQueryError, Exception) as err:
+        logger.error("Escalation failed: %s", err)
+
+
+def _execute_claimed_session(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    file_reader: Callable[[Path], str] | None,
+    board_info_resolver: Callable | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> SessionExecutionOutcome:
+    """Execute Codex for a claimed session and apply immediate board handoff."""
+    candidate = launch_context.issue_ref
+    session_id = claimed_context.session_id
+
+    prompt = _assemble_codex_prompt(
+        launch_context.issue_context,
+        candidate,
+        prepared.cp_config,
+        launch_context.effective_consumer_config,
+        launch_context.worktree_path,
+        launch_context.branch_name,
+        dependency_summary=launch_context.dependency_summary,
+        workflow_definition=launch_context.workflow_definition,
+        session_kind=launch_context.session_kind,
+        repair_pr_url=launch_context.repair_pr_url,
+        branch_reconcile_state=launch_context.branch_reconcile_state,
+        branch_reconcile_error=launch_context.branch_reconcile_error,
+    )
+
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = config.output_dir / f"{session_id}.json"
+    exit_code = _run_codex_session(
+        launch_context.worktree_path,
+        prompt,
+        config.schema_path,
+        output_path,
+        launch_context.effective_consumer_config.codex_timeout_seconds,
+        heartbeat_fn=lambda: db.update_heartbeat(candidate),
+        subprocess_runner=subprocess_runner,
+    )
+
+    codex_result = _parse_codex_result(output_path, file_reader=file_reader)
+
+    session_status, failure_reason = _session_status_from_codex_result(
+        exit_code,
+        codex_result,
+    )
+    pr_outcome = _create_pr_for_execution_result(
+        config=config,
+        launch_context=launch_context,
+        claimed_context=claimed_context,
+        codex_result=codex_result,
+        session_status=session_status,
+        failure_reason=failure_reason,
+        subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+    )
+
+    should_transition_to_review = bool(pr_outcome.pr_url) and (
+        launch_context.session_kind != "repair"
+        or pr_outcome.session_status == "success"
+    )
+
+    immediate_review_summary = ReviewQueueDrainSummary()
+    resolution_evaluation: ResolutionEvaluation | None = None
+    done_reason: str | None = None
+    effective_session_status = pr_outcome.session_status
+    if should_transition_to_review:
+        immediate_review_summary = _handoff_execution_to_review(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id=session_id,
+            pr_url=pr_outcome.pr_url or "",
+            session_status=pr_outcome.session_status,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+    else:
+        (
+            effective_session_status,
+            resolution_evaluation,
+            done_reason,
+        ) = _handle_non_review_execution_outcome(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id=session_id,
+            session_status=pr_outcome.session_status,
+            codex_result=codex_result,
+            has_commits=pr_outcome.has_commits,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_poster=comment_poster,
+            subprocess_runner=subprocess_runner,
+            gh_runner=gh_runner,
+        )
+
+    return SessionExecutionOutcome(
+        session_status=effective_session_status,
+        failure_reason=pr_outcome.failure_reason,
+        pr_url=pr_outcome.pr_url,
+        has_commits=pr_outcome.has_commits,
+        codex_result=codex_result,
+        should_transition_to_review=should_transition_to_review,
+        immediate_review_summary=immediate_review_summary,
+        resolution_evaluation=resolution_evaluation,
+        done_reason=done_reason,
+    )
+
+
+def _finalize_claimed_session(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    execution_outcome: SessionExecutionOutcome,
+    board_info_resolver: Callable | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> CycleResult:
+    """Persist final session state and return the cycle result."""
+    cp_config = prepared.cp_config
+    candidate = launch_context.issue_ref
+    session_id = claimed_context.session_id
+    effective_max_retries = claimed_context.effective_max_retries
+
+    db.release_lease(candidate)
+    final_phase = _final_phase_for_claimed_session(
+        launch_context=launch_context,
+        execution_outcome=execution_outcome,
+    )
+    _persist_claimed_session_completion(
+        db=db,
+        session_id=session_id,
+        issue_ref=candidate,
+        execution_outcome=execution_outcome,
+        final_phase=final_phase,
+    )
+    _post_claimed_session_result_comment(
+        issue_ref=candidate,
+        session_id=session_id,
+        codex_result=execution_outcome.codex_result,
+        cp_config=cp_config,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+    _maybe_escalate_claimed_session_failure(
+        config=config,
+        db=db,
+        issue_ref=candidate,
+        effective_max_retries=effective_max_retries,
+        session_status=execution_outcome.session_status,
+        codex_result=execution_outcome.codex_result,
+        cp_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
+
+    return CycleResult(
+        action="claimed",
+        issue_ref=candidate,
+        session_id=session_id,
+        reason=execution_outcome.session_status,
+        pr_url=execution_outcome.pr_url,
     )
 
 
@@ -4666,8 +6978,6 @@ def run_one_cycle(
     assert prepared is not None
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
-    main_workflows = prepared.main_workflows
-    workflow_statuses = prepared.workflow_statuses
     config.poll_interval_seconds = prepared.effective_interval
 
     suppression_state = _claim_suppression_state(db)
@@ -4686,744 +6996,72 @@ def run_one_cycle(
     else:
         slot_id = slot_id_override
 
-    candidate = launch_context.issue_ref if launch_context is not None else None
-    if launch_context is None:
-        try:
-            candidate = _select_candidate_for_cycle(
-                config,
-                db,
-                prepared,
-                target_issue=target_issue,
-                status_resolver=status_resolver,
-                gh_runner=gh_runner,
-            )
-        except GhQueryError as err:
-            logger.error("Ready-item selection failed: %s", err)
-            if not _maybe_activate_claim_suppression(
-                db,
-                config,
-                scope="preflight",
-                error=err,
-            ):
-                _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
-            return CycleResult(action="error", reason=f"selection-error:{err}")
-        except Exception as err:
-            logger.exception("Unexpected selection failure")
-            return CycleResult(
-                action="error", reason=f"selection-unexpected-error:{err}"
-            )
-
-        if not candidate:
-            idle_reason = (
-                "no-dispatchable-repos"
-                if not prepared.dispatchable_repo_prefixes
-                else "no-ready-for-executor"
-            )
-            return CycleResult(action="idle", reason=idle_reason)
-
-        candidate_prefix = parse_issue_ref(candidate).prefix
-        main_workflow = main_workflows.get(candidate_prefix)
-        if main_workflow is None:
-            status = workflow_statuses.get(candidate_prefix)
-            reason = status.disabled_reason if status is not None else "workflow-missing"
-            return CycleResult(
-                action="idle",
-                issue_ref=candidate,
-                reason=f"repo-dispatch-disabled:{reason}",
-            )
-        base_seconds, max_seconds = _effective_retry_backoff(config, main_workflow)
-        if _retry_backoff_active(
-            db,
-            candidate,
-            base_seconds=base_seconds,
-            max_seconds=max_seconds,
-        ):
-            return CycleResult(
-                action="idle",
-                issue_ref=candidate,
-                reason=f"retry-backoff:{base_seconds}:{max_seconds}",
-            )
-
-        if dry_run:
-            logger.info("[dry-run] Would prepare, claim, and execute: %s", candidate)
-            return CycleResult(
-                action="claimed",
-                issue_ref=candidate,
-                reason="dry-run",
-            )
-
-        _record_metric(db, config, "candidate_selected", issue_ref=candidate)
-        try:
-            launch_context = _prepare_launch_candidate(
-                candidate,
-                config=config,
-                prepared=prepared,
-                db=db,
-                subprocess_runner=subprocess_runner,
-                status_resolver=status_resolver,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-        except GhQueryError as err:
-            _record_metric(
-                db,
-                config,
-                "context_hydration_failed",
-                issue_ref=candidate,
-                payload={"reason": gh_reason_code(err), "detail": str(err)},
-            )
-            if _maybe_activate_claim_suppression(
-                db,
-                config,
-                scope="hydration",
-                error=err,
-            ):
-                return CycleResult(
-                    action="idle",
-                    issue_ref=candidate,
-                    reason="claim-suppressed:hydration",
-                )
-            _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=f"launch-prep:{err}",
-            )
-        except WorkflowConfigError as err:
-            _block_prelaunch_issue(
-                candidate,
-                f"workflow-config:{err}",
-                config=config,
-                cp_config=cp_config,
-                db=db,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_metric(
-                db,
-                config,
-                "worker_start_failed",
-                issue_ref=candidate,
-                payload={"reason": "workflow_config_error", "detail": str(err)},
-            )
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=f"workflow-config:{err}",
-            )
-        except WorktreePrepareError as err:
-            _record_metric(
-                db,
-                config,
-                "worker_start_failed",
-                issue_ref=candidate,
-                payload={"reason": err.reason_code, "detail": err.detail},
-            )
-            reason = (
-                err.detail
-                if err.reason_code == "repair_reconcile_error"
-                else f"{err.reason_code}:{err.detail}"
-            )
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=reason,
-            )
-        except RuntimeError as err:
-            _block_prelaunch_issue(
-                candidate,
-                f"workflow-hook:{err}",
-                config=config,
-                cp_config=cp_config,
-                db=db,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_metric(
-                db,
-                config,
-                "worker_start_failed",
-                issue_ref=candidate,
-                payload={"reason": "workflow_hook_error", "detail": str(err)},
-            )
-            return CycleResult(
-                action="error",
-                issue_ref=candidate,
-                reason=f"workflow-hook:{err}",
-            )
+    launch_context, cycle_result = _resolve_launch_context_for_cycle(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        target_issue=target_issue,
+        dry_run=dry_run,
+        status_resolver=status_resolver,
+        subprocess_runner=subprocess_runner,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    if cycle_result is not None:
+        return cycle_result
 
     assert launch_context is not None
     candidate = launch_context.issue_ref
     candidate_prefix = launch_context.repo_prefix
-    main_workflow = main_workflows.get(candidate_prefix)
-    if main_workflow is None:
-        return CycleResult(
-            action="idle",
-            issue_ref=candidate,
-            reason="workflow-missing",
-        )
-    effective_max_retries = launch_context.effective_consumer_config.max_retries
 
-    session_id = db.create_session(
-        candidate,
-        repo_prefix=candidate_prefix,
-        executor=config.executor,
+    claimed_context, cycle_result = _claim_launch_context(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
         slot_id=slot_id,
-        phase="launch_ready",
-        session_kind=launch_context.session_kind,
-        repair_pr_url=launch_context.repair_pr_url,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
-    provenance_id = session_id
-    db.update_session(session_id, provenance_id=provenance_id, phase="launch_ready")
-    now = datetime.now(timezone.utc)
-    try:
-        lease_acquired = db.acquire_lease(candidate, session_id, slot_id=slot_id, now=now)
-    except TypeError:
-        lease_acquired = db.acquire_lease(candidate, session_id, now=now)
-    if not lease_acquired:
-        _complete_session(
-            db,
-            session_id,
-            candidate,
-            status="aborted",
-            failure_reason="lease_conflict",
-        )
-        return CycleResult(
-            action="idle",
-            issue_ref=candidate,
-            session_id=session_id,
-            reason="lease-conflict",
-        )
+    if cycle_result is not None:
+        return cycle_result
 
-    retries = db.count_retries(candidate)
-    if retries >= effective_max_retries:
-        db.release_lease(candidate)
-        _complete_session(
-            db,
-            session_id,
-            candidate,
-            status="failed",
-            failure_reason="max_retries_exceeded",
-        )
-        try:
-            _escalate_to_claude(
-                candidate,
-                cp_config,
-                config.project_owner,
-                config.project_number,
-                reason=f"max retries ({effective_max_retries}) exceeded",
-                board_info_resolver=board_info_resolver,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-        except (GhQueryError, Exception) as err:
-            logger.error("Escalation failed: %s", err)
-        return CycleResult(
-            action="error",
-            issue_ref=candidate,
-            session_id=session_id,
-            reason="max-retries-exceeded",
-        )
+    assert claimed_context is not None
+    session_id = claimed_context.session_id
+    effective_max_retries = claimed_context.effective_max_retries
 
-    _record_metric(
-        db,
-        config,
-        "claim_attempted",
-        issue_ref=candidate,
-        payload={"slot_id": slot_id},
-    )
-    try:
-        claim_result = claim_ready_issue(
-            cp_config,
-            config.project_owner,
-            config.project_number,
-            executor=config.executor,
-            issue_ref=candidate,
-            all_prefixes=True,
-            automation_config=auto_config,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-            status_resolver=status_resolver,
-        )
-    except GhQueryError as err:
-        logger.error("Claim failed after launch prep for %s: %s", candidate, err)
-        if not _maybe_activate_claim_suppression(
-            db,
-            config,
-            scope="claim",
-            error=err,
-        ):
-            _mark_degraded(db, f"claim-error:{gh_reason_code(err)}:{err}")
-        db.release_lease(candidate)
-        _complete_session(
-            db,
-            session_id,
-            candidate,
-            status="failed",
-            failure_reason="api_error",
-        )
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": "claim_error", "detail": str(err)},
-        )
-        return CycleResult(
-            action="error",
-            issue_ref=candidate,
-            session_id=session_id,
-            reason=f"claim-error:{err}",
-        )
-    except Exception as err:
-        logger.exception("Unexpected claim failure after launch prep for %s", candidate)
-        db.release_lease(candidate)
-        _complete_session(
-            db,
-            session_id,
-            candidate,
-            status="failed",
-            failure_reason="consumer_error",
-        )
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": "claim_unexpected_error", "detail": str(err)},
-        )
-        return CycleResult(
-            action="error",
-            issue_ref=candidate,
-            session_id=session_id,
-            reason=f"claim-unexpected-error:{err}",
-        )
-
-    if not claim_result.claimed:
-        db.release_lease(candidate)
-        terminal_status = (
-            "aborted"
-            if claim_result.reason in {"wip-limit", "status-not-ready:In Progress"}
-            else "failed"
-        )
-        failure_reason = {
-            "wip-limit": "claim_rejected_wip_limit",
-            "status-not-ready:In Progress": "claim_rejected_status_changed",
-        }.get(claim_result.reason, "claim_rejected")
-        _complete_session(
-            db,
-            session_id,
-            candidate,
-            status=terminal_status,
-            failure_reason=failure_reason,
-        )
-        _record_metric(
-            db,
-            config,
-            "worker_start_failed",
-            issue_ref=candidate,
-            payload={"reason": failure_reason},
-        )
-        return CycleResult(
-            action="idle",
-            issue_ref=candidate,
-            session_id=session_id,
-            reason=f"claim-rejected:{claim_result.reason}",
-        )
-    _record_successful_github_mutation(db)
-    _record_metric(db, config, "claim_succeeded", issue_ref=candidate)
-
-    db.update_session(
-        session_id,
-        status="running",
-        slot_id=slot_id,
-        worktree_path=launch_context.worktree_path,
-        branch_name=launch_context.branch_name,
-        phase="running",
-        started_at=datetime.now(timezone.utc).isoformat(),
-        session_kind=launch_context.session_kind,
-        repair_pr_url=launch_context.repair_pr_url,
-        branch_reconcile_state=launch_context.branch_reconcile_state,
-        branch_reconcile_error=launch_context.branch_reconcile_error,
-    )
-    _record_metric(
-        db,
-        config,
-        "worker_durable_start",
-        issue_ref=candidate,
-        payload={"slot_id": slot_id, "worktree_path": launch_context.worktree_path},
-    )
-    try:
-        _post_consumer_claim_comment(
-            candidate,
-            session_id,
-            candidate_prefix,
-            launch_context.branch_name,
-            config.executor,
-            cp_config,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-        )
-    except (GhQueryError, Exception) as err:
-        logger.error("Consumer claim marker failed: %s", err)
-
-    prompt = _assemble_codex_prompt(
-        launch_context.issue_context,
-        candidate,
-        cp_config,
-        launch_context.effective_consumer_config,
-        launch_context.worktree_path,
-        launch_context.branch_name,
-        dependency_summary=launch_context.dependency_summary,
-        workflow_definition=launch_context.workflow_definition,
-        session_kind=launch_context.session_kind,
-        repair_pr_url=launch_context.repair_pr_url,
-        branch_reconcile_state=launch_context.branch_reconcile_state,
-        branch_reconcile_error=launch_context.branch_reconcile_error,
-    )
-
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = config.output_dir / f"{session_id}.json"
-    exit_code = _run_codex_session(
-        launch_context.worktree_path,
-        prompt,
-        config.schema_path,
-        output_path,
-        launch_context.effective_consumer_config.codex_timeout_seconds,
-        heartbeat_fn=lambda: db.update_heartbeat(candidate),
+    execution_outcome = _execute_claimed_session(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        claimed_context=claimed_context,
         subprocess_runner=subprocess_runner,
+        file_reader=file_reader,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
 
-    codex_result = _parse_codex_result(output_path, file_reader=file_reader)
-
-    pr_url = None
-    has_commits = False
-    session_status = "failed"
-    failure_reason: str | None = None
-    resolution_evaluation: ResolutionEvaluation | None = None
-    done_reason: str | None = None
-
-    if exit_code == 0 and codex_result and codex_result.get("outcome") == "success":
-        session_status = "success"
-        failure_reason = None
-    elif exit_code == 124:
-        session_status = "timeout"
-        failure_reason = "timeout"
-    else:
-        session_status = "failed"
-        if codex_result and codex_result.get("outcome") in {"failed", "blocked"}:
-            failure_reason = "validation_failed"
-        else:
-            failure_reason = "codex_error"
-
-    # 19. PR creation (consumer-owned)
-    try:
-        if codex_result and codex_result.get("pr_url"):
-            pr_url = codex_result["pr_url"]
-        # Check if there are commits to salvage
-        has_commits = _has_commits_on_branch(
-            launch_context.worktree_path,
-            launch_context.branch_name,
-            subprocess_runner=subprocess_runner,
-        )
-        if has_commits:
-            pr_url = _create_or_update_pr(
-                launch_context.worktree_path,
-                launch_context.branch_name,
-                launch_context.number,
-                launch_context.owner,
-                launch_context.repo,
-                launch_context.title,
-                config,
-                issue_ref=candidate,
-                session_id=session_id,
-                gh_runner=gh_runner,
-            )
-    except (GhQueryError, Exception) as err:
-        logger.error("PR creation failed: %s", err)
-        if session_status == "success":
-            session_status = "failed"
-        failure_reason = "pr_error"
-
-    should_transition_to_review = bool(pr_url) and (
-        launch_context.session_kind != "repair" or session_status == "success"
-    )
-
-    immediate_review_summary = ReviewQueueDrainSummary()
-    if should_transition_to_review:
-        try:
-            _transition_issue_to_review(
-                candidate,
-                cp_config,
-                config.project_owner,
-                config.project_number,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_successful_github_mutation(db)
-        except (GhQueryError, Exception) as err:
-            logger.error("Review transition failed: %s", err)
-            _mark_degraded(db, f"review-transition:{err}")
-            _queue_status_transition(
-                db,
-                candidate,
-                to_status="Review",
-                from_statuses={"In Progress"},
-            )
-            db.update_session(session_id, phase="review")
-        _record_metric(db, config, "session_transition_review", issue_ref=candidate)
-
-        if session_status == "success":
-            try:
-                _post_pr_codex_verdict(
-                    pr_url,
-                    session_id,
-                    gh_runner=gh_runner,
-                )
-                _record_successful_github_mutation(db)
-            except (GhQueryError, Exception) as err:
-                logger.error("PR codex verdict comment failed: %s", err)
-                _mark_degraded(db, f"verdict-marker:{err}")
-                _queue_verdict_marker(db, pr_url, session_id)
-            queue_entry = _queue_review_item(
-                db,
-                candidate,
-                pr_url,
-                session_id=session_id,
-            )
-            if queue_entry is not None and auto_config is not None:
-                try:
-                    review_memo = CycleGitHubMemo()
-                    queue_entries = [
-                        entry
-                        for entry in db.list_review_queue_items()
-                        if entry.pr_repo == queue_entry.pr_repo
-                        and entry.pr_number == queue_entry.pr_number
-                    ]
-                    memoized_query_pull_request_state_probes(
-                        review_memo,
-                        queue_entry.pr_repo,
-                        (queue_entry.pr_number,),
-                        gh_runner=gh_runner,
-                    )
-                    review_snapshots = _build_review_snapshots_for_queue_entries(
-                        queue_entries=queue_entries,
-                        review_refs={entry.issue_ref for entry in queue_entries},
-                        automation_config=auto_config,
-                        gh_runner=gh_runner,
-                        github_memo=review_memo,
-                    )
-                    snapshot = review_snapshots.get(
-                        (queue_entry.pr_repo, queue_entry.pr_number)
-                    )
-                    result = review_rescue(
-                        pr_repo=queue_entry.pr_repo,
-                        pr_number=queue_entry.pr_number,
-                        config=cp_config,
-                        automation_config=auto_config,
-                        project_owner=config.project_owner,
-                        project_number=config.project_number,
-                        dry_run=False,
-                        snapshot=snapshot,
-                        gh_runner=gh_runner,
-                    )
-                    probe = review_memo.review_state_probes.get(
-                        (queue_entry.pr_repo, queue_entry.pr_number)
-                    )
-                    if probe is not None:
-                        state_digest = review_state_digest_from_probe(probe)
-                    else:
-                        payload = review_memo.review_pull_requests.get(
-                            (queue_entry.pr_repo, queue_entry.pr_number)
-                        )
-                        state_digest = (
-                            review_state_digest_from_payload(payload)
-                            if payload is not None
-                            else None
-                        )
-                    for entry in queue_entries or [queue_entry]:
-                        _apply_review_queue_result(
-                            db,
-                            entry,
-                            result,
-                            last_state_digest=state_digest,
-                        )
-                    immediate_review_summary = ReviewQueueDrainSummary(
-                        queued_count=len(queue_entries) or 1,
-                        due_count=len(queue_entries) or 1,
-                        rerun=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{','.join(result.rerun_checks)}",)
-                            if result.rerun_checks
-                            else ()
-                        ),
-                        auto_merge_enabled=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}",)
-                            if result.auto_merge_enabled
-                            else ()
-                        ),
-                        requeued=result.requeued_refs,
-                        blocked=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.blocked_reason}",)
-                            if result.blocked_reason
-                            else ()
-                        ),
-                        skipped=(
-                            (f"{queue_entry.pr_repo}#{queue_entry.pr_number}:{result.skipped_reason}",)
-                            if result.skipped_reason
-                            else ()
-                        ),
-                    )
-                except GhQueryError as err:
-                    logger.warning("Immediate review clearance failed for %s: %s", candidate, err)
-                    _mark_degraded(db, f"review-queue:{gh_reason_code(err)}:{err}")
-    else:
-        if session_status == "success" and not has_commits:
-            resolution_evaluation = _verify_resolution_payload(
-                candidate,
-                codex_result.get("resolution") if codex_result else None,
-                config=launch_context.effective_consumer_config,
-                workflows=prepared.main_workflows,
-                subprocess_runner=subprocess_runner,
-                gh_runner=gh_runner,
-            )
-            done_reason = _apply_resolution_action(
-                candidate,
-                resolution_evaluation,
-                session_id=session_id,
-                db=db,
-                config=config,
-                critical_path_config=cp_config,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-            if done_reason == "already_resolved":
-                _record_metric(db, config, "session_transition_done", issue_ref=candidate)
-        else:
-            try:
-                _return_issue_to_ready(
-                    candidate,
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-                _record_successful_github_mutation(db)
-            except (GhQueryError, Exception) as err:
-                logger.error("Ready reset failed after non-PR session: %s", err)
-                _mark_degraded(db, f"ready-reset:{err}")
-                _queue_status_transition(
-                    db,
-                    candidate,
-                    to_status="Ready",
-                    from_statuses={"In Progress", "Review"},
-                )
-            if session_status == "failed" and not has_commits and codex_result is None:
-                session_status = "aborted"
-
-    # 20. Release lease + update session
-    db.release_lease(candidate)
-    review_requeued = (
-        should_transition_to_review
-        and "immediate_review_summary" in locals()
-        and candidate in immediate_review_summary.requeued
-    )
-    final_phase = (
-        "completed"
-        if review_requeued
-        else ("review" if should_transition_to_review else "completed")
-    )
-    if session_status in {"failed", "timeout"} and not pr_url:
-        final_phase = "blocked"
-    if resolution_evaluation is not None and done_reason != "already_resolved":
-        final_phase = "blocked"
-    if launch_context.session_kind == "repair" and session_status in {"failed", "timeout"}:
-        final_phase = "completed"
-    _complete_session(
-        db,
-        session_id,
-        candidate,
-        status=session_status,
-        failure_reason=failure_reason,
-        outcome_json=json.dumps(codex_result) if codex_result else None,
-        pr_url=pr_url,
-        phase=final_phase,
-        resolution_kind=(
-            resolution_evaluation.resolution_kind
-            if resolution_evaluation is not None
-            else None
-        ),
-        verification_class=(
-            resolution_evaluation.verification_class
-            if resolution_evaluation is not None
-            else None
-        ),
-        resolution_evidence_json=(
-            json.dumps(resolution_evaluation.evidence, sort_keys=True)
-            if resolution_evaluation is not None
-            else None
-        ),
-        resolution_action=(
-            resolution_evaluation.final_action
-            if resolution_evaluation is not None
-            else None
-        ),
-        done_reason=done_reason,
-    )
-
-    if codex_result:
-        try:
-            _post_result_comment(
-                candidate,
-                codex_result,
-                session_id,
-                cp_config,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-        except (GhQueryError, Exception) as err:
-            logger.error("Result comment failed: %s", err)
-
-    if session_status in ("failed", "timeout"):
-        new_retries = db.count_retries(candidate)
-        if new_retries >= effective_max_retries:
-            try:
-                escalation_reason = ""
-                if codex_result:
-                    escalation_reason = codex_result.get("blocker_reason") or codex_result.get("summary", "")
-                _escalate_to_claude(
-                    candidate,
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    reason=escalation_reason or f"max retries ({effective_max_retries}) exceeded",
-                    board_info_resolver=board_info_resolver,
-                    comment_checker=comment_checker,
-                    comment_poster=comment_poster,
-                    gh_runner=gh_runner,
-                )
-            except (GhQueryError, Exception) as err:
-                logger.error("Escalation failed: %s", err)
-
-    return CycleResult(
-        action="claimed",
-        issue_ref=candidate,
-        session_id=session_id,
-        reason=session_status,
-        pr_url=pr_url,
+    return _finalize_claimed_session(
+        config=config,
+        db=db,
+        prepared=prepared,
+        launch_context=launch_context,
+        claimed_context=claimed_context,
+        execution_outcome=execution_outcome,
+        board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
 
 
@@ -5469,6 +7107,282 @@ def _next_available_slots(
     return [slot_id for slot_id in range(1, limit + 1) if slot_id not in occupied]
 
 
+def _log_completed_worker_results(
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+) -> None:
+    """Log and discard completed worker futures."""
+    for future, task in list(active_tasks.items()):
+        if not future.done():
+            continue
+        del active_tasks[future]
+        try:
+            result = future.result()
+            logger.info("Worker result [slot=%s issue=%s]: %s", task.slot_id, task.issue_ref, result)
+        except Exception:
+            logger.exception(
+                "Unhandled worker failure [slot=%s issue=%s]",
+                task.slot_id,
+                task.issue_ref,
+            )
+
+
+def _prepare_multi_worker_cycle(
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    *,
+    dry_run: bool,
+    sleeper: Callable[[float], None],
+    di_kwargs: dict[str, Any],
+) -> PreparedCycleContext | None:
+    """Run one bounded preflight pass for the multi-worker daemon."""
+    try:
+        return _prepare_cycle(
+            config,
+            db,
+            dry_run=dry_run,
+            board_info_resolver=di_kwargs.get("board_info_resolver"),
+            board_mutator=di_kwargs.get("board_mutator"),
+            comment_checker=di_kwargs.get("comment_checker"),
+            comment_poster=di_kwargs.get("comment_poster"),
+            gh_runner=di_kwargs.get("gh_runner"),
+        )
+    except ConfigError:
+        logger.exception("Config error during multi-worker cycle")
+    except WorkflowConfigError:
+        logger.exception("Workflow config error during multi-worker cycle")
+    except GhQueryError as err:
+        logger.error("Multi-worker preflight failed: %s", err)
+        _mark_degraded(db, f"control-plane:{gh_reason_code(err)}:{err}")
+    sleeper(config.poll_interval_seconds)
+    return None
+
+
+def _multi_worker_dispatch_state(
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+) -> tuple[list[int], set[str]]:
+    """Compute currently available slots and active issue refs."""
+    reserved_slots = {task.slot_id for task in active_tasks.values()}
+    active_issue_refs = {task.issue_ref for task in active_tasks.values()}
+    active_issue_refs.update(worker.issue_ref for worker in db.active_workers())
+    available_slots = _next_available_slots(
+        db,
+        prepared.global_limit,
+        reserved_slots=reserved_slots,
+    )
+    return available_slots, active_issue_refs
+
+
+def _sleep_for_claim_suppression_if_needed(
+    db: ConsumerDB,
+    config: ConsumerConfig,
+    *,
+    sleeper: Callable[[float], None],
+) -> bool:
+    """Sleep until claim suppression clears, if active."""
+    suppression_state = _claim_suppression_state(db)
+    if suppression_state is None:
+        return False
+    until = _parse_iso8601_timestamp(suppression_state["until"])
+    if until is None:
+        sleeper(config.poll_interval_seconds)
+        return True
+    remaining = max(
+        1.0,
+        (until - datetime.now(timezone.utc)).total_seconds(),
+    )
+    sleeper(min(float(config.poll_interval_seconds), remaining))
+    return True
+
+
+def _prepare_multi_worker_launch_context(
+    candidate: str,
+    *,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    prepared: PreparedCycleContext,
+    dry_run: bool,
+    di_kwargs: dict[str, Any],
+) -> tuple[PreparedLaunchContext | None, bool]:
+    """Prepare launch context for one candidate.
+
+    Returns `(launch_context, stop_dispatch)`.
+    """
+    if dry_run:
+        return None, False
+    _record_metric(db, config, "candidate_selected", issue_ref=candidate)
+    try:
+        return (
+            _prepare_launch_candidate(
+                candidate,
+                config=config,
+                prepared=prepared,
+                db=db,
+                subprocess_runner=di_kwargs.get("subprocess_runner"),
+                status_resolver=di_kwargs.get("status_resolver"),
+                board_info_resolver=di_kwargs.get("board_info_resolver"),
+                board_mutator=di_kwargs.get("board_mutator"),
+                gh_runner=di_kwargs.get("gh_runner"),
+            ),
+            False,
+        )
+    except GhQueryError as err:
+        _record_metric(
+            db,
+            config,
+            "context_hydration_failed",
+            issue_ref=candidate,
+            payload={"reason": gh_reason_code(err), "detail": str(err)},
+        )
+        if not _maybe_activate_claim_suppression(
+            db,
+            config,
+            scope="hydration",
+            error=err,
+        ):
+            _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
+        return None, True
+    except WorkflowConfigError as err:
+        _block_prelaunch_issue(
+            candidate,
+            f"workflow-config:{err}",
+            config=config,
+            cp_config=prepared.cp_config,
+            db=db,
+            board_info_resolver=di_kwargs.get("board_info_resolver"),
+            board_mutator=di_kwargs.get("board_mutator"),
+            gh_runner=di_kwargs.get("gh_runner"),
+        )
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": "workflow_config_error", "detail": str(err)},
+        )
+        return None, False
+    except WorktreePrepareError as err:
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": err.reason_code, "detail": err.detail},
+        )
+        return None, False
+    except RuntimeError as err:
+        _block_prelaunch_issue(
+            candidate,
+            f"workflow-hook:{err}",
+            config=config,
+            cp_config=prepared.cp_config,
+            db=db,
+            board_info_resolver=di_kwargs.get("board_info_resolver"),
+            board_mutator=di_kwargs.get("board_mutator"),
+            gh_runner=di_kwargs.get("gh_runner"),
+        )
+        _record_metric(
+            db,
+            config,
+            "worker_start_failed",
+            issue_ref=candidate,
+            payload={"reason": "workflow_hook_error", "detail": str(err)},
+        )
+        return None, False
+
+
+def _submit_multi_worker_task(
+    executor: ThreadPoolExecutor,
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+    *,
+    config: ConsumerConfig,
+    candidate: str,
+    slot_id: int,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext | None,
+    dry_run: bool,
+    di_kwargs: dict[str, Any],
+) -> None:
+    """Submit one prepared candidate to a worker slot."""
+    future = executor.submit(
+        _run_worker_cycle,
+        replace(config),
+        target_issue=candidate,
+        slot_id=slot_id,
+        prepared=prepared,
+        launch_context=launch_context,
+        dry_run=dry_run,
+        di_kwargs=di_kwargs,
+    )
+    active_tasks[future] = ActiveWorkerTask(
+        issue_ref=candidate,
+        slot_id=slot_id,
+        launched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def _dispatch_multi_worker_launches(
+    executor: ThreadPoolExecutor,
+    config: ConsumerConfig,
+    db: ConsumerDB,
+    *,
+    prepared: PreparedCycleContext,
+    available_slots: list[int],
+    active_issue_refs: set[str],
+    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
+    dry_run: bool,
+    di_kwargs: dict[str, Any],
+) -> int:
+    """Launch as many ready candidates as the current hydration budget allows."""
+    launched = 0
+    hydration_budget = max(1, config.launch_hydration_concurrency)
+    for slot_id in available_slots:
+        if launched >= hydration_budget and not dry_run:
+            break
+        try:
+            candidate = _select_candidate_for_cycle(
+                config,
+                db,
+                prepared,
+                status_resolver=di_kwargs.get("status_resolver"),
+                gh_runner=di_kwargs.get("gh_runner"),
+                excluded_issue_refs=active_issue_refs,
+            )
+        except GhQueryError as err:
+            logger.error("Ready-item selection failed: %s", err)
+            _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
+            break
+        if not candidate:
+            break
+
+        active_issue_refs.add(candidate)
+        launch_context, stop_dispatch = _prepare_multi_worker_launch_context(
+            candidate,
+            config=config,
+            db=db,
+            prepared=prepared,
+            dry_run=dry_run,
+            di_kwargs=di_kwargs,
+        )
+        if stop_dispatch:
+            break
+
+        _submit_multi_worker_task(
+            executor,
+            active_tasks,
+            config=config,
+            candidate=candidate,
+            slot_id=slot_id,
+            prepared=prepared,
+            launch_context=launch_context,
+            dry_run=dry_run,
+            di_kwargs=di_kwargs,
+        )
+        launched += 1
+    return launched
+
+
 def _run_multi_worker_daemon_loop(
     config: ConsumerConfig,
     db: ConsumerDB,
@@ -5482,19 +7396,7 @@ def _run_multi_worker_daemon_loop(
     active_tasks: dict[Future[CycleResult], ActiveWorkerTask] = {}
     with ThreadPoolExecutor(max_workers=max(1, config.global_concurrency)) as executor:
         while True:
-            for future, task in list(active_tasks.items()):
-                if not future.done():
-                    continue
-                del active_tasks[future]
-                try:
-                    result = future.result()
-                    logger.info("Worker result [slot=%s issue=%s]: %s", task.slot_id, task.issue_ref, result)
-                except Exception:
-                    logger.exception(
-                        "Unhandled worker failure [slot=%s issue=%s]",
-                        task.slot_id,
-                        task.issue_ref,
-                    )
+            _log_completed_worker_results(active_tasks)
 
             if _drain_requested(config.drain_path):
                 if not active_tasks and db.active_lease_count() == 0:
@@ -5506,168 +7408,39 @@ def _run_multi_worker_daemon_loop(
                 sleeper(min(5.0, float(config.poll_interval_seconds)))
                 continue
 
-            try:
-                prepared = _prepare_cycle(
-                    config,
-                    db,
-                    dry_run=dry_run,
-                    board_info_resolver=di_kwargs.get("board_info_resolver"),
-                    board_mutator=di_kwargs.get("board_mutator"),
-                    comment_checker=di_kwargs.get("comment_checker"),
-                    comment_poster=di_kwargs.get("comment_poster"),
-                    gh_runner=di_kwargs.get("gh_runner"),
-                )
-            except ConfigError:
-                logger.exception("Config error during multi-worker cycle")
-                sleeper(config.poll_interval_seconds)
-                continue
-            except WorkflowConfigError:
-                logger.exception("Workflow config error during multi-worker cycle")
-                sleeper(config.poll_interval_seconds)
-                continue
-            except GhQueryError as err:
-                logger.error("Multi-worker preflight failed: %s", err)
-                _mark_degraded(db, f"control-plane:{gh_reason_code(err)}:{err}")
-                sleeper(config.poll_interval_seconds)
-                continue
-
-            reserved_slots = {task.slot_id for task in active_tasks.values()}
-            active_issue_refs = {task.issue_ref for task in active_tasks.values()}
-            active_issue_refs.update(worker.issue_ref for worker in db.active_workers())
-            available_slots = _next_available_slots(
+            prepared = _prepare_multi_worker_cycle(
+                config,
                 db,
-                prepared.global_limit,
-                reserved_slots=reserved_slots,
+                dry_run=dry_run,
+                sleeper=sleeper,
+                di_kwargs=di_kwargs,
             )
-            suppression_state = _claim_suppression_state(db)
-            if suppression_state is not None:
-                until = _parse_iso8601_timestamp(suppression_state["until"])
-                if until is None:
-                    sleeper(config.poll_interval_seconds)
-                else:
-                    remaining = max(
-                        1.0,
-                        (until - datetime.now(timezone.utc)).total_seconds(),
-                    )
-                    sleeper(min(float(config.poll_interval_seconds), remaining))
+            if prepared is None:
                 continue
 
-            launched = 0
-            hydration_budget = max(1, config.launch_hydration_concurrency)
-            for slot_id in available_slots:
-                if launched >= hydration_budget and not dry_run:
-                    break
-                try:
-                    candidate = _select_candidate_for_cycle(
-                        config,
-                        db,
-                        prepared,
-                        status_resolver=di_kwargs.get("status_resolver"),
-                        gh_runner=di_kwargs.get("gh_runner"),
-                        excluded_issue_refs=active_issue_refs,
-                    )
-                except GhQueryError as err:
-                    logger.error("Ready-item selection failed: %s", err)
-                    _mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
-                    break
-                if not candidate:
-                    break
+            available_slots, active_issue_refs = _multi_worker_dispatch_state(
+                db,
+                prepared,
+                active_tasks,
+            )
+            if _sleep_for_claim_suppression_if_needed(
+                db,
+                config,
+                sleeper=sleeper,
+            ):
+                continue
 
-                active_issue_refs.add(candidate)
-                launch_context: PreparedLaunchContext | None = None
-                if not dry_run:
-                    _record_metric(db, config, "candidate_selected", issue_ref=candidate)
-                    try:
-                        launch_context = _prepare_launch_candidate(
-                            candidate,
-                            config=config,
-                            prepared=prepared,
-                            db=db,
-                            subprocess_runner=di_kwargs.get("subprocess_runner"),
-                            status_resolver=di_kwargs.get("status_resolver"),
-                            board_info_resolver=di_kwargs.get("board_info_resolver"),
-                            board_mutator=di_kwargs.get("board_mutator"),
-                            gh_runner=di_kwargs.get("gh_runner"),
-                        )
-                    except GhQueryError as err:
-                        _record_metric(
-                            db,
-                            config,
-                            "context_hydration_failed",
-                            issue_ref=candidate,
-                            payload={"reason": gh_reason_code(err), "detail": str(err)},
-                        )
-                        if not _maybe_activate_claim_suppression(
-                            db,
-                            config,
-                            scope="hydration",
-                            error=err,
-                        ):
-                            _mark_degraded(db, f"launch-prep:{gh_reason_code(err)}:{err}")
-                        break
-                    except WorkflowConfigError as err:
-                        _block_prelaunch_issue(
-                            candidate,
-                            f"workflow-config:{err}",
-                            config=config,
-                            cp_config=prepared.cp_config,
-                            db=db,
-                            board_info_resolver=di_kwargs.get("board_info_resolver"),
-                            board_mutator=di_kwargs.get("board_mutator"),
-                            gh_runner=di_kwargs.get("gh_runner"),
-                        )
-                        _record_metric(
-                            db,
-                            config,
-                            "worker_start_failed",
-                            issue_ref=candidate,
-                            payload={"reason": "workflow_config_error", "detail": str(err)},
-                        )
-                        continue
-                    except WorktreePrepareError as err:
-                        _record_metric(
-                            db,
-                            config,
-                            "worker_start_failed",
-                            issue_ref=candidate,
-                            payload={"reason": err.reason_code, "detail": err.detail},
-                        )
-                        continue
-                    except RuntimeError as err:
-                        _block_prelaunch_issue(
-                            candidate,
-                            f"workflow-hook:{err}",
-                            config=config,
-                            cp_config=prepared.cp_config,
-                            db=db,
-                            board_info_resolver=di_kwargs.get("board_info_resolver"),
-                            board_mutator=di_kwargs.get("board_mutator"),
-                            gh_runner=di_kwargs.get("gh_runner"),
-                        )
-                        _record_metric(
-                            db,
-                            config,
-                            "worker_start_failed",
-                            issue_ref=candidate,
-                            payload={"reason": "workflow_hook_error", "detail": str(err)},
-                        )
-                        continue
-                future = executor.submit(
-                    _run_worker_cycle,
-                    replace(config),
-                    target_issue=candidate,
-                    slot_id=slot_id,
-                    prepared=prepared,
-                    launch_context=launch_context,
-                    dry_run=dry_run,
-                    di_kwargs=di_kwargs,
-                )
-                active_tasks[future] = ActiveWorkerTask(
-                    issue_ref=candidate,
-                    slot_id=slot_id,
-                    launched_at=datetime.now(timezone.utc).isoformat(),
-                )
-                launched += 1
+            launched = _dispatch_multi_worker_launches(
+                executor,
+                config,
+                db,
+                prepared=prepared,
+                available_slots=available_slots,
+                active_issue_refs=active_issue_refs,
+                active_tasks=active_tasks,
+                dry_run=dry_run,
+                di_kwargs=di_kwargs,
+            )
 
             sleeper(1.0 if active_tasks or launched else config.poll_interval_seconds)
 
@@ -5951,6 +7724,39 @@ def _collect_status_payload(
     local_only: bool = False,
 ) -> dict[str, Any]:
     """Collect consumer status as a JSON-serializable payload."""
+    auto_config, main_workflows, workflow_statuses, effective_interval, last_reload_at = (
+        _load_status_runtime(config)
+    )
+    status_now = datetime.now(timezone.utc)
+    status_state = _collect_status_runtime_state(
+        config,
+        auto_config=auto_config,
+        local_only=local_only,
+        status_now=status_now,
+    )
+    return _build_status_payload(
+        config,
+        auto_config=auto_config,
+        workflow_statuses=workflow_statuses,
+        main_workflows=main_workflows,
+        effective_interval=effective_interval,
+        last_reload_at=last_reload_at,
+        status_now=status_now,
+        local_only=local_only,
+        **status_state,
+    )
+
+
+def _load_status_runtime(
+    config: ConsumerConfig,
+) -> tuple[
+    BoardAutomationConfig | None,
+    dict[str, RepoWorkflow],
+    dict[str, RepoWorkflowStatus],
+    int,
+    str | None,
+]:
+    """Load automation config and persisted workflow status for status reporting."""
     try:
         auto_config = load_automation_config(config.automation_config_path)
     except ConfigError:
@@ -5967,9 +7773,18 @@ def _collect_status_payload(
         if persisted_snapshot is not None
         else None
     )
+    return auto_config, main_workflows, workflow_statuses, effective_interval, last_reload_at
 
+
+def _collect_status_runtime_state(
+    config: ConsumerConfig,
+    *,
+    auto_config: BoardAutomationConfig | None,
+    local_only: bool,
+    status_now: datetime,
+) -> dict[str, Any]:
+    """Collect DB-backed runtime state for status reporting."""
     db = ConsumerDB(db_path=config.db_path)
-    status_now = datetime.now(timezone.utc)
     try:
         leases = db.active_lease_count()
         slots = sorted(db.active_slot_ids())
@@ -6000,6 +7815,46 @@ def _collect_status_payload(
     finally:
         db.close()
 
+    return {
+        "leases": leases,
+        "slots": slots,
+        "workers": workers,
+        "sessions": sessions,
+        "control_state": control_state,
+        "deferred_action_count": deferred_action_count,
+        "oldest_deferred_action_age_seconds": oldest_deferred_action_age_seconds,
+        "review_summary": review_summary,
+        "review_queue": review_queue,
+        "admission_summary": admission_summary,
+        "throughput_1h": throughput_1h,
+        "throughput_24h": throughput_24h,
+    }
+
+
+def _build_status_payload(
+    config: ConsumerConfig,
+    *,
+    auto_config: BoardAutomationConfig | None,
+    workflow_statuses: dict[str, RepoWorkflowStatus],
+    main_workflows: dict[str, RepoWorkflow],
+    effective_interval: int,
+    last_reload_at: str | None,
+    status_now: datetime,
+    leases: int,
+    slots: list[int],
+    workers: list[SessionInfo],
+    sessions: list[SessionInfo],
+    control_state: dict[str, str],
+    deferred_action_count: int,
+    oldest_deferred_action_age_seconds: float | None,
+    review_summary: dict[str, Any],
+    review_queue: dict[str, Any],
+    admission_summary: dict[str, Any],
+    throughput_1h: dict[str, Any],
+    throughput_24h: dict[str, Any],
+    local_only: bool,
+) -> dict[str, Any]:
+    """Assemble the final JSON-serializable status payload."""
     degraded = control_state.get(CONTROL_KEY_DEGRADED) == "true"
     claim_suppressed_until = control_state.get(CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL)
     claim_suppressed_reason = control_state.get(CONTROL_KEY_CLAIM_SUPPRESSED_REASON)
@@ -6128,499 +7983,17 @@ def _collect_status_payload(
     }
 
 
-def _cmd_status(
-    config: ConsumerConfig,
-    *,
-    as_json: bool = False,
-    local_only: bool = False,
-) -> int:
-    """Show current consumer state."""
-    data = _collect_status_payload(config, local_only=local_only)
-
-    if as_json:
-        print(json.dumps(data, indent=2))
-    else:
-        print(f"Active leases: {data['active_leases']}")
-        print(f"Active slots: {data['active_slots']}")
-        print(f"Deferred actions: {data['deferred_action_count']}")
-        if data["oldest_deferred_action_age_seconds"] is not None:
-            print(
-                "Oldest deferred age (s): "
-                f"{data['oldest_deferred_action_age_seconds']:.1f}"
-            )
-        print(
-            "Control-plane health: "
-            f"{data['control_plane_health']['health']} "
-            f"({data['control_plane_health']['reason_code']})"
-        )
-        print(f"Poll interval: {data['poll_interval_seconds']}s")
-        print(
-            f"Degraded: {'yes' if data['degraded'] else 'no'}"
-            + (
-                f" ({data['degraded_reason']})"
-                if data["degraded"] and data["degraded_reason"]
-                else ""
-            )
-        )
-        if data["claim_suppressed_until"]:
-            print(
-                "Claim suppression: "
-                f"{data['claim_suppressed_scope']} until {data['claim_suppressed_until']}"
-            )
-            if data["claim_suppressed_reason"]:
-                print(f"Claim suppression reason: {data['claim_suppressed_reason']}")
-        if data["local_only"]:
-            print("Review source: local-only")
-        if data["last_successful_board_sync_at"]:
-            print(
-                "Last successful board sync: "
-                f"{data['last_successful_board_sync_at']}"
-            )
-        if data["last_successful_github_mutation_at"]:
-            print(
-                "Last successful GitHub mutation: "
-                f"{data['last_successful_github_mutation_at']}"
-            )
-        print(
-            "Durable starts (1h/24h): "
-            f"{data['throughput_metrics']['windows']['1h']['durable_starts']}/"
-            f"{data['throughput_metrics']['windows']['24h']['durable_starts']}"
-        )
-        print(
-            "Occupied slots/hour (1h/24h): "
-            f"{data['throughput_metrics']['windows']['1h']['occupied_slots_per_hour']:.2f}/"
-            f"{data['throughput_metrics']['windows']['24h']['occupied_slots_per_hour']:.2f}"
-        )
-        print(
-            "Drain requested: "
-            f"{'yes' if data['drain_requested'] else 'no'} "
-            f"({data['drain_path']})"
-        )
-        print(f"Workflow snapshot: {data['workflow_state_path']}")
-        if data["workflow_last_reload_at"]:
-            print(f"Workflow last reload: {data['workflow_last_reload_at']}")
-        print("Repo workflows:")
-        for repo_prefix in sorted(data["repo_workflows"]):
-            status = data["repo_workflows"][repo_prefix]
-            detail = (
-                "available"
-                if status["available"]
-                else f"disabled ({status['disabled_reason']})"
-            )
-            print(
-                f"  {repo_prefix}: {detail} "
-                f"[{status['source_kind']}] {status['source_path']}"
-            )
-        print(f"Review summary: {data['review_summary']}")
-        print(f"Review queue: {data['review_queue']}")
-        print(f"Recent sessions ({len(data['recent_sessions'])}):")
-        for session in data["recent_sessions"]:
-            pr = f" PR: {session['pr_url']}" if session["pr_url"] else ""
-            slot = f" slot={session['slot_id']}" if session["slot_id"] is not None else ""
-            phase = f" phase={session['phase']}" if session["phase"] else ""
-            kind = f" kind={session['session_kind']}"
-            reconcile = (
-                f" reconcile={session['branch_reconcile_state']}"
-                if session["branch_reconcile_state"]
-                else ""
-            )
-            failure = (
-                f" failure={session['failure_reason']}"
-                if session["failure_reason"]
-                else ""
-            )
-            retry = (
-                f" retry={session['retry_count']}"
-                if session["retry_count"]
-                else ""
-            )
-            next_retry = (
-                f" next_retry={session['next_retry_at']}"
-                if session["next_retry_at"]
-                else ""
-            )
-            resolution = (
-                f" resolution={session['resolution_kind']}/{session['verification_class']}"
-                if session["resolution_kind"]
-                else ""
-            )
-            resolution_action = (
-                f" action={session['resolution_action']}"
-                if session["resolution_action"]
-                else ""
-            )
-            done_reason = (
-                f" done={session['done_reason']}"
-                if session["done_reason"]
-                else ""
-            )
-            print(
-                f"  {session['id']}  {session['issue_ref']:>10}  "
-                f"{session['status']:<8}  {session['executor']}{slot}{phase}"
-                f"{kind}{reconcile}"
-                f"{failure}{retry}{next_retry}{resolution}{resolution_action}{done_reason}{pr}"
-            )
-
-    return 0
-
-
-def _cmd_report_slo(
-    config: ConsumerConfig,
-    *,
-    as_json: bool = False,
-    local_only: bool = False,
-) -> int:
-    """Report rolling reliability and throughput metrics."""
-    data = _collect_status_payload(config, local_only=local_only)
-    report = {
-        "baseline_status": data["throughput_metrics"]["baseline_status"],
-        "claim_suppressed_until": data["claim_suppressed_until"],
-        "claim_suppressed_reason": data["claim_suppressed_reason"],
-        "claim_suppressed_scope": data["claim_suppressed_scope"],
-        "degraded": data["degraded"],
-        "degraded_reason": data["degraded_reason"],
-        "windows": data["throughput_metrics"]["windows"],
-        "reliability_metrics": data["reliability_metrics"],
-        "context_cache_metrics": data["context_cache_metrics"],
-        "worktree_reuse_metrics": data["worktree_reuse_metrics"],
-    }
-    if as_json:
-        print(json.dumps(report, indent=2))
-        return 0
-
-    print(f"Baseline status: {report['baseline_status']}")
-    if report["claim_suppressed_until"]:
-        print(
-            "Claim suppression: "
-            f"{report['claim_suppressed_scope']} until {report['claim_suppressed_until']}"
-        )
-        if report["claim_suppressed_reason"]:
-            print(f"Claim suppression reason: {report['claim_suppressed_reason']}")
-    print(
-        "Degraded: "
-        f"{'yes' if report['degraded'] else 'no'}"
-        + (
-            f" ({report['degraded_reason']})"
-            if report["degraded"] and report["degraded_reason"]
-            else ""
-        )
-    )
-    for window_name in ("1h", "24h"):
-        window = report["windows"][window_name]
-        print(f"{window_name}:")
-        print(
-            "  durable_starts="
-            f"{window['durable_starts']} startup_failures={window['startup_failures']} "
-            f"reliability={window['durable_start_reliability']}"
-        )
-        print(
-            "  occupied_slots_per_hour="
-            f"{window['occupied_slots_per_hour']:.2f} "
-            f"occupied_slots_per_ready_hour_ge_1={window['occupied_slots_per_ready_hour_ge_1']}"
-        )
-        print(
-            "  ready_hours_ge_1="
-            f"{window['ready_hours_ge_1']:.2f} "
-            f"ready_hours_ge_4={window['ready_hours_ge_4']:.2f}"
-        )
-    return 0
-
-
-def _create_status_http_server(
-    config: ConsumerConfig,
-    *,
-    host: str = DEFAULT_STATUS_HOST,
-    port: int = DEFAULT_STATUS_PORT,
-) -> ThreadingHTTPServer:
-    """Create a local HTTP server that exposes consumer status."""
-
-    class StatusHandler(BaseHTTPRequestHandler):
-        def _write_json(self, payload: dict[str, Any], *, status_code: int = 200) -> None:
-            body = json.dumps(payload, indent=2).encode("utf-8")
-            self.send_response(status_code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_GET(self) -> None:  # noqa: N802
-            if self.path in {"/", "/status"}:
-                self._write_json(_collect_status_payload(config, local_only=True))
-                return
-            if self.path == "/healthz":
-                payload = _collect_status_payload(config, local_only=True)
-                self._write_json(
-                    {
-                        "ok": True,
-                        "health": payload["control_plane_health"]["health"],
-                        "degraded": payload["degraded"],
-                        "degraded_reason": payload["degraded_reason"],
-                    }
-                )
-                return
-            self._write_json({"error": "not_found", "path": self.path}, status_code=404)
-
-        def log_message(self, format: str, *args: Any) -> None:
-            logger.debug("status-http %s - %s", self.address_string(), format % args)
-
-    return ThreadingHTTPServer((host, port), StatusHandler)
-
-
-def _cmd_serve_status(
-    config: ConsumerConfig,
-    *,
-    host: str = DEFAULT_STATUS_HOST,
-    port: int = DEFAULT_STATUS_PORT,
-) -> int:
-    """Serve local-only consumer status over localhost HTTP."""
-    server = _create_status_http_server(config, host=host, port=port)
-    logger.info("Serving local consumer status on http://%s:%s", host, server.server_port)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        logger.info("Status server stopped by user")
-    finally:
-        server.server_close()
-    return 0
-
-
-def _cmd_reconcile(config: ConsumerConfig, *, dry_run: bool = False) -> int:
-    """Reconcile board truth against local consumer state."""
-    db = ConsumerDB(db_path=config.db_path)
-    try:
-        cp_config = load_config(config.critical_paths_path)
-        auto_config = load_automation_config(config.automation_config_path)
-        _apply_automation_runtime(config, auto_config)
-        session_store = SqliteSessionStore(db)
-        result = _reconcile_board_truth(
-            config,
-            cp_config,
-            auto_config,
-            db,
-            session_store=session_store,
-            dry_run=dry_run,
-        )
-    finally:
-        db.close()
-
-    data = {
-        "dry_run": dry_run,
-        "moved_ready": list(result.moved_ready),
-        "moved_in_progress": list(result.moved_in_progress),
-        "moved_review": list(result.moved_review),
-        "moved_blocked": list(result.moved_blocked),
-    }
-    print(json.dumps(data, indent=2))
-    return 0
-
-
-def _cmd_drain(config: ConsumerConfig) -> int:
-    """Request a graceful drain at the next cycle boundary."""
-    _request_drain(config.drain_path)
-    print(
-        json.dumps(
-            {
-                "drain_requested": True,
-                "drain_path": str(config.drain_path),
-            },
-            indent=2,
-        )
-    )
-    return 0
-
-
-def _cmd_resume(config: ConsumerConfig) -> int:
-    """Clear a pending graceful drain request."""
-    cleared = _clear_drain(config.drain_path)
-    print(
-        json.dumps(
-            {
-                "drain_requested": False,
-                "drain_path": str(config.drain_path),
-                "cleared": cleared,
-            },
-            indent=2,
-        )
-    )
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# CLI parser
-# ---------------------------------------------------------------------------
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Board consumer daemon — poll, claim, execute.",
-    )
-    parser.add_argument(
-        "--file",
-        default=DEFAULT_CONFIG_PATH,
-        help="Path to critical-paths.json",
-    )
-    parser.add_argument(
-        "--automation-config",
-        default=DEFAULT_AUTOMATION_CONFIG_PATH,
-        help="Path to board-automation-config.json",
-    )
-    parser.add_argument(
-        "--project-owner",
-        default="StartupAI-site",
-    )
-    parser.add_argument(
-        "--project-number",
-        type=int,
-        default=1,
-    )
-
-    sub = parser.add_subparsers(dest="command")
-
-    # run
-    run_p = sub.add_parser("run", help="Run daemon loop")
-    run_p.add_argument("--interval", type=int, default=180, help="Poll interval seconds")
-    run_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-    run_p.add_argument("--dry-run", action="store_true")
-    run_p.add_argument("--verbose", action="store_true")
-
-    # one-shot
-    one_p = sub.add_parser("one-shot", help="Run one cycle")
-    one_p.add_argument("--issue", default=None, help="Target issue ref (e.g. crew#84)")
-    one_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-    one_p.add_argument("--dry-run", action="store_true")
-    one_p.add_argument("--verbose", action="store_true")
-
-    # status
-    stat_p = sub.add_parser("status", help="Show consumer state")
-    stat_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-    stat_p.add_argument("--json", action="store_true", dest="as_json")
-    stat_p.add_argument(
-        "--local-only",
-        action="store_true",
-        help="Skip GitHub queries and report local consumer state only",
-    )
-
-    report_p = sub.add_parser("report-slo", help="Show rolling reliability and throughput metrics")
-    report_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-    report_p.add_argument("--json", action="store_true", dest="as_json")
-    report_p.add_argument(
-        "--local-only",
-        action="store_true",
-        help="Skip GitHub queries and report local consumer state only",
-    )
-
-    serve_p = sub.add_parser(
-        "serve-status",
-        help="Serve local-only consumer status over localhost HTTP",
-    )
-    serve_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-    serve_p.add_argument("--host", default=DEFAULT_STATUS_HOST)
-    serve_p.add_argument("--port", type=int, default=DEFAULT_STATUS_PORT)
-
-    # reconcile
-    rec_p = sub.add_parser(
-        "reconcile",
-        help="Reconcile board In Progress truth against local consumer state",
-    )
-    rec_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-    rec_p.add_argument("--dry-run", action="store_true")
-
-    drain_p = sub.add_parser(
-        "drain",
-        help="Request a graceful drain before the next issue claim",
-    )
-    drain_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-
-    resume_p = sub.add_parser(
-        "resume",
-        help="Clear a pending graceful drain request",
-    )
-    resume_p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if not args.command:
-        parser.print_help()
-        return 3
-
-    log_level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
-
-    db_path = getattr(args, "db_path", DEFAULT_DB_PATH)
-    config = ConsumerConfig(
-        critical_paths_path=Path(args.file),
-        automation_config_path=Path(args.automation_config),
-        project_owner=args.project_owner,
-        project_number=args.project_number,
-        db_path=db_path,
-        poll_interval_seconds=getattr(args, "interval", 180),
-    )
-    try:
-        auto_config = load_automation_config(config.automation_config_path)
-    except ConfigError:
-        auto_config = None
-    _apply_automation_runtime(config, auto_config)
-
-    if args.command == "status":
-        return _cmd_status(
-            config,
-            as_json=getattr(args, "as_json", False),
-            local_only=getattr(args, "local_only", False),
-        )
-    if args.command == "report-slo":
-        return _cmd_report_slo(
-            config,
-            as_json=getattr(args, "as_json", False),
-            local_only=getattr(args, "local_only", False),
-        )
-    if args.command == "serve-status":
-        return _cmd_serve_status(
-            config,
-            host=getattr(args, "host", DEFAULT_STATUS_HOST),
-            port=getattr(args, "port", DEFAULT_STATUS_PORT),
-        )
-    if args.command == "reconcile":
-        return _cmd_reconcile(config, dry_run=getattr(args, "dry_run", False))
-    if args.command == "drain":
-        return _cmd_drain(config)
-    if args.command == "resume":
-        return _cmd_resume(config)
-
-    db = ConsumerDB(db_path=config.db_path)
-
-    if args.command == "one-shot":
-        result = run_one_cycle(
-            config,
-            db,
-            dry_run=args.dry_run,
-            target_issue=getattr(args, "issue", None),
-        )
-        logger.info("Result: %s", result)
-        db.close()
-        if result.action == "idle":
-            return 2
-        if result.action == "error":
-            return 4
-        return 0
-
-    if args.command == "run":
-        try:
-            run_daemon_loop(config, db, dry_run=args.dry_run)
-        except KeyboardInterrupt:
-            logger.info("Daemon stopped by user")
-        finally:
-            db.close()
-        return 0
-
-    return 3
+from startupai_controller.board_consumer_cli import (
+    _cmd_drain,
+    _cmd_reconcile,
+    _cmd_report_slo,
+    _cmd_resume,
+    _cmd_serve_status,
+    _cmd_status,
+    _create_status_http_server,
+    build_parser,
+    main,
+)
 
 
 if __name__ == "__main__":

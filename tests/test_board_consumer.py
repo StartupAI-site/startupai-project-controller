@@ -62,10 +62,13 @@ from startupai_controller.board_consumer import (
     _post_result_comment,
     _reconcile_repair_branch,
     _reconcile_board_truth,
+    _replay_deferred_actions,
     _recover_interrupted_sessions,
     _request_drain,
     _review_queue_retry_seconds_for_blocked_reason,
     _review_queue_retry_seconds_for_result,
+    _return_issue_to_ready,
+    _transition_issue_to_in_progress,
     _transition_issue_to_review,
     _resolve_cli_command,
     _run_codex_session,
@@ -82,6 +85,7 @@ from startupai_controller.board_automation import (
     load_automation_config,
 )
 from startupai_controller.consumer_workflow import load_workflow_definition
+from startupai_controller.domain.models import IssueSnapshot
 from startupai_controller.board_io import CycleBoardSnapshot, GhCommandError, _ProjectItemSnapshot
 from startupai_controller.board_consumer import OpenPullRequestMatch
 from startupai_controller.consumer_db import ConsumerDB
@@ -198,6 +202,7 @@ def _make_consumer_config(tmp_path: Path) -> ConsumerConfig:
         automation_config_path=auto_path,
         db_path=tmp_path / "test.db",
         output_dir=tmp_path / "outputs",
+        drain_path=tmp_path / "consumer.drain",
         schema_path=Path(__file__).resolve().parent.parent
         / "config"
         / "codex_session_result.schema.json",
@@ -1271,7 +1276,7 @@ class TestTransitionIssueToReview:
                         }
                     }
                 )
-            if 'field(name: "Status")' in args_str:
+            if 'field(name: "Status")' in args_str or "fieldName=Status" in args_str:
                 return json.dumps(
                     {
                         "data": {
@@ -1780,17 +1785,8 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-1",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
         result = run_one_cycle(setup["config"], setup["db"], **{
             k: v for k, v in setup.items()
@@ -1874,17 +1870,8 @@ class TestRunOneCycle:
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-1",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
 
         summary, updated_snapshot = _drain_review_queue(
@@ -1953,17 +1940,8 @@ class TestRunOneCycle:
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-1",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
         rescue_calls: list[tuple[str, int]] = []
         monkeypatch.setattr(
@@ -2366,17 +2344,8 @@ class TestRunOneCycle:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_state_probes",
-            lambda memo, pr_repo, pr_numbers, **kwargs: {
-                number: memo.review_state_probes.setdefault(
-                    (pr_repo, number), object()
-                )
-                for number in pr_numbers
-            },
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.review_state_digest_from_probe",
-            lambda probe: "digest-new",
+            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            lambda self, pr_refs: {pr_ref: "digest-new" for pr_ref in pr_refs},
         )
         monkeypatch.setattr(
             "startupai_controller.board_consumer._build_review_snapshots_for_queue_entries",
@@ -2442,84 +2411,42 @@ class TestRunOneCycle:
             now=now,
         )
 
-        payload_calls: list[tuple[str, tuple[int, ...]]] = []
-        required_calls: list[tuple[str, str]] = []
+        captured: dict[tuple[str, int], tuple[str, ...]] = {}
 
-        def fake_payloads(memo, pr_repo, pr_numbers, *, gh_runner=None):
-            normalized = tuple(pr_numbers)
-            payload_calls.append((pr_repo, normalized))
-            return {
-                number: SimpleNamespace(
-                    pr_repo=pr_repo,
-                    pr_number=number,
-                    author="codex-bot",
-                    body=f"Closes #{number}",
-                    state="OPEN",
-                    is_draft=False,
-                    merge_state_status="CLEAN",
-                    mergeable="MERGEABLE",
-                    base_ref_name="main",
-                    auto_merge_enabled=False,
-                    comments=(),
-                    reviews=(),
-                    status_check_rollup=(),
+        class FakePrPort:
+            def review_snapshots(
+                self,
+                review_refs_by_pr: dict[tuple[str, int], tuple[str, ...]],
+                *,
+                trusted_codex_actors: frozenset[str],
+            ) -> dict[tuple[str, int], SimpleNamespace]:
+                assert trusted_codex_actors == frozenset(
+                    auto_config.trusted_codex_actors
                 )
-                for number in normalized
-            }
-
-        def fake_required(memo, pr_repo, base_ref_name, *, gh_runner=None):
-            key = (pr_repo, base_ref_name)
-            if key not in memo.required_status_checks:
-                required_calls.append(key)
-                memo.required_status_checks[key] = set()
-            return memo.required_status_checks[key]
-
-        def fake_snapshot_builder(
-            *,
-            pr_repo,
-            pr_number,
-            review_refs,
-            pr_payload,
-            automation_config,
-            required_checks,
-        ):
-            return SimpleNamespace(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                review_refs=review_refs,
-                pr_payload=pr_payload,
-                required_checks=required_checks,
-                pr_comment_bodies=(),
-            )
-
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_pull_request_view_payloads",
-            fake_payloads,
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer.memoized_query_required_status_checks",
-            fake_required,
-        )
-        monkeypatch.setattr(
-            "startupai_controller.board_consumer._build_review_snapshot_from_payload",
-            fake_snapshot_builder,
-        )
+                captured.update(review_refs_by_pr)
+                return {
+                    pr_key: SimpleNamespace(
+                        pr_repo=pr_key[0],
+                        pr_number=pr_key[1],
+                        review_refs=review_refs,
+                        pr_comment_bodies=(),
+                    )
+                    for pr_key, review_refs in review_refs_by_pr.items()
+                }
 
         queue_entries = db.list_review_queue_items()
         snapshots = _build_review_snapshots_for_queue_entries(
             queue_entries=queue_entries,
             review_refs={"crew#84", "crew#85", "app#17"},
-            automation_config=auto_config,
+            pr_port=FakePrPort(),
+            trusted_codex_actors=frozenset(auto_config.trusted_codex_actors),
         )
 
-        assert payload_calls == [
-            ("StartupAI-site/app.startupai-site", (300,)),
-            ("StartupAI-site/startupai-crew", (210, 211)),
-        ]
-        assert required_calls == [
-            ("StartupAI-site/app.startupai-site", "main"),
-            ("StartupAI-site/startupai-crew", "main"),
-        ]
+        assert captured == {
+            ("StartupAI-site/startupai-crew", 210): ("crew#84",),
+            ("StartupAI-site/startupai-crew", 211): ("crew#85",),
+            ("StartupAI-site/app.startupai-site", 300): ("app#17",),
+        }
         assert snapshots[("StartupAI-site/startupai-crew", 210)].review_refs == (
             "crew#84",
         )
@@ -3395,6 +3322,170 @@ class TestDrainControls:
 
 
 class TestRunDaemonLoop:
+    def test_transition_issue_to_in_progress_uses_ports(
+        self, tmp_path: Path
+    ) -> None:
+        cp_config = _load(tmp_path)
+        statuses = {"crew#84": "Review"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        _transition_issue_to_in_progress(
+            "crew#84",
+            cp_config,
+            "StartupAI-site",
+            1,
+            from_statuses={"Review"},
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert transitions == [("crew#84", "In Progress")]
+        assert statuses["crew#84"] == "In Progress"
+
+    def test_return_issue_to_ready_uses_ports(self, tmp_path: Path) -> None:
+        cp_config = _load(tmp_path)
+        statuses = {"crew#84": "In Progress"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        _return_issue_to_ready(
+            "crew#84",
+            cp_config,
+            "StartupAI-site",
+            1,
+            from_statuses={"In Progress"},
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert transitions == [("crew#84", "Ready")]
+        assert statuses["crew#84"] == "Ready"
+
+    def test_replay_deferred_actions_uses_ports(self, tmp_path: Path) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        cp_config = load_config(config.critical_paths_path)
+        statuses = {
+            "crew#84": "Review",
+            "app#149": "In Progress",
+        }
+        comments: list[tuple[str, int, str]] = []
+        closed: list[tuple[str, int]] = []
+        transitions: list[tuple[str, str]] = []
+        reruns: list[tuple[str, str, int]] = []
+        automerge: list[tuple[str, int]] = []
+
+        db.queue_deferred_action(
+            "crew#84",
+            "post_issue_comment",
+            {"issue_ref": "crew#84", "body": "controller comment"},
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "close_issue",
+            {"issue_ref": "crew#84"},
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "rerun_check",
+            {
+                "pr_repo": "StartupAI-site/startupai-crew",
+                "check_name": "ci",
+                "run_id": 42,
+            },
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "enable_automerge",
+            {
+                "pr_repo": "StartupAI-site/startupai-crew",
+                "pr_number": 77,
+            },
+        )
+        db.queue_deferred_action(
+            "crew#84",
+            "set_status",
+            {
+                "issue_ref": "crew#84",
+                "to_status": "In Progress",
+                "from_statuses": ["Review"],
+            },
+        )
+        db.queue_deferred_action(
+            "app#149",
+            "set_status",
+            {
+                "issue_ref": "app#149",
+                "to_status": "Ready",
+                "from_statuses": ["In Progress"],
+            },
+        )
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(
+            post_issue_comment=lambda repo, number, body: comments.append(
+                (repo, number, body)
+            ),
+            close_issue=lambda repo, number: closed.append((repo, number)),
+            set_issue_status=set_issue_status,
+        )
+        pr_port = SimpleNamespace(
+            rerun_failed_check=lambda repo, check_name, run_id: (
+                reruns.append((repo, check_name, run_id)) or True
+            ),
+            enable_automerge=lambda repo, pr_number: automerge.append(
+                (repo, pr_number)
+            ),
+        )
+
+        replayed = _replay_deferred_actions(
+            db,
+            config,
+            cp_config,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert len(replayed) == 6
+        assert comments == [
+            ("StartupAI-site/startupai-crew", 84, "controller comment")
+        ]
+        assert closed == [("StartupAI-site/startupai-crew", 84)]
+        assert reruns == [("StartupAI-site/startupai-crew", "ci", 42)]
+        assert automerge == [("StartupAI-site/startupai-crew", 77)]
+        assert transitions == [
+            ("crew#84", "In Progress"),
+            ("app#149", "Ready"),
+        ]
+        assert db.list_deferred_actions() == []
+
     def test_recover_interrupted_sessions_requeues_non_pr_work(
         self, tmp_path: Path
     ) -> None:
@@ -3423,6 +3514,48 @@ class TestRunDaemonLoop:
         session = db.get_session(session_id)
         assert session is not None
         assert session.status == "aborted"
+
+    def test_recover_interrupted_sessions_uses_ports_for_ready_transition(
+        self, tmp_path: Path
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        session_id = db.create_session("crew#84", "codex")
+        db.acquire_lease("crew#84", session_id, now=datetime.now(timezone.utc))
+        db.update_session(
+            session_id,
+            status="running",
+            worktree_path="/tmp/wt",
+            branch_name="feat/84-test",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        auto_config = load_automation_config(config.automation_config_path)
+        statuses = {"crew#84": "In Progress"}
+        transitions: list[tuple[str, str]] = []
+
+        pr_port = SimpleNamespace(list_open_prs_for_issue=lambda *args, **kwargs: [])
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        recovered = _recover_interrupted_sessions(
+            config,
+            db,
+            automation_config=auto_config,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert [lease.issue_ref for lease in recovered] == ["crew#84"]
+        assert transitions == [("crew#84", "Ready")]
+        assert statuses["crew#84"] == "Ready"
 
     def test_recover_interrupted_repair_session_returns_ready_not_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3480,16 +3613,19 @@ class TestRunDaemonLoop:
         moved: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._list_project_items_by_status",
-            lambda status, *args, **kwargs: (
-                [_ProjectItemSnapshot("StartupAI-site/startupai-crew#84", "Review", "codex", "none", "P0")]
-                if status == "Review"
-                else []
-            ),
-        )
-        monkeypatch.setattr(
             "startupai_controller.board_consumer._transition_issue_to_in_progress",
             lambda issue_ref, *args, **kwargs: moved.append(issue_ref),
+        )
+        review_item = _ProjectItemSnapshot(
+            "StartupAI-site/startupai-crew#84",
+            "Review",
+            "codex",
+            "none",
+            "P0",
+        )
+        board_snapshot = CycleBoardSnapshot(
+            items=(review_item,),
+            by_status={"Review": (review_item,)},
         )
 
         result = _reconcile_board_truth(
@@ -3497,10 +3633,68 @@ class TestRunDaemonLoop:
             cp_config,
             auto_config,
             db,
+            board_snapshot=board_snapshot,
         )
 
         assert result.moved_in_progress == ("crew#84",)
         assert moved == ["crew#84"]
+
+    def test_reconcile_board_truth_uses_ports_for_active_repair(
+        self, tmp_path: Path
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        session_id = db.create_session(
+            "crew#84",
+            "crew",
+            slot_id=1,
+            session_kind="repair",
+            repair_pr_url="https://github.com/O/R/pull/10",
+        )
+        db.acquire_lease("crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc))
+        db.update_session(session_id, status="running", slot_id=1, phase="running")
+        cp_config = load_config(config.critical_paths_path)
+        auto_config = load_automation_config(config.automation_config_path)
+        statuses = {"crew#84": "Review"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            list_issues_by_status=lambda status: (
+                [
+                    IssueSnapshot(
+                        issue_ref="crew#84",
+                        status="Review",
+                        executor="codex",
+                        priority="P0",
+                        title="Test issue",
+                        item_id="ITEM",
+                        project_id="PROJ",
+                    )
+                ]
+                if status == "Review"
+                else []
+            ),
+            get_issue_status=lambda issue_ref: statuses[issue_ref],
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        result = _reconcile_board_truth(
+            config,
+            cp_config,
+            auto_config,
+            db,
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert result.moved_in_progress == ("crew#84",)
+        assert transitions == [("crew#84", "In Progress")]
+        assert statuses["crew#84"] == "In Progress"
 
     def test_loop_calls_sleep_and_can_be_stopped(self, tmp_path: Path) -> None:
         config = _make_consumer_config(tmp_path)

@@ -10,14 +10,11 @@ board_mutator callables).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
 import re
-import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -30,17 +27,27 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 from startupai_controller.promote_ready import (
     BoardInfo,
-    _query_issue_board_info,
-    _query_status_field_option,
-    _set_board_status,
 )
 from startupai_controller.domain.models import (
     CheckObservation,
     OpenPullRequest,
     PrGateStatus,
 )
-from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
-from startupai_controller.github_http import GitHubTransportError, run_github_command
+from startupai_controller.adapters.github_transport import (
+    GhCommandError,
+    _run_gh,
+    gh_reason_code,
+)
+from startupai_controller.adapters.github_types import (
+    COPILOT_CODING_AGENT_LOGINS,
+    CycleBoardSnapshot,
+    CycleGitHubMemo,
+    CodexReviewVerdict,
+    LinkedIssue,
+    PullRequestStateProbe,
+    PullRequestViewPayload,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -51,26 +58,6 @@ from startupai_controller.domain.scheduling_policy import (  # noqa: E402
     VALID_EXECUTORS,
     priority_rank as _priority_rank,  # re-export (compat)
 )
-COPILOT_CODING_AGENT_LOGINS = {
-    "app/copilot-swe-agent",
-    "copilot-swe-agent[bot]",
-    "copilot",
-}
-_GH_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
-_GH_RETRYABLE_ERROR_MARKERS = (
-    "error connecting to api.github.com",
-    "connection reset by peer",
-    "tls handshake timeout",
-    "i/o timeout",
-    "timeout awaiting response headers",
-    "timed out after",
-    "temporary failure in name resolution",
-)
-_GH_RATE_LIMIT_ERROR_MARKERS = (
-    "api rate limit exceeded",
-    "secondary rate limit",
-)
-_GH_COMMAND_TIMEOUT_SECONDS = gh_command_timeout_seconds()
 _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS = 900
 _required_status_checks_ttl_cache: dict[
     tuple[str, str],
@@ -81,151 +68,6 @@ _cycle_board_snapshot_cache: dict[
     tuple[str, int],
     tuple[float, "CycleBoardSnapshot"],
 ] = {}
-
-
-class GhCommandError(GhQueryError):
-    """Structured GitHub CLI failure with normalized operation and kind."""
-
-    def __init__(
-        self,
-        *,
-        operation_type: str,
-        failure_kind: str,
-        command_excerpt: str,
-        detail: str,
-        rate_limit_reset_at: int | None = None,
-    ) -> None:
-        self.operation_type = operation_type
-        self.failure_kind = failure_kind
-        self.command_excerpt = command_excerpt
-        self.detail = detail
-        self.rate_limit_reset_at = rate_limit_reset_at
-        super().__init__(
-            f"{operation_type}:{failure_kind}:Failed running gh "
-            f"{command_excerpt}: {detail}"
-        )
-
-
-def _classify_gh_failure_kind(detail: str) -> str:
-    """Normalize GitHub CLI failure text into a stable reason code."""
-    text = detail.strip().lower()
-    if any(marker in text for marker in _GH_RATE_LIMIT_ERROR_MARKERS):
-        return "rate_limit"
-    if any(marker in text for marker in _GH_RETRYABLE_ERROR_MARKERS):
-        return "network"
-    if "authentication failed" in text or "http 401" in text or "must authenticate" in text:
-        return "auth"
-    if "http 403" in text and "rate limit" not in text:
-        return "auth"
-    if "http 5" in text or "server error" in text or "bad gateway" in text:
-        return "github_outage"
-    if "invalid character" in text or "unexpected token" in text:
-        return "invalid_response"
-    return "query_failed"
-
-
-def _gh_error(
-    args: Sequence[str],
-    *,
-    operation_type: str,
-    detail: str,
-) -> GhCommandError:
-    """Build a structured GitHub command error."""
-    return GhCommandError(
-        operation_type=operation_type,
-        failure_kind=_classify_gh_failure_kind(detail),
-        command_excerpt=" ".join(args[:3]),
-        detail=detail.strip() or "unknown-gh-error",
-        rate_limit_reset_at=None,
-    )
-
-
-def gh_reason_code(error: Exception) -> str:
-    """Return a stable machine-readable reason code for GitHub failures."""
-    if isinstance(error, GhCommandError):
-        return error.failure_kind
-    return _classify_gh_failure_kind(str(error))
-
-# ---------------------------------------------------------------------------
-# Low-level helpers
-# ---------------------------------------------------------------------------
-
-
-def _run_gh(
-    args: list[str],
-    *,
-    gh_runner: Callable[..., str] | None = None,
-    operation_type: str = "query",
-) -> str:
-    """Run a gh CLI command and return stdout. DI point: gh_runner."""
-    if gh_runner is not None:
-        try:
-            return gh_runner(args)
-        except GhQueryError:
-            raise
-        except subprocess.CalledProcessError as error:
-            detail = (error.output or "").strip() or str(error)
-            raise _gh_error(
-                args,
-                operation_type=operation_type,
-                detail=detail,
-            ) from error
-
-    try:
-        http_output = run_github_command(
-            args,
-            operation_type=operation_type,
-            timeout_seconds=_GH_COMMAND_TIMEOUT_SECONDS,
-            retry_delays=_GH_RETRY_DELAYS_SECONDS,
-        )
-        if http_output is not None:
-            return http_output
-    except GitHubTransportError as error:
-        raise GhCommandError(
-            operation_type=error.operation_type,
-            failure_kind=error.failure_kind,
-            command_excerpt=error.command_excerpt,
-            detail=error.detail,
-            rate_limit_reset_at=error.rate_limit_reset_at,
-        ) from error
-
-    gh_command = ["gh"] + args
-    for attempt in range(len(_GH_RETRY_DELAYS_SECONDS) + 1):
-        try:
-            return subprocess.check_output(
-                gh_command,
-                text=True,
-                stderr=subprocess.STDOUT,
-                timeout=_GH_COMMAND_TIMEOUT_SECONDS,
-            )
-        except OSError as error:
-            raise GhCommandError(
-                operation_type=operation_type,
-                failure_kind="network",
-                command_excerpt=" ".join(args[:3]),
-                detail=str(error),
-            ) from error
-        except subprocess.TimeoutExpired as error:
-            detail = f"timed out after {_GH_COMMAND_TIMEOUT_SECONDS:.1f}s"
-            raise GhCommandError(
-                operation_type=operation_type,
-                failure_kind="network",
-                command_excerpt=" ".join(args[:3]),
-                detail=detail,
-            ) from error
-        except subprocess.CalledProcessError as error:
-            output = error.output.strip()
-            failure_kind = _classify_gh_failure_kind(output)
-            is_retryable = failure_kind in {"network", "rate_limit", "github_outage"}
-            if is_retryable and attempt < len(_GH_RETRY_DELAYS_SECONDS):
-                time.sleep(_GH_RETRY_DELAYS_SECONDS[attempt])
-                continue
-            raise GhCommandError(
-                operation_type=operation_type,
-                failure_kind=failure_kind,
-                command_excerpt=" ".join(args[:3]),
-                detail=output,
-            ) from error
 
 
 def rerun_actions_run(
@@ -265,37 +107,16 @@ def enable_pull_request_automerge(
     confirm_delay_seconds: float = 1.0,
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
-    """Enable squash auto-merge on a PR.
+    """Compatibility wrapper for adapter-owned auto-merge enablement."""
+    del confirm_retries, confirm_delay_seconds
+    from startupai_controller.adapters.github_cli import enable_pull_request_automerge as _adapter_enable_pull_request_automerge
 
-    Returns:
-        "confirmed" — GitHub persisted autoMergeRequest
-        "pending"   — enable call succeeded but GitHub hasn't confirmed yet
-
-    Raises:
-        GhQueryError — if the enable call itself fails (transport/API error).
-            Callers should let this propagate for partial-failure backoff.
-    """
-    args = ["pr", "merge", str(pr_number), "--repo", pr_repo, "--auto", "--squash"]
-    if delete_branch:
-        args.append("--delete-branch")
-    # Enable call — let GhQueryError propagate (no catch).
-    _run_gh(args, gh_runner=gh_runner, operation_type="automerge")
-
-    # Bounded verification — catch transport errors per-read.
-    for _attempt in range(confirm_retries):
-        time.sleep(confirm_delay_seconds)
-        try:
-            raw = _run_gh(
-                ["pr", "view", str(pr_number), "--repo", pr_repo,
-                 "--json", "autoMergeRequest"],
-                gh_runner=gh_runner,
-            )
-            data = json.loads(raw) if raw else {}
-            if data.get("autoMergeRequest") is not None:
-                return "confirmed"
-        except (GhQueryError, json.JSONDecodeError):
-            continue
-    return "pending"
+    return _adapter_enable_pull_request_automerge(
+        pr_repo,
+        pr_number,
+        delete_branch=delete_branch,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def close_pull_request(
@@ -490,40 +311,22 @@ def _query_issue_comments(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[dict]:
-    """Fetch issue comments as parsed JSON objects."""
-    output = _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}/comments",
-            "--paginate",
-            "--slurp",
-        ],
-        gh_runner=gh_runner,
-    )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Invalid comments payload for {owner}/{repo}#{number}."
-        ) from error
+    """Compatibility wrapper for adapter-owned issue comment queries."""
+    from startupai_controller.adapters.github_cli import _query_issue_comments as _adapter_query_issue_comments
 
-    comments: list[dict] = []
-    if isinstance(payload, list):
-        for entry in payload:
-            if isinstance(entry, list):
-                comments.extend(
-                    comment for comment in entry if isinstance(comment, dict)
-                )
-            elif isinstance(entry, dict):
-                comments.append(entry)
-    return comments
+    return _adapter_query_issue_comments(
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _comment_activity_timestamp(comment: dict) -> datetime | None:
-    """Return the best activity timestamp from a GitHub issue comment payload."""
-    return _parse_github_timestamp(
-        str(comment.get("updated_at") or comment.get("created_at") or "")
-    )
+    """Compatibility wrapper for adapter-owned comment activity timestamps."""
+    from startupai_controller.adapters.github_cli import _comment_activity_timestamp as _adapter_comment_activity_timestamp
+
+    return _adapter_comment_activity_timestamp(comment)
 
 
 def _query_latest_matching_comment_timestamp(
@@ -534,25 +337,18 @@ def _query_latest_matching_comment_timestamp(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
-    """Return the latest timestamp for comments containing any marker fragment."""
-    try:
-        comments = _query_issue_comments(
-            owner, repo, number, gh_runner=gh_runner
-        )
-    except GhQueryError:
-        return None
+    """Compatibility wrapper for adapter-owned marker timestamp queries."""
+    from startupai_controller.adapters.github_cli import (
+        _query_latest_matching_comment_timestamp as _adapter_query_latest_matching_comment_timestamp,
+    )
 
-    latest: datetime | None = None
-    for comment in comments:
-        body = str(comment.get("body") or "")
-        if not any(marker in body for marker in markers):
-            continue
-        ts = _comment_activity_timestamp(comment)
-        if ts is None:
-            continue
-        if latest is None or ts > latest:
-            latest = ts
-    return latest
+    return _adapter_query_latest_matching_comment_timestamp(
+        owner,
+        repo,
+        number,
+        markers,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_latest_non_automation_comment_timestamp(
@@ -562,29 +358,17 @@ def _query_latest_non_automation_comment_timestamp(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
-    """Return latest issue-comment timestamp from a non-automation actor."""
-    try:
-        comments = _query_issue_comments(
-            owner, repo, number, gh_runner=gh_runner
-        )
-    except GhQueryError:
-        return None
+    """Compatibility wrapper for adapter-owned activity timestamp queries."""
+    from startupai_controller.adapters.github_cli import (
+        _query_latest_non_automation_comment_timestamp as _adapter_query_latest_non_automation_comment_timestamp,
+    )
 
-    latest: datetime | None = None
-    for comment in comments:
-        body = str(comment.get("body") or "")
-        if MARKER_PREFIX in body:
-            continue
-        user = comment.get("user") or {}
-        login = str(user.get("login") or "")
-        if _is_automation_login(login):
-            continue
-        ts = _comment_activity_timestamp(comment)
-        if ts is None:
-            continue
-        if latest is None or ts > latest:
-            latest = ts
-    return latest
+    return _adapter_query_latest_non_automation_comment_timestamp(
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_latest_marker_timestamp(
@@ -595,35 +379,18 @@ def _query_latest_marker_timestamp(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
-    """Return most recent marker timestamp encoded in issue comments."""
-    try:
-        comments = _run_gh(
-            [
-                "api",
-                f"repos/{owner}/{repo}/issues/{number}/comments",
-                "--paginate",
-                "-q",
-                ".[].body",
-            ],
-            gh_runner=gh_runner,
-        )
-    except GhQueryError:
-        return None
-
-    pattern = re.compile(
-        rf"{re.escape(marker_prefix)}:([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T"
-        rf"[0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}}Z)"
+    """Compatibility wrapper for adapter-owned marker timestamp queries."""
+    from startupai_controller.adapters.github_cli import (
+        _query_latest_marker_timestamp as _adapter_query_latest_marker_timestamp,
     )
-    latest: datetime | None = None
-    for match in pattern.finditer(comments):
-        raw = match.group(1)
-        try:
-            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if latest is None or ts > latest:
-            latest = ts
-    return latest
+
+    return _adapter_query_latest_marker_timestamp(
+        owner,
+        repo,
+        number,
+        marker_prefix,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -689,30 +456,15 @@ def _query_failed_check_runs(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str] | None:
-    """Query check runs for a commit and return names of failed ones.
+    """Compatibility wrapper for adapter-owned failed-check queries."""
+    from startupai_controller.adapters.github_cli import _query_failed_check_runs as _adapter_query_failed_check_runs
 
-    Returns None on API failure (caller should treat as "unknown").
-    """
-    try:
-        output = _run_gh(
-            ["api", f"repos/{owner}/{repo}/commits/{head_sha}/check-runs"],
-            gh_runner=gh_runner,
-        )
-    except GhQueryError:
-        return None
-
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError:
-        return None
-
-    failed: list[str] = []
-    for run in data.get("check_runs", []):
-        if isinstance(run, dict) and run.get("conclusion") == "failure":
-            name = run.get("name", "")
-            if name:
-                failed.append(name)
-    return failed
+    return _adapter_query_failed_check_runs(
+        owner,
+        repo,
+        head_sha,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_pr_head_sha(
@@ -722,26 +474,82 @@ def _query_pr_head_sha(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str | None:
-    """Get the head SHA of a PR. Returns None on failure."""
-    try:
-        output = _run_gh(
-            ["api", f"repos/{owner}/{repo}/pulls/{pr_number}"],
-            gh_runner=gh_runner,
-        )
-    except GhQueryError:
-        return None
+    """Compatibility wrapper for adapter-owned PR head SHA queries."""
+    from startupai_controller.adapters.github_cli import _query_pr_head_sha as _adapter_query_pr_head_sha
 
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError:
-        return None
-
-    return data.get("head", {}).get("sha")
+    return _adapter_query_pr_head_sha(
+        owner,
+        repo,
+        pr_number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Project field operations
 # ---------------------------------------------------------------------------
+
+
+def _query_issue_board_info(
+    issue_ref: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> BoardInfo:
+    """Compatibility wrapper for adapter-owned board info resolution."""
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_board_info as _adapter_query_issue_board_info,
+    )
+
+    return _adapter_query_issue_board_info(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        gh_runner=gh_runner or _run_gh,
+    )
+
+
+def _query_status_field_option(
+    project_id: str,
+    option_name: str = "Ready",
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[str, str]:
+    """Compatibility wrapper for adapter-owned Status option resolution."""
+    from startupai_controller.adapters.github_cli import (
+        _query_status_field_option as _adapter_query_status_field_option,
+    )
+
+    return _adapter_query_status_field_option(
+        project_id,
+        option_name,
+        gh_runner=gh_runner or _run_gh,
+    )
+
+
+def _set_board_status(
+    project_id: str,
+    item_id: str,
+    field_id: str,
+    option_id: str,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility wrapper for adapter-owned Status mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_board_status as _adapter_set_board_status,
+    )
+
+    _adapter_set_board_status(
+        project_id,
+        item_id,
+        field_id,
+        option_id,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_project_item_field(
@@ -753,92 +561,19 @@ def _query_project_item_field(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
-    """Read a project field value (Status, Executor, Handoff To, Blocked Reason).
-
-    Returns the field value as a string, or empty string if not found.
-    """
-    owner, repo, number = _issue_ref_to_repo_parts(issue_ref, config)
-
-    query = """
-query($owner: String!, $repo: String!, $number: Int!, $fieldName: String!) {
-  repository(owner: $owner, name: $repo) {
-    issue(number: $number) {
-      projectItems(first: 20) {
-        nodes {
-          project {
-            owner {
-              ... on Organization { login }
-              ... on User { login }
-            }
-            number
-          }
-          fieldByName: fieldValueByName(name: $fieldName) {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={owner}",
-            "-f",
-            f"repo={repo}",
-            "-F",
-            f"number={number}",
-            "-f",
-            f"fieldName={field_name}",
-        ],
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned project field reads."""
+    from startupai_controller.adapters.github_cli import (
+        _query_project_item_field as _adapter_query_project_item_field,
     )
 
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed reading field '{field_name}' for {issue_ref}: invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        joined = "; ".join(messages) if messages else "unknown GraphQL error"
-        raise GhQueryError(
-            f"Failed reading field '{field_name}' for {issue_ref}: {joined}"
-        )
-
-    nodes = (
-        payload.get("data", {})
-        .get("repository", {})
-        .get("issue", {})
-        .get("projectItems", {})
-        .get("nodes", [])
+    return _adapter_query_project_item_field(
+        issue_ref,
+        field_name,
+        config,
+        project_owner,
+        project_number,
+        gh_runner=gh_runner or _run_gh,
     )
-
-    for node in nodes:
-        project = node.get("project") or {}
-        owner_data = project.get("owner") or {}
-        owner_login = owner_data.get("login")
-        proj_number = project.get("number")
-        if owner_login == project_owner and proj_number == project_number:
-            field_data = node.get("fieldByName") or {}
-            # Single select fields use "name", text fields use "text"
-            return field_data.get("name") or field_data.get("text") or ""
-
-    return ""
 
 
 def _set_text_field(
@@ -849,97 +584,18 @@ def _set_text_field(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
-    """Set a text field value on a project item.
-
-    First queries the field ID by name, then performs the mutation.
-    """
-    # Query field ID
-    query = """
-query($projectId: ID!, $fieldName: String!) {
-  node(id: $projectId) {
-    ... on ProjectV2 {
-      field(name: $fieldName) {
-        ... on ProjectV2Field { id }
-      }
-    }
-  }
-}
-"""
-
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"projectId={project_id}",
-            "-f",
-            f"fieldName={field_name}",
-        ],
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned text field mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_text_field as _adapter_set_text_field,
     )
 
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying field '{field_name}': invalid JSON."
-        ) from error
-
-    field_data = payload.get("data", {}).get("node", {}).get("field") or {}
-    field_id = field_data.get("id")
-    if not field_id:
-        raise GhQueryError(f"Field '{field_name}' not found on project.")
-
-    # Mutate
-    mutation = """
-mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $textValue: String!) {
-  updateProjectV2ItemFieldValue(input: {
-    projectId: $projectId,
-    itemId: $itemId,
-    fieldId: $fieldId,
-    value: { text: $textValue }
-  }) {
-    projectV2Item { id }
-  }
-}
-"""
-
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={mutation}",
-            "-f",
-            f"projectId={project_id}",
-            "-f",
-            f"itemId={item_id}",
-            "-f",
-            f"fieldId={field_id}",
-            "-f",
-            f"textValue={value}",
-        ],
-        gh_runner=gh_runner,
+    _adapter_set_text_field(
+        project_id,
+        item_id,
+        field_name,
+        value,
+        gh_runner=gh_runner or _run_gh,
     )
-
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed setting field '{field_name}': invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        joined = "; ".join(messages) if messages else "unknown GraphQL error"
-        raise GhQueryError(f"Failed setting field '{field_name}': {joined}")
 
 
 def _query_single_select_field_option(
@@ -949,64 +605,16 @@ def _query_single_select_field_option(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, str]:
-    """Resolve a single-select field id and option id by name."""
-    query = """
-query($projectId: ID!, $fieldName: String!) {
-  node(id: $projectId) {
-    ... on ProjectV2 {
-      field(name: $fieldName) {
-        ... on ProjectV2SingleSelectField {
-          id
-          options { id name }
-        }
-      }
-    }
-  }
-}
-"""
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"projectId={project_id}",
-            "-f",
-            f"fieldName={field_name}",
-        ],
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned single-select resolution."""
+    from startupai_controller.adapters.github_cli import (
+        _query_single_select_field_option as _adapter_query_single_select_field_option,
     )
 
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying field '{field_name}': invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        joined = "; ".join(messages) if messages else "unknown GraphQL error"
-        raise GhQueryError(f"Failed querying field '{field_name}': {joined}")
-
-    field = payload.get("data", {}).get("node", {}).get("field") or {}
-    field_id = field.get("id")
-    if not field_id:
-        raise GhQueryError(f"Field '{field_name}' not found on project.")
-
-    options = field.get("options") or []
-    for option in options:
-        if option.get("name") == option_name:
-            return field_id, option.get("id", "")
-
-    raise GhQueryError(
-        f"Option '{option_name}' not found in field '{field_name}'."
+    return _adapter_query_single_select_field_option(
+        project_id,
+        field_name,
+        option_name,
+        gh_runner=gh_runner or _run_gh,
     )
 
 
@@ -1018,19 +626,17 @@ def _set_single_select_field(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
-    """Set any single-select project field to a named option."""
-    field_id, option_id = _query_single_select_field_option(
-        project_id,
-        field_name,
-        option_name,
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned single-select mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_single_select_field as _adapter_set_single_select_field,
     )
-    _set_board_status(
+
+    _adapter_set_single_select_field(
         project_id,
         item_id,
-        field_id,
-        option_id,
-        gh_runner=gh_runner,
+        field_name,
+        option_name,
+        gh_runner=gh_runner or _run_gh,
     )
 
 
@@ -1046,35 +652,22 @@ def _set_status_if_changed(
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[bool, str]:
-    """Safe mutation helper.
+    """Compatibility wrapper for adapter-owned safe status mutation."""
+    from startupai_controller.adapters.github_cli import (
+        _set_status_if_changed as _adapter_set_status_if_changed,
+    )
 
-    Gets current status, checks if in from_statuses set, if so sets to
-    to_status. Returns (changed, old_status).
-    """
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-
-    if info.status not in from_statuses:
-        return False, info.status
-
-    mutate = board_mutator
-    if mutate is None:
-        field_id, option_id = _query_status_field_option(
-            info.project_id,
-            to_status,
-            gh_runner=gh_runner,
-        )
-        _set_board_status(
-            info.project_id,
-            info.item_id,
-            field_id,
-            option_id,
-            gh_runner=gh_runner,
-        )
-    else:
-        mutate(info.project_id, info.item_id)
-
-    return True, info.status
+    return _adapter_set_status_if_changed(
+        issue_ref,
+        from_statuses,
+        to_status,
+        config,
+        project_owner,
+        project_number,
+        board_info_resolver=board_info_resolver or _query_issue_board_info,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1089,22 +682,15 @@ def _query_issue_updated_at(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime:
-    """Get issue updated_at timestamp (UTC)."""
-    output = _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}",
-            "-q",
-            ".updated_at",
-        ],
-        gh_runner=gh_runner,
-    ).strip()
-    try:
-        return datetime.fromisoformat(output.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise GhQueryError(
-            f"Invalid updated_at for {owner}/{repo}#{number}: {output}"
-        ) from error
+    """Compatibility wrapper for adapter-owned issue timestamp queries."""
+    from startupai_controller.adapters.github_cli import _query_issue_updated_at as _adapter_query_issue_updated_at
+
+    return _adapter_query_issue_updated_at(
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _parse_pr_url(pr_field: str) -> tuple[str, str, int] | None:
@@ -1121,20 +707,15 @@ def _is_pr_open(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
-    """Return True when PR exists and is open."""
-    try:
-        state = _run_gh(
-            [
-                "api",
-                f"repos/{owner}/{repo}/pulls/{pr_number}",
-                "-q",
-                ".state",
-            ],
-            gh_runner=gh_runner,
-        ).strip()
-    except GhQueryError:
-        return False
-    return state.upper() == "OPEN"
+    """Compatibility wrapper for adapter-owned PR-open queries."""
+    from startupai_controller.adapters.github_cli import _is_pr_open as _adapter_is_pr_open
+
+    return _adapter_is_pr_open(
+        owner,
+        repo,
+        pr_number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_open_pr_updated_at(
@@ -1144,28 +725,15 @@ def _query_open_pr_updated_at(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
-    """Return updated_at for an open PR, or None when closed/unavailable."""
-    try:
-        output = _run_gh(
-            [
-                "api",
-                f"repos/{owner}/{repo}/pulls/{pr_number}",
-                "--jq",
-                "{state: .state, updated_at: .updated_at}",
-            ],
-            gh_runner=gh_runner,
-        )
-    except GhQueryError:
-        return None
+    """Compatibility wrapper for adapter-owned PR timestamp queries."""
+    from startupai_controller.adapters.github_cli import _query_open_pr_updated_at as _adapter_query_open_pr_updated_at
 
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
-        return None
-
-    if str(payload.get("state") or "").upper() != "OPEN":
-        return None
-    return _parse_github_timestamp(str(payload.get("updated_at") or ""))
+    return _adapter_query_open_pr_updated_at(
+        owner,
+        repo,
+        pr_number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _extract_run_id(details_url: str) -> int | None:
@@ -1184,47 +752,13 @@ def query_open_pull_requests(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequest]:
-    """List open PRs for a repository."""
-    output = _run_gh(
-        [
-            "pr",
-            "list",
-            "--repo",
-            pr_repo,
-            "--state",
-            "open",
-            "--limit",
-            "100",
-            "--json",
-            "number,url,headRefName,isDraft,body,author",
-        ],
-        gh_runner=gh_runner,
-    )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying open PRs for {pr_repo}: invalid JSON."
-        ) from error
+    """Compatibility wrapper for adapter-owned open-PR listing."""
+    from startupai_controller.adapters.github_cli import query_open_pull_requests as _adapter_query_open_pull_requests
 
-    results: list[OpenPullRequest] = []
-    for item in payload or []:
-        if not isinstance(item, dict):
-            continue
-        number = item.get("number")
-        if not isinstance(number, int):
-            continue
-        results.append(
-            OpenPullRequest(
-                number=number,
-                url=str(item.get("url") or ""),
-                head_ref_name=str(item.get("headRefName") or ""),
-                is_draft=bool(item.get("isDraft", False)),
-                body=str(item.get("body") or ""),
-                author=str(((item.get("author") or {}).get("login") or "")).strip().lower(),
-            )
-        )
-    return results
+    return _adapter_query_open_pull_requests(
+        pr_repo,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def memoized_query_open_pull_requests(
@@ -1233,12 +767,20 @@ def memoized_query_open_pull_requests(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequest]:
-    """Return open PRs for a repo using a cycle-local cache."""
-    cached = memo.open_pull_requests.get(pr_repo)
+    """Compatibility wrapper for adapter-owned memoized open-PR listing."""
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter
+
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        github_memo=memo,
+        gh_runner=gh_runner or _run_gh,
+    )
+    cached = adapter._github_memo.open_pull_requests.get(pr_repo)
     if cached is not None:
         return list(cached)
-    results = query_open_pull_requests(pr_repo, gh_runner=gh_runner)
-    memo.open_pull_requests[pr_repo] = list(results)
+    results = adapter.list_open_prs(pr_repo)
+    adapter._github_memo.open_pull_requests[pr_repo] = list(results)
     return results
 
 
@@ -1248,16 +790,14 @@ def query_pull_request_view_payload(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> PullRequestViewPayload:
-    """Return one expanded PR payload for review rescue/automerge decisions."""
-    payloads = query_pull_request_view_payloads(
+    """Compatibility wrapper for adapter-owned PR payload reads."""
+    from startupai_controller.adapters.github_cli import query_pull_request_view_payload as _adapter_query_pull_request_view_payload
+
+    return _adapter_query_pull_request_view_payload(
         pr_repo,
-        (pr_number,),
-        gh_runner=gh_runner,
+        pr_number,
+        gh_runner=gh_runner or _run_gh,
     )
-    payload = payloads.get(pr_number)
-    if payload is None:
-        raise GhQueryError(f"Failed querying PR {pr_repo}#{pr_number}: pull request not found.")
-    return payload
 
 
 def _pull_request_view_payload_from_json(
@@ -1472,116 +1012,14 @@ def query_pull_request_state_probes(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestStateProbe]:
-    """Return lightweight PR probes for digest-based review scheduling."""
-    if "/" not in pr_repo:
-        raise ConfigError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
-    owner, repo = pr_repo.split("/", maxsplit=1)
-    numbers = tuple(sorted({int(number) for number in pr_numbers}))
-    if not numbers:
-        return {}
+    """Compatibility wrapper for adapter-owned PR state probes."""
+    from startupai_controller.adapters.github_cli import query_pull_request_state_probes as _adapter_query_pull_request_state_probes
 
-    fields = """
-      number
-      state
-      isDraft
-      mergeStateStatus
-      mergeable
-      baseRefName
-      headRefOid
-      updatedAt
-      autoMergeRequest { enabledAt }
-      reviews(last: 1) {
-        nodes {
-          submittedAt
-        }
-      }
-      comments(last: 1) {
-        nodes {
-          createdAt
-        }
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name
-                    status
-                    conclusion
-                    detailsUrl
-                    completedAt
-                    startedAt
-                  }
-                  ... on StatusContext {
-                    context
-                    state
-                    targetUrl
-                    createdAt
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    """
-    query_parts = "\n".join(
-        f"pr_{number}: pullRequest(number: {number}) {{ {fields} }}"
-        for number in numbers
+    return _adapter_query_pull_request_state_probes(
+        pr_repo,
+        pr_numbers,
+        gh_runner=gh_runner or _run_gh,
     )
-    query = (
-        "query($owner: String!, $repo: String!) {\n"
-        "  repository(owner: $owner, name: $repo) {\n"
-        f"{query_parts}\n"
-        "  }\n"
-        "}"
-    )
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={owner}",
-            "-f",
-            f"repo={repo}",
-        ],
-        gh_runner=gh_runner,
-    )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying PR probes for {pr_repo}: invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        raise GhQueryError(
-            f"Failed querying PR probes for {pr_repo}: {'; '.join(messages) or 'unknown GraphQL error'}"
-        )
-
-    repository = (payload.get("data") or {}).get("repository") or {}
-    results: dict[int, PullRequestStateProbe] = {}
-    for number in numbers:
-        node = repository.get(f"pr_{number}")
-        if not isinstance(node, dict):
-            continue
-        results[number] = _pull_request_state_probe_from_graphql_node(
-            pr_repo,
-            number,
-            node,
-        )
-    return results
 
 
 def query_pull_request_view_payloads(
@@ -1590,146 +1028,14 @@ def query_pull_request_view_payloads(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestViewPayload]:
-    """Return expanded PR payloads for a bounded set of PR numbers in one query."""
-    if "/" not in pr_repo:
-        raise ConfigError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
-    owner, repo = pr_repo.split("/", maxsplit=1)
-    numbers = tuple(sorted({int(number) for number in pr_numbers}))
-    if not numbers:
-        return {}
+    """Compatibility wrapper for adapter-owned batched PR payload reads."""
+    from startupai_controller.adapters.github_cli import query_pull_request_view_payloads as _adapter_query_pull_request_view_payloads
 
-    if len(numbers) == 1:
-        number = numbers[0]
-        output = _run_gh(
-            [
-                "pr",
-                "view",
-                str(number),
-                "--repo",
-                pr_repo,
-                "--json",
-                (
-                    "author,body,comments,reviews,state,isDraft,mergeStateStatus,"
-                    "mergeable,baseRefName,autoMergeRequest,statusCheckRollup"
-                ),
-            ],
-            gh_runner=gh_runner,
-        )
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as error:
-            raise GhQueryError(
-                f"Failed querying PR {pr_repo}#{number}: invalid JSON."
-            ) from error
-        return {number: _pull_request_view_payload_from_json(pr_repo, number, payload)}
-
-    fields = """
-      number
-      state
-      isDraft
-      mergeStateStatus
-      mergeable
-      baseRefName
-      autoMergeRequest { enabledAt }
-      body
-      author { login }
-      reviews(last: 100) {
-        nodes {
-          body
-          submittedAt
-          state
-          author { login }
-        }
-      }
-      comments(last: 100) {
-        nodes {
-          body
-          createdAt
-          author { login }
-        }
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name
-                    status
-                    conclusion
-                    detailsUrl
-                    completedAt
-                    startedAt
-                  }
-                  ... on StatusContext {
-                    context
-                    state
-                    targetUrl
-                    createdAt
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    """
-    query_parts = "\n".join(
-        f"pr_{number}: pullRequest(number: {number}) {{ {fields} }}"
-        for number in numbers
+    return _adapter_query_pull_request_view_payloads(
+        pr_repo,
+        pr_numbers,
+        gh_runner=gh_runner or _run_gh,
     )
-    query = (
-        "query($owner: String!, $repo: String!) {\n"
-        "  repository(owner: $owner, name: $repo) {\n"
-        f"{query_parts}\n"
-        "  }\n"
-        "}"
-    )
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={owner}",
-            "-f",
-            f"repo={repo}",
-        ],
-        gh_runner=gh_runner,
-    )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying PR payloads for {pr_repo}: invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        raise GhQueryError(
-            f"Failed querying PR payloads for {pr_repo}: {'; '.join(messages) or 'unknown GraphQL error'}"
-        )
-
-    repository = (payload.get("data") or {}).get("repository") or {}
-    results: dict[int, PullRequestViewPayload] = {}
-    for number in numbers:
-        node = repository.get(f"pr_{number}")
-        if not isinstance(node, dict):
-            continue
-        results[number] = _pull_request_view_payload_from_graphql_node(
-            pr_repo,
-            number,
-            node,
-        )
-    return results
 
 
 def memoized_query_pull_request_view_payload(
@@ -1759,26 +1065,15 @@ def memoized_query_pull_request_view_payloads(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestViewPayload]:
-    """Return expanded PR payloads using cycle-local memoization."""
-    numbers = tuple(sorted({int(number) for number in pr_numbers}))
-    missing = [
-        number
-        for number in numbers
-        if (pr_repo, number) not in memo.review_pull_requests
-    ]
-    if missing:
-        fetched = query_pull_request_view_payloads(
-            pr_repo,
-            tuple(missing),
-            gh_runner=gh_runner,
-        )
-        for number, payload in fetched.items():
-            memo.review_pull_requests[(pr_repo, number)] = payload
-    return {
-        number: memo.review_pull_requests[(pr_repo, number)]
-        for number in numbers
-        if (pr_repo, number) in memo.review_pull_requests
-    }
+    """Compatibility wrapper for adapter-owned memoized PR payload reads."""
+    from startupai_controller.adapters.github_cli import memoized_query_pull_request_view_payloads as _adapter_memoized_query_pull_request_view_payloads
+
+    return _adapter_memoized_query_pull_request_view_payloads(
+        memo,
+        pr_repo,
+        pr_numbers,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def memoized_query_pull_request_state_probes(
@@ -1788,26 +1083,15 @@ def memoized_query_pull_request_state_probes(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestStateProbe]:
-    """Return lightweight PR probes using cycle-local memoization."""
-    numbers = tuple(sorted({int(number) for number in pr_numbers}))
-    missing = [
-        number
-        for number in numbers
-        if (pr_repo, number) not in memo.review_state_probes
-    ]
-    if missing:
-        fetched = query_pull_request_state_probes(
-            pr_repo,
-            tuple(missing),
-            gh_runner=gh_runner,
-        )
-        for number, payload in fetched.items():
-            memo.review_state_probes[(pr_repo, number)] = payload
-    return {
-        number: memo.review_state_probes[(pr_repo, number)]
-        for number in numbers
-        if (pr_repo, number) in memo.review_state_probes
-    }
+    """Compatibility wrapper for adapter-owned memoized PR state probes."""
+    from startupai_controller.adapters.github_cli import memoized_query_pull_request_state_probes as _adapter_memoized_query_pull_request_state_probes
+
+    return _adapter_memoized_query_pull_request_state_probes(
+        memo,
+        pr_repo,
+        pr_numbers,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def query_required_status_checks(
@@ -1816,50 +1100,14 @@ def query_required_status_checks(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> set[str]:
-    """Return required status-check contexts for one repo/base branch."""
-    cache_key = (pr_repo, base_ref_name)
-    cached = _required_status_checks_ttl_cache.get(cache_key)
-    now_monotonic = time.monotonic()
-    if cached is not None:
-        expires_at, required = cached
-        if expires_at > now_monotonic:
-            return set(required)
-    if "/" not in pr_repo:
-        raise ConfigError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
-    owner, repo = pr_repo.split("/", maxsplit=1)
-    try:
-        bp_output = _run_gh(
-            [
-                "api",
-                f"repos/{owner}/{repo}/branches/{base_ref_name}/protection/required_status_checks",
-            ],
-            gh_runner=gh_runner,
-        )
-    except GhQueryError:
-        if cached is not None:
-            return set(cached[1])
-        raise
-    try:
-        bp_data = json.loads(bp_output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed parsing branch protection for {pr_repo}:{base_ref_name}."
-        ) from error
+    """Compatibility wrapper for adapter-owned required-check policy reads."""
+    from startupai_controller.adapters.github_cli import query_required_status_checks as _adapter_query_required_status_checks
 
-    required: set[str] = set()
-    for context in bp_data.get("contexts", []) or []:
-        if isinstance(context, str):
-            required.add(context)
-    for check in bp_data.get("checks", []) or []:
-        if isinstance(check, dict):
-            name = check.get("context")
-            if isinstance(name, str) and name:
-                required.add(name)
-    _required_status_checks_ttl_cache[cache_key] = (
-        now_monotonic + _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS,
-        set(required),
+    return _adapter_query_required_status_checks(
+        pr_repo,
+        base_ref_name,
+        gh_runner=gh_runner or _run_gh,
     )
-    return required
 
 
 def memoized_query_required_status_checks(
@@ -1869,23 +1117,29 @@ def memoized_query_required_status_checks(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> set[str]:
-    """Return required checks with cycle-local branch-protection caching."""
+    """Compatibility wrapper for adapter-owned memoized required-check reads."""
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter
+
+    adapter = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        github_memo=memo,
+        gh_runner=gh_runner or _run_gh,
+    )
     key = (pr_repo, base_ref_name)
-    cached = memo.required_status_checks.get(key)
+    cached = adapter._github_memo.required_status_checks.get(key)
     if cached is not None:
         return set(cached)
-    required = query_required_status_checks(
-        pr_repo,
-        base_ref_name,
-        gh_runner=gh_runner,
-    )
-    memo.required_status_checks[key] = set(required)
+    required = adapter._query_required_status_checks(pr_repo, base_ref_name)
+    adapter._github_memo.required_status_checks[key] = set(required)
     return set(required)
 
 
 def clear_required_status_checks_cache() -> None:
-    """Clear the process-local required-check TTL cache."""
-    _required_status_checks_ttl_cache.clear()
+    """Compatibility wrapper for adapter-owned required-check TTL cache clearing."""
+    from startupai_controller.adapters.github_cli import clear_required_status_checks_cache as _adapter_clear_required_status_checks_cache
+
+    _adapter_clear_required_status_checks_cache()
 
 
 def query_issue_body(
@@ -1895,18 +1149,15 @@ def query_issue_body(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
-    """Return the raw issue body."""
-    output = _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}",
-            "--jq",
-            ".body",
-        ],
-        gh_runner=gh_runner,
-        operation_type="query",
+    """Compatibility wrapper for adapter-owned issue-body queries."""
+    from startupai_controller.adapters.github_cli import query_issue_body as _adapter_query_issue_body
+
+    return _adapter_query_issue_body(
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
     )
-    return str(output or "")
 
 
 def memoized_query_issue_body(
@@ -1917,14 +1168,16 @@ def memoized_query_issue_body(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
-    """Return issue body using a cycle-local cache."""
-    key = (owner, repo, number)
-    cached = memo.issue_bodies.get(key)
-    if cached is not None:
-        return cached
-    body = query_issue_body(owner, repo, number, gh_runner=gh_runner)
-    memo.issue_bodies[key] = body
-    return body
+    """Compatibility wrapper for adapter-owned memoized issue-body queries."""
+    from startupai_controller.adapters.github_cli import memoized_query_issue_body as _adapter_memoized_query_issue_body
+
+    return _adapter_memoized_query_issue_body(
+        memo,
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def _query_latest_wip_activity_timestamp(
@@ -1936,38 +1189,17 @@ def _query_latest_wip_activity_timestamp(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
-    """Return latest execution-relevant activity for a WIP issue."""
-    candidates: list[datetime] = []
+    """Compatibility wrapper for adapter-owned WIP activity queries."""
+    from startupai_controller.adapters.github_cli import _query_latest_wip_activity_timestamp as _adapter_query_latest_wip_activity_timestamp
 
-    parsed_pr = _parse_pr_url(pr_field)
-    if parsed_pr is not None:
-        pr_owner, pr_repo, pr_number = parsed_pr
-        pr_ts = _query_open_pr_updated_at(
-            pr_owner, pr_repo, pr_number, gh_runner=gh_runner
-        )
-        if pr_ts is not None:
-            candidates.append(pr_ts)
-
-    comment_ts = _query_latest_non_automation_comment_timestamp(
-        owner, repo, number, gh_runner=gh_runner
-    )
-    if comment_ts is not None:
-        candidates.append(comment_ts)
-
-    baseline_ts = _query_latest_matching_comment_timestamp(
+    return _adapter_query_latest_wip_activity_timestamp(
+        issue_ref,
         owner,
         repo,
         number,
-        (
-            f"{MARKER_PREFIX}:claim-ready:{issue_ref}",
-            f"{MARKER_PREFIX}:dispatch-agent:{issue_ref}",
-        ),
-        gh_runner=gh_runner,
+        pr_field,
+        gh_runner=gh_runner or _run_gh,
     )
-    if baseline_ts is not None:
-        candidates.append(baseline_ts)
-
-    return max(candidates) if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -1982,17 +1214,15 @@ def _query_issue_assignees(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
-    """Fetch current assignee logins for an issue."""
-    output = _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}",
-            "-q",
-            ".assignees[].login",
-        ],
-        gh_runner=gh_runner,
+    """Compatibility wrapper for adapter-owned assignee reads."""
+    from startupai_controller.adapters.github_cli import _query_issue_assignees as _adapter_query_issue_assignees
+
+    return _adapter_query_issue_assignees(
+        owner,
+        repo,
+        number,
+        gh_runner=gh_runner or _run_gh,
     )
-    return [line.strip() for line in output.splitlines() if line.strip()]
 
 
 def _set_issue_assignees(
@@ -2003,76 +1233,16 @@ def _set_issue_assignees(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
-    """Set issue assignees explicitly."""
-    args = [
-        "api",
-        f"repos/{owner}/{repo}/issues/{number}",
-        "-X",
-        "PATCH",
-    ]
-    for login in assignees:
-        args.extend(["-f", f"assignees[]={login}"])
-    _run_gh(args, gh_runner=gh_runner)
+    """Compatibility wrapper for adapter-owned assignee writes."""
+    from startupai_controller.adapters.github_cli import _set_issue_assignees as _adapter_set_issue_assignees
 
-
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _ProjectItemSnapshot:
-    """A single project board item with key field values."""
-
-    issue_ref: str
-    status: str
-    executor: str
-    handoff_to: str
-    priority: str = ""
-    item_id: str = ""
-    project_id: str = ""
-    sprint: str = ""
-    agent: str = ""
-    owner_field: str = ""
-    title: str = ""
-    body: str = ""
-    repo_slug: str = ""
-    repo_name: str = ""
-    repo_owner: str = ""
-    issue_number: int = 0
-    issue_updated_at: str = ""
-
-
-@dataclass(frozen=True)
-class CycleBoardSnapshot:
-    """Thin per-cycle view of board items reused across hot-path phases."""
-
-    items: tuple[_ProjectItemSnapshot, ...]
-    by_status: dict[str, tuple[_ProjectItemSnapshot, ...]] = field(default_factory=dict)
-
-    def items_with_status(self, status: str) -> tuple[_ProjectItemSnapshot, ...]:
-        """Return cached items in the given status."""
-        return self.by_status.get(status, ())
-
-
-@dataclass
-class CycleGitHubMemo:
-    """Cycle-local memoization for expensive GitHub reads."""
-
-    issue_bodies: dict[tuple[str, str, int], str] = field(default_factory=dict)
-    issue_comment_bodies: dict[tuple[str, str, int], list[str]] = field(default_factory=dict)
-    open_pull_requests: dict[str, list["OpenPullRequest"]] = field(default_factory=dict)
-    dependency_ready: dict[str, bool] = field(default_factory=dict)
-    review_pull_requests: dict[tuple[str, int], PullRequestViewPayload] = field(
-        default_factory=dict
+    _adapter_set_issue_assignees(
+        owner,
+        repo,
+        number,
+        assignees,
+        gh_runner=gh_runner or _run_gh,
     )
-    review_state_probes: dict[tuple[str, int], PullRequestStateProbe] = field(
-        default_factory=dict
-    )
-    required_status_checks: dict[tuple[str, str], set[str]] = field(
-        default_factory=dict
-    )
-
 
 
 # _priority_rank re-exported from domain.scheduling_policy (M5)
@@ -2085,136 +1255,15 @@ def _list_project_items_by_status(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
-    """List board items in a target status.
+    """Compatibility wrapper for adapter-owned project status queries."""
+    from startupai_controller.adapters.github_cli import _list_project_items_by_status as _adapter_list_project_items_by_status
 
-    Returns a list of snapshots with issue ref, status, executor, handoff, and
-    priority fields. Expensive query; call once per run and filter in-memory.
-    """
-    query = """
-query($owner: String!, $number: Int!, $cursor: String) {
-  organization(login: $owner) {
-    projectV2(number: $number) {
-      id
-      items(first: 100, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          executorField: fieldValueByName(name: "Executor") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          handoffField: fieldValueByName(name: "Handoff To") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          priorityField: fieldValueByName(name: "Priority") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          content {
-            ... on Issue {
-              number
-              repository { nameWithOwner }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-    items: list[_ProjectItemSnapshot] = []
-    cursor = ""
-    has_next = True
-
-    while has_next:
-        gh_args = [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={project_owner}",
-            "-F",
-            f"number={project_number}",
-        ]
-        if cursor:
-            gh_args.extend(["-f", f"cursor={cursor}"])
-        else:
-            gh_args.extend(["-f", "cursor="])
-
-        output = _run_gh(gh_args, gh_runner=gh_runner)
-
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as error:
-            raise GhQueryError(
-                "Failed listing project items: invalid JSON."
-            ) from error
-
-        errors = payload.get("errors")
-        if isinstance(errors, list) and errors:
-            messages = [
-                err.get("message", "unknown GraphQL error")
-                for err in errors
-                if isinstance(err, dict)
-            ]
-            joined = "; ".join(messages) if messages else "unknown GraphQL error"
-            raise GhQueryError(f"Failed listing project items: {joined}")
-
-        project_data = (
-            payload.get("data", {})
-            .get("organization", {})
-            .get("projectV2", {})
-        )
-        project_id = str(project_data.get("id") or "")
-        items_data = project_data.get("items", {})
-        page_info = items_data.get("pageInfo", {})
-        has_next = page_info.get("hasNextPage", False)
-        cursor = page_info.get("endCursor", "")
-
-        for node in items_data.get("nodes", []):
-            node_status = (
-                (node.get("fieldValueByName") or {}).get("name") or ""
-            )
-            if node_status != status:
-                continue
-
-            content = node.get("content") or {}
-            issue_number = content.get("number")
-            repo_with_owner = (content.get("repository") or {}).get(
-                "nameWithOwner", ""
-            )
-
-            if not issue_number or not repo_with_owner:
-                continue
-
-            executor = (
-                (node.get("executorField") or {}).get("name") or ""
-            )
-            handoff_to = (
-                (node.get("handoffField") or {}).get("name") or ""
-            )
-            priority = (
-                (node.get("priorityField") or {}).get("name") or ""
-            )
-
-            items.append(
-                _ProjectItemSnapshot(
-                    issue_ref=f"{repo_with_owner}#{issue_number}",
-                    status=node_status,
-                    executor=executor,
-                    handoff_to=handoff_to,
-                    priority=priority,
-                    item_id=str(node.get("id") or ""),
-                    project_id=project_id,
-                    repo_slug=repo_with_owner,
-                    issue_number=int(issue_number),
-                )
-            )
-
-    return items
+    return _adapter_list_project_items_by_status(
+        status,
+        project_owner,
+        project_number,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def build_cycle_board_snapshot(
@@ -2223,165 +1272,21 @@ def build_cycle_board_snapshot(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> CycleBoardSnapshot:
-    """Build one thin board snapshot for a consumer/control-plane cycle."""
-    cache_key = (project_owner, project_number)
-    now_monotonic = time.monotonic()
-    if gh_runner is None:
-        cached = _cycle_board_snapshot_cache.get(cache_key)
-        if cached is not None:
-            expires_at, snapshot = cached
-            if expires_at > now_monotonic:
-                return snapshot
-    query = """
-query($owner: String!, $number: Int!, $cursor: String) {
-  organization(login: $owner) {
-    projectV2(number: $number) {
-      id
-      items(first: 100, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          statusField: fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          executorField: fieldValueByName(name: "Executor") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          handoffField: fieldValueByName(name: "Handoff To") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          priorityField: fieldValueByName(name: "Priority") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          sprintField: fieldValueByName(name: "Sprint") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          agentField: fieldValueByName(name: "Agent") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          ownerField: fieldValueByName(name: "Owner") {
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-          content {
-            ... on Issue {
-              number
-              title
-              updatedAt
-              repository {
-                name
-                nameWithOwner
-                owner { login }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"""
+    """Compatibility wrapper for adapter-owned cycle board snapshots."""
+    from startupai_controller.adapters.github_cli import build_cycle_board_snapshot as _adapter_build_cycle_board_snapshot
 
-    items: list[_ProjectItemSnapshot] = []
-    cursor = ""
-    has_next = True
-
-    while has_next:
-        gh_args = [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={project_owner}",
-            "-F",
-            f"number={project_number}",
-        ]
-        if cursor:
-            gh_args.extend(["-f", f"cursor={cursor}"])
-        else:
-            gh_args.extend(["-f", "cursor="])
-
-        output = _run_gh(gh_args, gh_runner=gh_runner)
-
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as error:
-            raise GhQueryError(
-                "Failed listing project items: invalid JSON."
-            ) from error
-
-        errors = payload.get("errors")
-        if isinstance(errors, list) and errors:
-            messages = [
-                err.get("message", "unknown GraphQL error")
-                for err in errors
-                if isinstance(err, dict)
-            ]
-            joined = "; ".join(messages) if messages else "unknown GraphQL error"
-            raise GhQueryError(f"Failed listing project items: {joined}")
-
-        project_data = (
-            payload.get("data", {})
-            .get("organization", {})
-            .get("projectV2", {})
-        )
-        project_id = str(project_data.get("id") or "")
-        items_data = project_data.get("items", {})
-        page_info = items_data.get("pageInfo", {})
-        has_next = page_info.get("hasNextPage", False)
-        cursor = page_info.get("endCursor", "")
-
-        for node in items_data.get("nodes", []):
-            content = node.get("content") or {}
-            issue_number = content.get("number")
-            repo = content.get("repository") or {}
-            repo_with_owner = str(repo.get("nameWithOwner") or "")
-            repo_name = str(repo.get("name") or "")
-            repo_owner = str((repo.get("owner") or {}).get("login") or "")
-
-            if not issue_number or not repo_with_owner:
-                continue
-
-            items.append(
-                _ProjectItemSnapshot(
-                    issue_ref=f"{repo_with_owner}#{issue_number}",
-                    status=str((node.get("statusField") or {}).get("name") or ""),
-                    executor=str((node.get("executorField") or {}).get("name") or ""),
-                    handoff_to=str((node.get("handoffField") or {}).get("name") or ""),
-                    priority=str((node.get("priorityField") or {}).get("name") or ""),
-                    item_id=str(node.get("id") or ""),
-                    project_id=project_id,
-                    sprint=str((node.get("sprintField") or {}).get("name") or ""),
-                    agent=str((node.get("agentField") or {}).get("name") or ""),
-                    owner_field=str((node.get("ownerField") or {}).get("text") or ""),
-                    title=str(content.get("title") or ""),
-                    repo_slug=repo_with_owner,
-                    repo_name=repo_name,
-                    repo_owner=repo_owner,
-                    issue_number=int(issue_number),
-                    issue_updated_at=str(content.get("updatedAt") or ""),
-                )
-            )
-
-    by_status: dict[str, list[_ProjectItemSnapshot]] = {}
-    for item in items:
-        by_status.setdefault(item.status, []).append(item)
-
-    snapshot = CycleBoardSnapshot(
-        items=tuple(items),
-        by_status={status: tuple(group) for status, group in by_status.items()},
+    return _adapter_build_cycle_board_snapshot(
+        project_owner,
+        project_number,
+        gh_runner=gh_runner or _run_gh,
     )
-    if gh_runner is None:
-        _cycle_board_snapshot_cache[cache_key] = (
-            now_monotonic + _BOARD_SNAPSHOT_CACHE_TTL_SECONDS,
-            snapshot,
-        )
-    return snapshot
 
 
 def clear_cycle_board_snapshot_cache() -> None:
-    """Clear the process-local thin board snapshot cache."""
-    _cycle_board_snapshot_cache.clear()
+    """Compatibility wrapper for adapter-owned snapshot cache clearing."""
+    from startupai_controller.adapters.github_cli import clear_cycle_board_snapshot_cache as _adapter_clear_cycle_board_snapshot_cache
+
+    _adapter_clear_cycle_board_snapshot_cache()
 
 
 def _list_project_items(
@@ -2391,162 +1296,15 @@ def _list_project_items(
     statuses: set[str] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
-    """List issue-backed project items with richer field snapshots.
+    """Compatibility wrapper for adapter-owned rich project item reads."""
+    from startupai_controller.adapters.github_cli import _list_project_items as _adapter_list_project_items
 
-    Intended for controller-style decisions that need more than the thin
-    status/executor snapshot, such as backlog admission and board audits.
-    """
-    query = """
-query($owner: String!, $number: Int!, $cursor: String) {
-  organization(login: $owner) {
-    projectV2(number: $number) {
-      id
-      items(first: 100, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          statusField: fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          executorField: fieldValueByName(name: "Executor") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          handoffField: fieldValueByName(name: "Handoff To") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          priorityField: fieldValueByName(name: "Priority") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          sprintField: fieldValueByName(name: "Sprint") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          agentField: fieldValueByName(name: "Agent") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          ownerField: fieldValueByName(name: "Owner") {
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-          content {
-            ... on Issue {
-              number
-              title
-              body
-              repository {
-                name
-                nameWithOwner
-                owner { login }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-    items: list[_ProjectItemSnapshot] = []
-    cursor = ""
-    has_next = True
-
-    while has_next:
-        gh_args = [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={project_owner}",
-            "-F",
-            f"number={project_number}",
-        ]
-        if cursor:
-            gh_args.extend(["-f", f"cursor={cursor}"])
-        else:
-            gh_args.extend(["-f", "cursor="])
-
-        output = _run_gh(gh_args, gh_runner=gh_runner)
-
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as error:
-            raise GhQueryError(
-                "Failed listing project items: invalid JSON."
-            ) from error
-
-        errors = payload.get("errors")
-        if isinstance(errors, list) and errors:
-            messages = [
-                err.get("message", "unknown GraphQL error")
-                for err in errors
-                if isinstance(err, dict)
-            ]
-            joined = "; ".join(messages) if messages else "unknown GraphQL error"
-            raise GhQueryError(f"Failed listing project items: {joined}")
-
-        project_data = (
-            payload.get("data", {})
-            .get("organization", {})
-            .get("projectV2", {})
-        )
-        project_id = str(project_data.get("id") or "")
-        items_data = project_data.get("items", {})
-        page_info = items_data.get("pageInfo", {})
-        has_next = page_info.get("hasNextPage", False)
-        cursor = page_info.get("endCursor", "")
-
-        for node in items_data.get("nodes", []):
-            node_status = (
-                (node.get("statusField") or {}).get("name") or ""
-            )
-            if statuses is not None and node_status not in statuses:
-                continue
-
-            content = node.get("content") or {}
-            issue_number = content.get("number")
-            repo = content.get("repository") or {}
-            repo_with_owner = str(repo.get("nameWithOwner") or "")
-            repo_name = str(repo.get("name") or "")
-            repo_owner = str((repo.get("owner") or {}).get("login") or "")
-
-            if not issue_number or not repo_with_owner:
-                continue
-
-            items.append(
-                _ProjectItemSnapshot(
-                    issue_ref=f"{repo_with_owner}#{issue_number}",
-                    status=node_status,
-                    executor=str((node.get("executorField") or {}).get("name") or ""),
-                    handoff_to=str((node.get("handoffField") or {}).get("name") or ""),
-                    priority=str((node.get("priorityField") or {}).get("name") or ""),
-                    item_id=str(node.get("id") or ""),
-                    project_id=project_id,
-                    sprint=str((node.get("sprintField") or {}).get("name") or ""),
-                    agent=str((node.get("agentField") or {}).get("name") or ""),
-                    owner_field=str((node.get("ownerField") or {}).get("text") or ""),
-                    title=str(content.get("title") or ""),
-                    body=str(content.get("body") or ""),
-                    repo_slug=repo_with_owner,
-                    repo_name=repo_name,
-                    repo_owner=repo_owner,
-                    issue_number=int(issue_number),
-                )
-            )
-
-    return items
-
-
-# ---------------------------------------------------------------------------
-# Closing issues query
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class LinkedIssue:
-    owner: str
-    repo: str
-    number: int
-    ref: str  # e.g., "crew#88"
+    return _adapter_list_project_items(
+        project_owner,
+        project_number,
+        statuses=statuses,
+        gh_runner=gh_runner or _run_gh,
+    )
 
 
 def query_closing_issues(
@@ -2557,147 +1315,16 @@ def query_closing_issues(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[LinkedIssue]:
-    """Query PR's closingIssuesReferences and return LinkedIssue list."""
-    query = """
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      closingIssuesReferences(first: 50) {
-        nodes {
-          number
-          repository { nameWithOwner }
-        }
-      }
-    }
-  }
-}
-"""
+    """Compatibility wrapper for adapter-owned closing-issue resolution."""
+    from startupai_controller.adapters.github_cli import query_closing_issues as _adapter_query_closing_issues
 
-    output = _run_gh(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-f",
-            f"owner={pr_owner}",
-            "-f",
-            f"repo={pr_repo}",
-            "-F",
-            f"number={pr_number}",
-        ],
-        gh_runner=gh_runner,
+    return _adapter_query_closing_issues(
+        pr_owner,
+        pr_repo,
+        pr_number,
+        config,
+        gh_runner=gh_runner or _run_gh,
     )
-
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise GhQueryError(
-            f"Failed querying closing issues for PR {pr_owner}/{pr_repo}#{pr_number}: "
-            "invalid JSON."
-        ) from error
-
-    errors = payload.get("errors")
-    if isinstance(errors, list) and errors:
-        messages = [
-            err.get("message", "unknown GraphQL error")
-            for err in errors
-            if isinstance(err, dict)
-        ]
-        joined = "; ".join(messages) if messages else "unknown GraphQL error"
-        raise GhQueryError(
-            f"Failed querying closing issues for PR "
-            f"{pr_owner}/{pr_repo}#{pr_number}: {joined}"
-        )
-
-    nodes = (
-        payload.get("data", {})
-        .get("repository", {})
-        .get("pullRequest", {})
-        .get("closingIssuesReferences", {})
-        .get("nodes", [])
-    )
-
-    result: list[LinkedIssue] = []
-    for node in nodes:
-        issue_number = node.get("number")
-        repo_with_owner = (node.get("repository") or {}).get(
-            "nameWithOwner", ""
-        )
-        if not issue_number or not repo_with_owner:
-            continue
-
-        prefix = _repo_to_prefix(repo_with_owner, config)
-        if prefix is None:
-            # Skip issues whose repo is not in config.issue_prefixes
-            continue
-
-        owner, repo = repo_with_owner.split("/", maxsplit=1)
-        result.append(
-            LinkedIssue(
-                owner=owner,
-                repo=repo,
-                number=issue_number,
-                ref=f"{prefix}#{issue_number}",
-            )
-        )
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Codex / gate queries
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CodexReviewVerdict:
-    """Parsed codex review verdict marker from PR comments/reviews."""
-
-    decision: str  # pass|fail
-    route: str  # none|codex|executor|claude|human
-    source: str  # comment|review
-    timestamp: str
-    actor: str
-    checklist: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class PullRequestViewPayload:
-    """Expanded PR payload used to make one review decision without requerying."""
-
-    pr_repo: str
-    pr_number: int
-    author: str
-    body: str
-    state: str
-    is_draft: bool
-    merge_state_status: str
-    mergeable: str
-    base_ref_name: str
-    auto_merge_enabled: bool
-    comments: tuple[dict[str, Any], ...] = ()
-    reviews: tuple[dict[str, Any], ...] = ()
-    status_check_rollup: tuple[dict[str, Any], ...] = ()
-
-
-@dataclass(frozen=True)
-class PullRequestStateProbe:
-    """Lightweight PR state used to avoid rehydrating unchanged review items."""
-
-    pr_repo: str
-    pr_number: int
-    state: str
-    is_draft: bool
-    merge_state_status: str
-    mergeable: str
-    base_ref_name: str
-    auto_merge_enabled: bool
-    head_ref_oid: str
-    updated_at: str
-    latest_comment_at: str
-    latest_review_at: str
-    status_check_rollup: tuple[dict[str, Any], ...] = ()
 
 
 def _parse_codex_verdict_from_text(
@@ -2723,15 +1350,14 @@ def query_latest_codex_verdict(
     trusted_actors: set[str] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> CodexReviewVerdict | None:
-    """Query PR comments/reviews and return latest codex verdict marker."""
-    payload = query_pull_request_view_payload(
+    """Compatibility wrapper for adapter-owned codex verdict lookup."""
+    from startupai_controller.adapters.github_cli import query_latest_codex_verdict as _adapter_query_latest_codex_verdict
+
+    return _adapter_query_latest_codex_verdict(
         pr_repo,
         pr_number,
-        gh_runner=gh_runner,
-    )
-    return latest_codex_verdict_from_payload(
-        payload,
         trusted_actors=trusted_actors,
+        gh_runner=gh_runner or _run_gh,
     )
 
 
@@ -2740,72 +1366,13 @@ def latest_codex_verdict_from_payload(
     *,
     trusted_actors: set[str] | None = None,
 ) -> CodexReviewVerdict | None:
-    """Return the latest codex verdict marker from one expanded PR payload."""
-    candidates: list[CodexReviewVerdict] = []
+    """Compatibility wrapper for adapter-owned verdict parsing."""
+    from startupai_controller.adapters.github_cli import latest_codex_verdict_from_payload as _adapter_latest_codex_verdict_from_payload
 
-    for comment in payload.comments:
-        body = comment.get("body") or ""
-        decision, route, checklist = _parse_codex_verdict_from_text(body)
-        if decision is None:
-            continue
-        actor = (
-            (
-                (comment.get("author") or {}).get("login")
-                or (comment.get("user") or {}).get("login")
-                or ""
-            )
-            .strip()
-            .lower()
-        )
-        if trusted_actors and actor not in trusted_actors:
-            continue
-        ts = comment.get("createdAt", "")
-        chosen_route = "none" if decision == "pass" else (route or "executor")
-        candidates.append(
-            CodexReviewVerdict(
-                decision=decision,
-                route=chosen_route,
-                source="comment",
-                timestamp=ts,
-                actor=actor,
-                checklist=checklist,
-            )
-        )
-
-    for review in payload.reviews:
-        body = review.get("body") or ""
-        decision, route, checklist = _parse_codex_verdict_from_text(body)
-        if decision is None:
-            continue
-        actor = (
-            (
-                (review.get("author") or {}).get("login")
-                or (review.get("user") or {}).get("login")
-                or ""
-            )
-            .strip()
-            .lower()
-        )
-        if trusted_actors and actor not in trusted_actors:
-            continue
-        ts = review.get("submittedAt", "")
-        chosen_route = "none" if decision == "pass" else (route or "executor")
-        candidates.append(
-            CodexReviewVerdict(
-                decision=decision,
-                route=chosen_route,
-                source="review",
-                timestamp=ts,
-                actor=actor,
-                checklist=checklist,
-            )
-        )
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda item: item.timestamp)
-    return candidates[-1]
+    return _adapter_latest_codex_verdict_from_payload(
+        payload,
+        trusted_actors=trusted_actors,
+    )
 
 
 def has_copilot_review_signal_from_payload(payload: PullRequestViewPayload) -> bool:
@@ -2824,102 +1391,12 @@ def build_pr_gate_status_from_payload(
     *,
     required: set[str],
 ) -> PrGateStatus:
-    """Build gate readiness from one expanded PR payload and required checks."""
-    latest: dict[str, tuple[str, CheckObservation]] = {}
-    for check in payload.status_check_rollup:
-        typename = check.get("__typename", "")
-        if typename == "CheckRun":
-            name = check.get("name", "")
-            ts = check.get("completedAt") or check.get("startedAt") or ""
-            status = str(check.get("status", "")).lower()
-            conclusion = str(check.get("conclusion", "")).lower()
-            details_url = str(check.get("detailsUrl") or "")
-            workflow_name = str(check.get("workflowName") or "")
-            if not name:
-                continue
-            result = (
-                "pending"
-                if status != "completed"
-                else (
-                    "pass"
-                    if conclusion in {"success", "neutral", "skipped"}
-                    else (
-                        "cancelled"
-                        if conclusion in {"cancelled", "startup_failure", "stale"}
-                        else "fail"
-                    )
-                )
-            )
-            observation = CheckObservation(
-                name=name,
-                result=result,
-                status=status,
-                conclusion=conclusion,
-                details_url=details_url,
-                workflow_name=workflow_name,
-                run_id=_extract_run_id(details_url),
-            )
-            prev = latest.get(name)
-            if prev is None or ts >= prev[0]:
-                latest[name] = (ts, observation)
-        elif typename == "StatusContext":
-            name = check.get("context", "")
-            ts = check.get("startedAt") or ""
-            state = str(check.get("state", "")).lower()
-            details_url = str(check.get("targetUrl") or "")
-            if not name:
-                continue
-            if state == "success":
-                result = "pass"
-            elif state in {"error", "failure"}:
-                result = "fail"
-            else:
-                result = "pending"
-            observation = CheckObservation(
-                name=name,
-                result=result,
-                status=state,
-                conclusion=state,
-                details_url=details_url,
-                workflow_name="",
-                run_id=_extract_run_id(details_url),
-            )
-            prev = latest.get(name)
-            if prev is None or ts >= prev[0]:
-                latest[name] = (ts, observation)
+    """Compatibility wrapper for adapter-owned PR gate evaluation."""
+    from startupai_controller.adapters.github_cli import build_pr_gate_status_from_payload as _adapter_build_pr_gate_status_from_payload
 
-    passed: set[str] = set()
-    failed: set[str] = set()
-    pending: set[str] = set()
-    cancelled: set[str] = set()
-    for context in required:
-        if context not in latest:
-            pending.add(context)
-            continue
-        _ts, observation = latest[context]
-        result = observation.result
-        if result == "pass":
-            passed.add(context)
-        elif result == "fail":
-            failed.add(context)
-        elif result == "cancelled":
-            cancelled.add(context)
-            pending.add(context)
-        else:
-            pending.add(context)
-
-    return PrGateStatus(
+    return _adapter_build_pr_gate_status_from_payload(
+        payload,
         required=required,
-        passed=passed,
-        failed=failed,
-        pending=pending,
-        cancelled=cancelled,
-        merge_state_status=payload.merge_state_status,
-        mergeable=payload.mergeable,
-        is_draft=payload.is_draft,
-        state=payload.state.strip().upper(),
-        auto_merge_enabled=payload.auto_merge_enabled,
-        checks={name: observation for name, (_ts, observation) in latest.items()},
     )
 
 
@@ -2987,15 +1464,8 @@ def _query_pr_gate_status(
     *,
     gh_runner: Callable[..., str] | None = None,
 ) -> PrGateStatus:
-    """Build required-check and merge-state snapshot for a PR."""
-    payload = query_pull_request_view_payload(
-        pr_repo,
-        pr_number,
-        gh_runner=gh_runner,
-    )
-    required = query_required_status_checks(
-        pr_repo,
-        payload.base_ref_name or "main",
-        gh_runner=gh_runner,
-    )
-    return build_pr_gate_status_from_payload(payload, required=required)
+    """Compatibility wrapper for adapter-owned PR gate-status reads."""
+    from startupai_controller.adapters.github_cli import GitHubCliAdapter
+
+    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner or _run_gh)
+    return adapter.get_gate_status(pr_repo, pr_number)

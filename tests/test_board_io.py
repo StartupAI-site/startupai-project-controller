@@ -13,12 +13,17 @@ import subprocess
 import pytest
 
 import startupai_controller.board_io as board_io
+import startupai_controller.adapters.github_transport as github_transport
 from startupai_controller.board_io import (
     LinkedIssue,
     _marker_for,
     _comment_exists,
     _repo_to_prefix,
+    _query_issue_board_info,
+    _query_project_item_field,
+    _query_status_field_option,
     _query_failed_check_runs,
+    _set_board_status,
     clear_cycle_board_snapshot_cache,
     clear_required_status_checks_cache,
     build_cycle_board_snapshot,
@@ -220,6 +225,136 @@ def test_query_pr_gate_status_normalizes_state_to_uppercase() -> None:
     assert result.state == "OPEN"
 
 
+def test_query_project_item_field_wrapper_respects_board_io_runner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Wrapper should still honor board_io._run_gh monkeypatches for compatibility."""
+    config = _load(tmp_path)
+
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "projectItems": {
+                                "nodes": [
+                                    {
+                                        "project": {
+                                            "owner": {"login": "StartupAI-site"},
+                                            "number": 1,
+                                        },
+                                        "fieldByName": {"name": "codex"},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    value = _query_project_item_field(
+        "crew#84",
+        "Executor",
+        config,
+        "StartupAI-site",
+        1,
+    )
+
+    assert value == "codex"
+
+
+def test_query_issue_board_info_wrapper_respects_board_io_runner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = _load(tmp_path)
+
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "projectItems": {
+                                "nodes": [
+                                    {
+                                        "id": "ITEM1",
+                                        "project": {
+                                            "id": "PROJ1",
+                                            "owner": {"login": "StartupAI-site"},
+                                            "number": 1,
+                                        },
+                                        "statusField": {"name": "Ready"},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    info = _query_issue_board_info(
+        "crew#84",
+        config,
+        "StartupAI-site",
+        1,
+    )
+
+    assert info.status == "Ready"
+    assert info.item_id == "ITEM1"
+    assert info.project_id == "PROJ1"
+
+
+def test_query_status_field_option_wrapper_respects_board_io_runner(
+    monkeypatch,
+) -> None:
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        return json.dumps(
+            {
+                "data": {
+                    "node": {
+                        "field": {
+                            "id": "FIELD1",
+                            "options": [
+                                {"id": "OPT1", "name": "Review"},
+                            ],
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    field_id, option_id = _query_status_field_option("PROJ1", "Review")
+
+    assert field_id == "FIELD1"
+    assert option_id == "OPT1"
+
+
+def test_set_board_status_wrapper_respects_board_io_runner(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_gh(args, gh_runner=None, operation_type="query"):
+        calls.append(list(args))
+        return json.dumps({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM1"}}}})
+
+    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+
+    _set_board_status("PROJ1", "ITEM1", "FIELD1", "OPT1")
+
+    assert calls
+    assert "updateProjectV2ItemFieldValue" in " ".join(calls[0])
+
+
 def test_query_pull_request_view_payloads_batches_graphql_aliases() -> None:
     """Multi-PR payload queries should parse aliased GraphQL responses."""
     graphql_payload = json.dumps(
@@ -356,8 +491,8 @@ def test_run_gh_retries_transient_connection_error(
             )
         return '{"ok": true}'
 
-    monkeypatch.setattr(board_io.subprocess, "check_output", fake_check_output)
-    monkeypatch.setattr(board_io.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(github_transport.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(github_transport.time, "sleep", lambda *_: None)
 
     result = board_io._run_gh(["unsupported", "command"])
 
@@ -376,14 +511,14 @@ def test_run_gh_fails_fast_on_timeout_expired(
         calls["timeout"] = timeout
         raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
 
-    monkeypatch.setattr(board_io.subprocess, "check_output", fake_check_output)
-    monkeypatch.setattr(board_io.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(github_transport.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(github_transport.time, "sleep", lambda *_: None)
 
     with pytest.raises(board_io.GhCommandError, match="timed out after"):
         board_io._run_gh(["unsupported", "command"])
 
     assert calls["count"] == 1
-    assert calls["timeout"] == board_io._GH_COMMAND_TIMEOUT_SECONDS
+    assert calls["timeout"] == github_transport._GH_COMMAND_TIMEOUT_SECONDS
 
 
 def test_query_required_status_checks_uses_ttl_cache(

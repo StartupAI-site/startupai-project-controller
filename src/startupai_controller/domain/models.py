@@ -266,6 +266,24 @@ class SessionInfo:
 
 
 @dataclass(frozen=True)
+class IssueContext:
+    """Typed issue context used during launch preparation."""
+
+    title: str
+    body: str
+    labels: tuple[str, ...]
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class WorktreeEntry:
+    """One local git worktree record."""
+
+    path: str
+    branch_name: str
+
+
+@dataclass(frozen=True)
 class ReviewQueueEntry:
     """Persisted review-clearance work item."""
 
