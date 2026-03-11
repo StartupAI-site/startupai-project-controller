@@ -47,7 +47,7 @@ from startupai_controller import consumer_execution_support_helpers as _executio
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
-from startupai_controller import consumer_selection_helpers as _selection_helpers
+import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
     load_automation_config,
@@ -547,20 +547,10 @@ def _effective_retry_backoff(
 
     Thin wrapper that destructures config/workflow for the domain function.
     """
-    runtime = workflow.runtime if workflow is not None else None
-    return _effective_retry_backoff_primitives(
-        base_seconds=(
-            runtime.retry_backoff_base_seconds
-            if runtime is not None and runtime.retry_backoff_base_seconds is not None
-            else None
-        ),
-        max_seconds=(
-            runtime.retry_backoff_seconds
-            if runtime is not None and runtime.retry_backoff_seconds is not None
-            else None
-        ),
-        config_base=config.retry_backoff_base_seconds,
-        config_max=config.retry_backoff_seconds,
+    return _selection_retry_wiring.effective_retry_backoff(
+        config,
+        workflow,
+        effective_retry_backoff_primitives=_effective_retry_backoff_primitives,
     )
 
 
@@ -625,17 +615,13 @@ def _retry_backoff_active(
     max_seconds: int,
 ) -> bool:
     """Return True when a recent failed attempt is still cooling down."""
-    latest = db.latest_session_for_issue(issue_ref)
-    if latest is None:
-        return False
-    due_at = _session_retry_due_at(
-        latest,
+    return _selection_retry_wiring.retry_backoff_active(
+        db,
+        issue_ref,
         base_seconds=base_seconds,
         max_seconds=max_seconds,
+        session_retry_due_at=_session_retry_due_at,
     )
-    if due_at is None:
-        return False
-    return datetime.now(timezone.utc) < due_at
 
 
 def _session_retry_state(
@@ -646,40 +632,16 @@ def _session_retry_state(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Return retry metadata for a session."""
-    current = now or datetime.now(timezone.utc)
-    repo_prefix = session.repo_prefix
-    if repo_prefix is None:
-        try:
-            repo_prefix = parse_issue_ref(session.issue_ref).prefix
-        except ValueError:
-            repo_prefix = None
-    workflow = workflows.get(repo_prefix) if repo_prefix is not None else None
-    base_seconds, max_seconds = _effective_retry_backoff(config, workflow)
-    due_at = _session_retry_due_at(
+    return _selection_retry_wiring.session_retry_state(
         session,
-        base_seconds=base_seconds,
-        max_seconds=max_seconds,
+        config=config,
+        workflows=workflows,
+        parse_issue_ref=parse_issue_ref,
+        effective_retry_backoff=_effective_retry_backoff,
+        session_retry_due_at=_session_retry_due_at,
+        retry_delay_seconds=_retry_delay_seconds,
+        now=now,
     )
-    retry_delay_seconds: int | None = None
-    retry_remaining_seconds: int | None = None
-    if due_at is not None:
-        retry_count = session.retry_count or 1
-        retry_delay_seconds = _retry_delay_seconds(
-            retry_count,
-            base_seconds=base_seconds,
-            max_seconds=max_seconds,
-        )
-        retry_remaining_seconds = max(0, int((due_at - current).total_seconds()))
-    return {
-        "failure_reason": session.failure_reason,
-        "retry_count": session.retry_count,
-        "retryable": due_at is not None,
-        "retry_backoff_base_seconds": base_seconds,
-        "retry_backoff_max_seconds": max_seconds,
-        "retry_delay_seconds": retry_delay_seconds,
-        "next_retry_at": due_at.isoformat() if due_at is not None else None,
-        "retry_remaining_seconds": retry_remaining_seconds,
-    }
 
 
 def _repo_root_for_issue_ref(config: ConsumerConfig, issue_ref: str) -> Path:
@@ -969,7 +931,7 @@ def _select_best_candidate(
     Skips items with unmet graph dependencies.
     Returns issue_ref (e.g. "crew#84") or None.
     """
-    return _selection_helpers.select_best_candidate(
+    return _selection_retry_wiring.select_best_candidate(
         config,
         project_owner,
         project_number,
@@ -1000,7 +962,7 @@ def _list_project_items_by_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
     """Compatibility helper that reads board snapshots through ReviewStatePort."""
-    return _selection_helpers.list_project_items_by_status(
+    return _selection_retry_wiring.list_project_items_by_status(
         status,
         project_owner,
         project_number,
@@ -3083,7 +3045,7 @@ def _select_candidate_for_cycle(
     excluded_issue_refs: set[str] | None = None,
 ) -> str | None:
     """Select the next eligible issue for one slot in this cycle."""
-    return _claim_helpers.select_candidate_for_cycle(
+    return _selection_retry_wiring.select_candidate_for_cycle(
         config,
         db,
         prepared,
@@ -3503,7 +3465,7 @@ def _select_launch_candidate_for_cycle(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]:
     """Select a launch candidate and validate its immediate launchability."""
-    return _claim_helpers.select_launch_candidate_for_cycle(
+    return _selection_retry_wiring.select_launch_candidate_for_cycle(
         config=config,
         db=db,
         prepared=prepared,
