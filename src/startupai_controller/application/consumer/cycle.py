@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from startupai_controller.domain.models import CycleResult
-from startupai_controller.ports.process_runner import ProcessRunnerPort
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ def run_prepared_cycle(
     target_issue: str | None = None,
     launch_context: Any | None = None,
     slot_id_override: int | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GhRunnerPort | None = None,
     process_runner: ProcessRunnerPort | None = None,
     file_reader: Callable[[Path], str] | None = None,
     status_resolver: Callable[..., str] | None = None,
@@ -71,7 +71,7 @@ def run_prepared_cycle(
         subprocess_runner=process_runner.run if process_runner is not None else None,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     if cycle_result is not None:
         return cycle_result
@@ -88,7 +88,7 @@ def run_prepared_cycle(
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     if cycle_result is not None:
         return cycle_result
@@ -106,7 +106,7 @@ def run_prepared_cycle(
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
 
     return deps.finalize_claimed_session(
@@ -119,5 +119,5 @@ def run_prepared_cycle(
         board_info_resolver=board_info_resolver,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
