@@ -30,7 +30,6 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable
 
 
@@ -271,7 +270,6 @@ from startupai_controller.domain.review_queue_policy import (
     REVIEW_QUEUE_PENDING_RETRY_SECONDS,
     REVIEW_QUEUE_SKIPPED_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
-    REVIEW_QUEUE_STABLE_RESULTS,
     blocked_streak_needs_escalation as _blocked_streak_needs_escalation,
     blocker_class as _blocker_class,
     effective_retry_backoff as _effective_retry_backoff_primitives,
@@ -1691,35 +1689,18 @@ def _repark_unchanged_review_queue_entries(
     now: datetime,
 ) -> None:
     """Re-schedule unchanged review entries without rehydrating the full PR state."""
-    for entry in entries:
-        synthetic_result = SimpleNamespace(
-            rerun_checks=(),
-            auto_merge_enabled=entry.last_result == "auto_merge_enabled",
-            requeued_refs=(),
-            blocked_reason=entry.last_reason if entry.last_result == "blocked" else None,
-            skipped_reason=entry.last_reason if entry.last_result == "skipped" else None,
-        )
-        retry_seconds = _review_queue_retry_seconds_for_result(synthetic_result)
-        if entry.last_result == "partial_failure":
-            retry_seconds = max(DEFAULT_REVIEW_QUEUE_RETRY_SECONDS, retry_seconds)
-        _apply_review_queue_result(
-            store,
-            entry,
-            synthetic_result,
-            now=now,
-            retry_seconds=retry_seconds,
-        )
+    _review_queue_helpers.repark_unchanged_review_queue_entries(
+        store,
+        entries,
+        now=now,
+    )
 
 
 def _review_queue_state_probe_candidates(
     entries: list[ReviewQueueEntry],
 ) -> list[ReviewQueueEntry]:
     """Return review entries whose PR state can be tracked cheaply via digest."""
-    return [
-        entry
-        for entry in entries
-        if entry.last_result in REVIEW_QUEUE_STABLE_RESULTS
-    ]
+    return _review_queue_helpers.review_queue_state_probe_candidates(entries)
 
 
 def _partition_review_queue_entries_by_probe_change(
@@ -1728,41 +1709,10 @@ def _partition_review_queue_entries_by_probe_change(
     pr_port: PullRequestPort,
 ) -> tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]:
     """Split queued review entries into changed vs unchanged probe state."""
-    unchanged: list[ReviewQueueEntry] = []
-    changed: list[ReviewQueueEntry] = []
-    numbers_by_repo: dict[str, list[int]] = {}
-    for entry in entries:
-        if not (
-            entry.last_state_digest and entry.last_result in REVIEW_QUEUE_STABLE_RESULTS
-        ):
-            changed.append(entry)
-            continue
-        numbers_by_repo.setdefault(entry.pr_repo, []).append(entry.pr_number)
-
-    digests = pr_port.review_state_digests(
-        [
-            (pr_repo, pr_number)
-            for pr_repo, pr_numbers in sorted(numbers_by_repo.items())
-            for pr_number in sorted(set(pr_numbers))
-        ]
+    return _review_queue_helpers.partition_review_queue_entries_by_probe_change(
+        entries,
+        pr_port=pr_port,
     )
-
-    for entry in entries:
-        if not (
-            entry.last_state_digest and entry.last_result in REVIEW_QUEUE_STABLE_RESULTS
-        ):
-            continue
-        digest = digests.get((entry.pr_repo, entry.pr_number))
-        if (
-            entry.last_state_digest
-            and entry.last_result in REVIEW_QUEUE_STABLE_RESULTS
-            and digest
-            and digest == entry.last_state_digest
-        ):
-            unchanged.append(entry)
-        else:
-            changed.append(entry)
-    return changed, unchanged
 
 
 def _wakeup_changed_review_queue_entries(
@@ -1774,28 +1724,13 @@ def _wakeup_changed_review_queue_entries(
     dry_run: bool = False,
 ) -> tuple[str, ...]:
     """Promote parked review entries whose lightweight PR state has changed."""
-    candidates = [
-        entry
-        for entry in _review_queue_state_probe_candidates(entries)
-        if entry.last_state_digest and entry.next_attempt_datetime() > now
-    ]
-    if not candidates:
-        return ()
-    changed, _unchanged = _partition_review_queue_entries_by_probe_change(
-        candidates,
+    return _review_queue_helpers.wakeup_changed_review_queue_entries(
+        store,
+        entries,
+        now=now,
         pr_port=pr_port,
+        dry_run=dry_run,
     )
-    if not changed:
-        return ()
-    if not dry_run:
-        next_attempt_at = now.isoformat()
-        for entry in changed:
-            store.reschedule_review_queue_item(
-                entry.issue_ref,
-                next_attempt_at=next_attempt_at,
-                now=now,
-            )
-    return tuple(entry.issue_ref for entry in changed)
 
 
 def _build_review_snapshots_for_queue_entries(
@@ -2105,13 +2040,7 @@ def _process_due_review_group(
     )
 
 
-@dataclass(frozen=True)
-class ReviewRescueExecution:
-    """Result of executing rescue logic for one review PR."""
-
-    result: ReviewRescueResult
-    partial_failure: bool = False
-    error: str | None = None
+ReviewRescueExecution = _review_queue_helpers.ReviewRescueExecution
 
 
 def _build_review_queue_wiring_deps() -> _review_queue_wiring.ReviewQueueWiringDeps:
@@ -2157,27 +2086,18 @@ def _run_review_rescue_for_group(
     gh_runner: Callable[..., str] | None,
 ) -> ReviewRescueExecution:
     """Run rescue logic for one due review group."""
-    try:
-        return ReviewRescueExecution(
-            result=review_rescue(
-                pr_repo=pr_repo,
-                pr_number=pr_number,
-                config=critical_path_config,
-                automation_config=automation_config,
-                project_owner=config.project_owner,
-                project_number=config.project_number,
-                dry_run=dry_run,
-                snapshot=snapshot,
-                gh_runner=gh_runner,
-                pr_port=pr_port,
-            )
-        )
-    except GhQueryError as err:
-        return ReviewRescueExecution(
-            result=ReviewRescueResult(),
-            partial_failure=True,
-            error=str(err),
-        )
+    return _review_queue_helpers.run_review_rescue_for_group(
+        config=config,
+        critical_path_config=critical_path_config,
+        automation_config=automation_config,
+        pr_port=pr_port,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        snapshot=snapshot,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+        review_rescue_fn=review_rescue,
+    )
 
 
 def _apply_review_queue_group_result(
@@ -2341,32 +2261,11 @@ def _reconcile_review_queue_identity(
     When the active session's PR URL changes, update the queue entry and
     reset the requeue counter to avoid false escalation.
     """
-    for entry in store.list_review_queue_items():
-        if entry.issue_ref not in review_refs:
-            continue
-        current_pr_url = entry.pr_url
-        latest_session = store.latest_session_for_issue(entry.issue_ref)
-        if latest_session is not None and latest_session.pr_url:
-            current_pr_url = latest_session.pr_url
-        if current_pr_url != entry.pr_url:
-            parsed = _parse_pr_url(current_pr_url)
-            if parsed is None:
-                continue
-            owner, repo, pr_number = parsed
-            store.enqueue_review_item(
-                entry.issue_ref,
-                pr_url=current_pr_url,
-                pr_repo=f"{owner}/{repo}",
-                pr_number=pr_number,
-                source_session_id=(
-                    latest_session.id if latest_session is not None else entry.source_session_id
-                ),
-                next_attempt_at=entry.next_attempt_at,
-                now=now,
-            )
-        _count, stored_pr_url = store.get_requeue_state(entry.issue_ref)
-        if stored_pr_url is not None and stored_pr_url != current_pr_url:
-            store.reset_requeue_count(entry.issue_ref)
+    _review_queue_helpers.reconcile_review_queue_identity(
+        store,
+        review_refs,
+        now=now,
+    )
 
 
 def _replay_deferred_action(
