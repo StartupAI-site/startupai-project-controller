@@ -147,24 +147,8 @@ from startupai_controller.application.automation.ready_wiring import (
     wire_schedule_ready_items as _wiring_wire_schedule_ready_items,
     wire_claim_ready_issue as _wiring_wire_claim_ready_issue,
 )
-from startupai_controller.application.automation.audit_in_progress import (
-    audit_in_progress as _app_audit_in_progress,
-    wire_audit_in_progress as _wiring_audit_in_progress,
-)
-from startupai_controller.application.automation.dispatch_agent import (
-    dispatch_agent as _app_dispatch_agent,
-    wire_dispatch_agent as _wiring_dispatch_agent,
-)
-from startupai_controller.application.automation.execution_policy import (
-    enforce_execution_policy as _app_enforce_execution_policy,
-    wire_enforce_execution_policy as _wiring_enforce_execution_policy,
-)
 from startupai_controller.application.automation.codex_gate import (
     codex_review_gate as _app_codex_review_gate,
-)
-from startupai_controller.application.automation.rebalance import (
-    rebalance_wip as _app_rebalance_wip,
-    wire_rebalance_wip as _wiring_rebalance_wip,
 )
 from startupai_controller.application.automation.review_rescue import (
     automerge_review as _app_automerge_review,
@@ -198,9 +182,6 @@ from startupai_controller.application.automation.handoff_reconciliation import (
 from startupai_controller.application.automation.admission_helpers import (
     AdmissionPipelineDeps as _AdmissionPipelineDeps,
 )
-from startupai_controller.application.automation.codex_fail_routing import (
-    apply_codex_fail_routing as _app_apply_codex_fail_routing,
-)
 from startupai_controller.application.automation.executor_routing import (
     route_protected_queue_executors as _app_route_protected_queue_executors,
     protected_queue_executor_target as _app_protected_queue_executor_target,
@@ -217,7 +198,6 @@ from startupai_controller.automation_board_state_helpers import (
     set_status_if_changed as _helpers_set_status_if_changed,
     legacy_board_status_mutator as _helpers_legacy_board_status_mutator,
     set_blocked_with_reason as _helpers_set_blocked_with_reason,
-    transition_issue_status as _helpers_transition_issue_status,
     mark_issues_done as _helpers_mark_issues_done,
 )
 from startupai_controller.runtime.wiring import (
@@ -728,42 +708,6 @@ def _set_blocked_with_reason(
     )
 
 
-def _transition_issue_status(
-    issue_ref: str,
-    from_statuses: set[str],
-    to_status: str,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    dry_run: bool = False,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[bool, str]:
-    """Transition issue status through ports, with legacy fallback for tests."""
-    return _helpers_transition_issue_status(
-        issue_ref,
-        from_statuses,
-        to_status,
-        config,
-        project_owner,
-        project_number,
-        dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=_default_review_state_port,
-        default_board_mutation_port_fn=_default_board_mutation_port,
-        legacy_board_status_mutator_fn=_legacy_board_status_mutator,
-        app_transition_issue_status_fn=_app_transition_issue_status,
-    )
-
-
 def _wip_limit_for_lane(
     automation_config: BoardAutomationConfig | None,
     executor: str,
@@ -816,42 +760,6 @@ def _has_copilot_review_signal(
         project_number=project_number,
         gh_runner=gh_runner,
         default_pr_port_fn=_default_pr_port,
-    )
-
-
-def _apply_codex_fail_routing(
-    issue_ref: str,
-    route: str,
-    checklist: list[str],
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    dry_run: bool = False,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Route failed codex review back to In Progress with explicit handoff."""
-    _app_apply_codex_fail_routing(
-        issue_ref,
-        route,
-        checklist,
-        config,
-        project_owner,
-        project_number,
-        dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        gh_runner=gh_runner,
-        transition_issue_status_fn=_transition_issue_status,
-        default_review_state_port_fn=_default_review_state_port,
-        default_board_mutation_port_fn=_default_board_mutation_port,
-        query_project_item_field_fn=_query_project_item_field,
-        issue_ref_to_repo_parts_fn=_issue_ref_to_repo_parts,
-        comment_exists_fn=_comment_exists,
     )
 
 
@@ -1449,151 +1357,6 @@ def enforce_ready_dependency_guard(
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: audit-in-progress
-# ---------------------------------------------------------------------------
-
-
-def audit_in_progress(
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    max_age_hours: int = 24,
-    this_repo_prefix: str | None = None,
-    all_prefixes: bool = False,
-    dry_run: bool = False,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> list[str]:
-    """Escalate stale In Progress issues with no linked PR."""
-    return _wiring_audit_in_progress(
-        config,
-        project_owner,
-        project_number,
-        max_age_hours=max_age_hours,
-        this_repo_prefix=this_repo_prefix,
-        all_prefixes=all_prefixes,
-        dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=_default_review_state_port,
-        default_board_mutation_port_fn=_default_board_mutation_port,
-        list_project_items_by_status_fn=_list_project_items_by_status,
-        query_issue_board_info_fn=_query_issue_board_info,
-        set_single_select_field_fn=_set_single_select_field,
-        comment_exists_fn=_comment_exists,
-        post_comment_fn=_post_comment,
-        query_project_item_field_fn=_query_project_item_field,
-        query_issue_updated_at_fn=_query_issue_updated_at,
-        snapshot_to_issue_ref_fn=_snapshot_to_issue_ref,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Subcommand: dispatch-agent
-# ---------------------------------------------------------------------------
-
-
-def dispatch_agent(
-    issue_refs: list[str],
-    config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    dry_run: bool = False,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> DispatchResult:
-    """Dispatch eligible In Progress issues according to dispatch target."""
-    return _wiring_dispatch_agent(
-        issue_refs,
-        config,
-        automation_config,
-        project_owner,
-        project_number,
-        dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=_default_review_state_port,
-        default_board_mutation_port_fn=_default_board_mutation_port,
-        query_issue_board_info_fn=_query_issue_board_info,
-        query_project_item_field_fn=_query_project_item_field,
-        comment_exists_fn=_comment_exists,
-        post_comment_fn=_post_comment,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Subcommand: rebalance-wip
-# ---------------------------------------------------------------------------
-
-
-def rebalance_wip(
-    config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    this_repo_prefix: str | None = None,
-    all_prefixes: bool = False,
-    cycle_minutes: int = DEFAULT_REBALANCE_CYCLE_MINUTES,
-    dry_run: bool = False,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> RebalanceDecision:
-    """Rebalance In Progress lanes with stale demotion and dependency blocking."""
-    return _wiring_rebalance_wip(
-        config,
-        automation_config,
-        project_owner,
-        project_number,
-        this_repo_prefix=this_repo_prefix,
-        all_prefixes=all_prefixes,
-        cycle_minutes=cycle_minutes,
-        dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        status_resolver=status_resolver,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=_default_review_state_port,
-        default_board_mutation_port_fn=_default_board_mutation_port,
-        list_project_items_by_status_fn=_list_project_items_by_status,
-        is_graph_member_fn=in_any_critical_path,
-        ready_promotion_evaluator_fn=evaluate_ready_promotion,
-        set_blocked_with_reason_fn=_set_blocked_with_reason,
-        set_handoff_target_fn=_set_handoff_target,
-        query_project_item_field_fn=_query_project_item_field,
-        query_open_pr_updated_at_fn=_query_open_pr_updated_at,
-        query_latest_wip_activity_timestamp_fn=_query_latest_wip_activity_timestamp,
-        query_latest_marker_timestamp_fn=_query_latest_marker_timestamp,
-        comment_exists_fn=_comment_exists,
-        transition_issue_status_fn=_transition_issue_status,
-        snapshot_to_issue_ref_fn=_snapshot_to_issue_ref,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Subcommand: sync-review-state
 # ---------------------------------------------------------------------------
 
@@ -1896,56 +1659,17 @@ def automerge_review(
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: enforce-execution-policy
+# Execution/advisory wiring (implementations in automation_execution_wiring.py)
 # ---------------------------------------------------------------------------
 
-
-# ExecutionPolicyDecision — imported from domain.models (M5)
-
-
-def enforce_execution_policy(
-    pr_repo: str,
-    pr_number: int,
-    config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    *,
-    allow_copilot_coding_agent: bool = False,
-    dry_run: bool = False,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> ExecutionPolicyDecision:
-    """Enforce local execution authority for protected coding PRs."""
-    return _wiring_enforce_execution_policy(
-        pr_repo,
-        pr_number,
-        config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        allow_copilot_coding_agent=allow_copilot_coding_agent,
-        dry_run=dry_run,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        default_pr_port_fn=_default_pr_port,
-        is_copilot_actor_fn=_is_copilot_coding_agent_actor,
-        query_project_item_field_fn=_query_project_item_field,
-        set_status_if_changed_fn=_set_status_if_changed,
-        query_issue_assignees_fn=_query_issue_assignees,
-        set_issue_assignees_fn=_set_issue_assignees,
-        comment_exists_fn=_comment_exists,
-        post_comment_fn=_post_comment,
-        close_pull_request_fn=close_pull_request,
-        query_closing_issues_fn=query_closing_issues,
-    )
-
-
-# ---------------------------------------------------------------------------
-# CLI Parser
-# ---------------------------------------------------------------------------
+from startupai_controller.automation_execution_wiring import (  # noqa: E402
+    _transition_issue_status,
+    _apply_codex_fail_routing,
+    audit_in_progress,
+    dispatch_agent,
+    rebalance_wip,
+    enforce_execution_policy,
+)
 
 
 # ---------------------------------------------------------------------------
