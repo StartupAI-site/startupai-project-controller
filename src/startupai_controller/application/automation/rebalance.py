@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
@@ -25,6 +25,10 @@ from startupai_controller.validate_critical_path_promotion import (
     direct_predecessors,
     parse_issue_ref,
 )
+
+if TYPE_CHECKING:
+    from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
+    from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
 
 
 @dataclass(frozen=True)
@@ -501,3 +505,157 @@ def rebalance_wip(
         )
 
     return decision
+
+
+# ---------------------------------------------------------------------------
+# Wiring entry-points (port materialisation + delegation)
+# ---------------------------------------------------------------------------
+
+
+def load_rebalance_in_progress_items(
+    *,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    review_state_port: _ReviewStatePort | None,
+    board_port: _BoardMutationPort | None,
+    board_info_resolver: Callable[..., object] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    # Injected board-automation helpers
+    default_review_state_port_fn: Callable[..., object] | None = None,
+    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    list_project_items_by_status_fn: Callable[..., list] | None = None,
+) -> tuple[bool, _ReviewStatePort | None, _BoardMutationPort | None, list[IssueSnapshot]]:
+    """Load the current In Progress set for WIP rebalance."""
+    use_ports = (
+        board_info_resolver is None and board_mutator is None
+    ) or review_state_port is not None or board_port is not None
+    if use_ports:
+        review_state_port = review_state_port or default_review_state_port_fn(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port = board_port or default_board_mutation_port_fn(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        in_progress = review_state_port.list_issues_by_status("In Progress")
+    else:
+        in_progress = list_project_items_by_status_fn(
+            "In Progress",
+            project_owner,
+            project_number,
+            gh_runner=gh_runner,
+        )
+    return use_ports, review_state_port, board_port, in_progress
+
+
+def ensure_rebalance_board_port(
+    board_port: _BoardMutationPort | None,
+    *,
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    gh_runner: Callable[..., str] | None,
+    # Injected board-automation helper
+    default_board_mutation_port_fn: Callable[..., object] | None = None,
+) -> _BoardMutationPort:
+    """Materialize a board mutation port when the rebalance flow needs one."""
+    return board_port or default_board_mutation_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+
+
+def wire_rebalance_wip(
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    this_repo_prefix: str | None = None,
+    all_prefixes: bool = False,
+    cycle_minutes: int = DEFAULT_REBALANCE_CYCLE_MINUTES,
+    dry_run: bool = False,
+    review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
+    board_info_resolver: Callable[..., object] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+    # Injected board-automation helpers
+    default_review_state_port_fn: Callable[..., object] | None = None,
+    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    list_project_items_by_status_fn: Callable[..., list] | None = None,
+    is_graph_member_fn: Callable[..., bool] | None = None,
+    ready_promotion_evaluator_fn: Callable[..., tuple[int, str]] | None = None,
+    set_blocked_with_reason_fn: Callable[..., None] | None = None,
+    set_handoff_target_fn: Callable[..., None] | None = None,
+    query_project_item_field_fn: Callable[..., str] | None = None,
+    query_open_pr_updated_at_fn: Callable[..., datetime | None] | None = None,
+    query_latest_wip_activity_timestamp_fn: Callable[..., datetime | None] | None = None,
+    query_latest_marker_timestamp_fn: Callable[..., datetime | None] | None = None,
+    comment_exists_fn: Callable[..., bool] | None = None,
+    transition_issue_status_fn: Callable[..., tuple[bool, str]] | None = None,
+    snapshot_to_issue_ref_fn: Callable[..., str | None] | None = None,
+) -> RebalanceDecision:
+    """Wire port materialization, then delegate to core rebalance."""
+    use_ports, review_state_port, board_port, in_progress = (
+        load_rebalance_in_progress_items(
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+            default_review_state_port_fn=default_review_state_port_fn,
+            default_board_mutation_port_fn=default_board_mutation_port_fn,
+            list_project_items_by_status_fn=list_project_items_by_status_fn,
+        )
+    )
+    return rebalance_wip(
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        in_progress_items=in_progress,
+        use_ports=use_ports,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        cycle_minutes=cycle_minutes,
+        dry_run=dry_run,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        status_resolver=status_resolver,
+        gh_runner=gh_runner,
+        is_graph_member=is_graph_member_fn,
+        ready_promotion_evaluator=ready_promotion_evaluator_fn,
+        set_blocked_with_reason=set_blocked_with_reason_fn,
+        set_handoff_target=set_handoff_target_fn,
+        query_project_item_field=query_project_item_field_fn,
+        query_open_pr_updated_at=query_open_pr_updated_at_fn,
+        query_latest_wip_activity_timestamp=query_latest_wip_activity_timestamp_fn,
+        query_latest_marker_timestamp=query_latest_marker_timestamp_fn,
+        comment_exists=comment_exists_fn,
+        ensure_board_port=lambda current_board_port: ensure_rebalance_board_port(
+            current_board_port,
+            project_owner=project_owner,
+            project_number=project_number,
+            config=config,
+            gh_runner=gh_runner,
+            default_board_mutation_port_fn=default_board_mutation_port_fn,
+        ),
+        transition_issue_status=transition_issue_status_fn,
+        snapshot_to_issue_ref=snapshot_to_issue_ref_fn,
+    )

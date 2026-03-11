@@ -145,18 +145,22 @@ from startupai_controller.application.automation.ready_dependencies import (
 )
 from startupai_controller.application.automation.audit_in_progress import (
     audit_in_progress as _app_audit_in_progress,
+    wire_audit_in_progress as _wiring_audit_in_progress,
 )
 from startupai_controller.application.automation.dispatch_agent import (
     dispatch_agent as _app_dispatch_agent,
+    wire_dispatch_agent as _wiring_dispatch_agent,
 )
 from startupai_controller.application.automation.execution_policy import (
     enforce_execution_policy as _app_enforce_execution_policy,
+    wire_enforce_execution_policy as _wiring_enforce_execution_policy,
 )
 from startupai_controller.application.automation.codex_gate import (
     codex_review_gate as _app_codex_review_gate,
 )
 from startupai_controller.application.automation.rebalance import (
     rebalance_wip as _app_rebalance_wip,
+    wire_rebalance_wip as _wiring_rebalance_wip,
 )
 from startupai_controller.application.automation.review_rescue import (
     automerge_review as _app_automerge_review,
@@ -2046,99 +2050,30 @@ def audit_in_progress(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Escalate stale In Progress issues with no linked PR."""
-    use_ports = (
-        board_info_resolver is None
-    ) or review_state_port is not None or board_port is not None
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        in_progress_items = review_state_port.list_issues_by_status("In Progress")
-    else:
-        in_progress_items = _list_project_items_by_status(
-            "In Progress", project_owner, project_number, gh_runner=gh_runner
-        )
-    checker = comment_checker or _comment_exists
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info_cache: dict[str, BoardInfo] = {}
-
-    def _resolve_status(ref: str) -> str:
-        if use_ports:
-            return review_state_port.get_issue_status(ref)
-        info = info_cache.get(ref)
-        if info is None:
-            info = resolve_info(ref, config, project_owner, project_number)
-            info_cache[ref] = info
-        return info.status
-
-    def _set_handoff(ref: str) -> None:
-        info = info_cache.get(ref)
-        if info is None:
-            info = resolve_info(ref, config, project_owner, project_number)
-            info_cache[ref] = info
-        _set_single_select_field(
-            info.project_id,
-            info.item_id,
-            "Handoff To",
-            "claude",
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-        )
-
-    def _post_audit_comment(
-        owner: str,
-        repo: str,
-        number: int,
-        body: str,
-        *,
-        gh_runner: Callable[..., str] | None = None,
-    ) -> None:
-        if comment_poster is not None:
-            comment_poster(owner, repo, number, body, gh_runner=gh_runner)
-            return
-        _post_comment(
-            owner,
-            repo,
-            number,
-            body,
-            board_port=board_port,
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-        )
-
-    return _app_audit_in_progress(
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        in_progress_items=in_progress_items,
-        use_ports=use_ports,
-        review_state_port=review_state_port,
-        board_port=board_port,
+    return _wiring_audit_in_progress(
+        config,
+        project_owner,
+        project_number,
         max_age_hours=max_age_hours,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
         gh_runner=gh_runner,
-        resolve_issue_status=_resolve_status,
-        query_project_item_field=_query_project_item_field,
-        query_issue_updated_at=_query_issue_updated_at,
-        comment_exists=checker,
-        post_comment=_post_audit_comment,
-        set_handoff_target=_set_handoff,
-        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        list_project_items_by_status_fn=_list_project_items_by_status,
+        query_issue_board_info_fn=_query_issue_board_info,
+        set_single_select_field_fn=_set_single_select_field,
+        comment_exists_fn=_comment_exists,
+        post_comment_fn=_post_comment,
+        query_project_item_field_fn=_query_project_item_field,
+        query_issue_updated_at_fn=_query_issue_updated_at,
+        snapshot_to_issue_ref_fn=_snapshot_to_issue_ref,
     )
 
 
@@ -2162,139 +2097,30 @@ def dispatch_agent(
     gh_runner: Callable[..., str] | None = None,
 ) -> DispatchResult:
     """Dispatch eligible In Progress issues according to dispatch target."""
-    target = automation_config.dispatch_target
-    use_ports = (board_info_resolver is None) or review_state_port is not None or board_port is not None
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    resolve_info = board_info_resolver or _query_issue_board_info
-
-    def _resolve_status(issue_ref: str) -> str | None:
-        if use_ports:
-            return review_state_port.get_issue_status(issue_ref)
-        return resolve_info(
-            issue_ref,
-            config,
-            project_owner,
-            project_number,
-        ).status
-
-    def _resolve_executor(issue_ref: str) -> str:
-        if use_ports:
-            return review_state_port.get_issue_fields(issue_ref).executor
-        return _query_project_item_field(
-            issue_ref,
-            "Executor",
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        )
-
-    def _post_dispatch_comment(
-        owner: str,
-        repo: str,
-        number: int,
-        body: str,
-        *,
-        gh_runner: Callable[..., str] | None = None,
-    ) -> None:
-        if use_ports:
-            board_port.post_issue_comment(f"{owner}/{repo}", number, body)
-            return
-        _post_comment(
-            owner,
-            repo,
-            number,
-            body,
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-        )
-
-    return _app_dispatch_agent(
-        issue_refs=issue_refs,
-        config=config,
-        dispatch_target=target,
+    return _wiring_dispatch_agent(
+        issue_refs,
+        config,
+        automation_config,
+        project_owner,
+        project_number,
         dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
         gh_runner=gh_runner,
-        resolve_issue_status=_resolve_status,
-        resolve_executor=_resolve_executor,
-        comment_exists=_comment_exists,
-        post_comment=_post_dispatch_comment,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        query_issue_board_info_fn=_query_issue_board_info,
+        query_project_item_field_fn=_query_project_item_field,
+        comment_exists_fn=_comment_exists,
+        post_comment_fn=_post_comment,
     )
 
 
 # ---------------------------------------------------------------------------
 # Subcommand: rebalance-wip
 # ---------------------------------------------------------------------------
-
-
-def _load_rebalance_in_progress_items(
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[bool, _ReviewStatePort | None, _BoardMutationPort | None, list[IssueSnapshot]]:
-    """Load the current In Progress set for WIP rebalance."""
-    use_ports = (
-        board_info_resolver is None and board_mutator is None
-    ) or review_state_port is not None or board_port is not None
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        in_progress = review_state_port.list_issues_by_status("In Progress")
-    else:
-        in_progress = _list_project_items_by_status(
-            "In Progress",
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        )
-    return use_ports, review_state_port, board_port, in_progress
-
-
-def _ensure_rebalance_board_port(
-    board_port: _BoardMutationPort | None,
-    *,
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    gh_runner: Callable[..., str] | None,
-) -> _BoardMutationPort:
-    """Materialize a board mutation port when the rebalance flow needs one."""
-    return board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
 
 
 def rebalance_wip(
@@ -2315,53 +2141,35 @@ def rebalance_wip(
     gh_runner: Callable[..., str] | None = None,
 ) -> RebalanceDecision:
     """Rebalance In Progress lanes with stale demotion and dependency blocking."""
-    use_ports, review_state_port, board_port, in_progress = (
-        _load_rebalance_in_progress_items(
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-    )
-    return _app_rebalance_wip(
-        config=config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        in_progress_items=in_progress,
-        use_ports=use_ports,
-        review_state_port=review_state_port,
-        board_port=board_port,
+    return _wiring_rebalance_wip(
+        config,
+        automation_config,
+        project_owner,
+        project_number,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         cycle_minutes=cycle_minutes,
         dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         status_resolver=status_resolver,
         gh_runner=gh_runner,
-        is_graph_member=in_any_critical_path,
-        ready_promotion_evaluator=evaluate_ready_promotion,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        set_handoff_target=_set_handoff_target,
-        query_project_item_field=_query_project_item_field,
-        query_open_pr_updated_at=_query_open_pr_updated_at,
-        query_latest_wip_activity_timestamp=_query_latest_wip_activity_timestamp,
-        query_latest_marker_timestamp=_query_latest_marker_timestamp,
-        comment_exists=_comment_exists,
-        ensure_board_port=lambda current_board_port: _ensure_rebalance_board_port(
-            current_board_port,
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-        ),
-        transition_issue_status=_transition_issue_status,
-        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        list_project_items_by_status_fn=_list_project_items_by_status,
+        is_graph_member_fn=in_any_critical_path,
+        ready_promotion_evaluator_fn=evaluate_ready_promotion,
+        set_blocked_with_reason_fn=_set_blocked_with_reason,
+        set_handoff_target_fn=_set_handoff_target,
+        query_project_item_field_fn=_query_project_item_field,
+        query_open_pr_updated_at_fn=_query_open_pr_updated_at,
+        query_latest_wip_activity_timestamp_fn=_query_latest_wip_activity_timestamp,
+        query_latest_marker_timestamp_fn=_query_latest_marker_timestamp,
+        comment_exists_fn=_comment_exists,
+        transition_issue_status_fn=_transition_issue_status,
+        snapshot_to_issue_ref_fn=_snapshot_to_issue_ref,
     )
 
 
@@ -2690,29 +2498,10 @@ def enforce_execution_policy(
     gh_runner: Callable[..., str] | None = None,
 ) -> ExecutionPolicyDecision:
     """Enforce local execution authority for protected coding PRs."""
-    if "/" not in pr_repo:
-        raise ConfigError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
-
-    pr_context = _app_load_execution_policy_pr_context(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        project_owner=project_owner,
-        project_number=project_number,
-        gh_runner=gh_runner,
-        default_pr_port_fn=_default_pr_port,
-    )
-    actor = pr_context.actor
-    state = pr_context.state
-    provenance = pr_context.provenance
-    owner, repo = pr_repo.split("/", maxsplit=1)
-    return _app_enforce_execution_policy(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        actor=actor,
-        state=state,
-        pr_url=pr_context.url,
-        provenance=provenance,
-        config=config,
+    return _wiring_enforce_execution_policy(
+        pr_repo,
+        pr_number,
+        config,
         automation_config=automation_config,
         project_owner=project_owner,
         project_number=project_number,
@@ -2721,21 +2510,16 @@ def enforce_execution_policy(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        is_copilot_actor=_is_copilot_coding_agent_actor,
-        query_issue_executor=_query_project_item_field,
-        set_status_if_changed=_set_status_if_changed,
-        query_issue_assignees=_query_issue_assignees,
-        set_issue_assignees=_set_issue_assignees,
-        comment_exists=_comment_exists,
-        post_comment=_post_comment,
-        close_pull_request=close_pull_request,
-        load_linked_issues=lambda: query_closing_issues(
-            owner,
-            repo,
-            pr_number,
-            config,
-            gh_runner=gh_runner,
-        ),
+        default_pr_port_fn=_default_pr_port,
+        is_copilot_actor_fn=_is_copilot_coding_agent_actor,
+        query_project_item_field_fn=_query_project_item_field,
+        set_status_if_changed_fn=_set_status_if_changed,
+        query_issue_assignees_fn=_query_issue_assignees,
+        set_issue_assignees_fn=_set_issue_assignees,
+        comment_exists_fn=_comment_exists,
+        post_comment_fn=_post_comment,
+        close_pull_request_fn=close_pull_request,
+        query_closing_issues_fn=query_closing_issues,
     )
 
 
