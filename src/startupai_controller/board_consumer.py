@@ -35,13 +35,10 @@ from typing import TYPE_CHECKING, Any, Callable
 
 
 from startupai_controller.board_automation import (
-    admission_summary_payload,
-    admit_backlog_items,
     mark_issues_done,
     _set_blocked_with_reason,
     claim_ready_issue,
     review_rescue,
-    route_protected_queue_executors,
     sync_review_state,
 )
 from startupai_controller.board_automation_config import (
@@ -108,6 +105,7 @@ from startupai_controller.consumer_workflow import (
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
@@ -116,6 +114,7 @@ from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
     build_gh_runner_port,
     build_process_runner_port,
+    build_ready_flow_port,
     build_session_store,
     build_worktree_port,
     clear_github_runtime_caches,
@@ -393,6 +392,7 @@ class CycleRuntimeContext:
     effective_interval: int
     global_limit: int
     github_memo: CycleGitHubMemo
+    ready_flow_port: ReadyFlowPort
     pr_port: PullRequestPort
     review_state_port: ReviewStatePort
 
@@ -4220,6 +4220,7 @@ def _initialize_cycle_runtime(
         effective_interval=effective_interval,
         global_limit=global_limit,
         github_memo=github_memo,
+        ready_flow_port=build_ready_flow_port(),
         pr_port=github_ports.pull_requests,
         review_state_port=github_ports.review_state,
     )
@@ -4286,7 +4287,7 @@ def _run_executor_routing_phase(
 ) -> None:
     """Normalize executor routing for the protected queue."""
     phase_started = time.monotonic()
-    routing_decision = route_protected_queue_executors(
+    routing_decision = runtime.ready_flow_port.route_protected_queue_executors(
         runtime.cp_config,
         runtime.auto_config,
         config.project_owner,
@@ -4402,7 +4403,7 @@ def _run_admission_phase(
 ) -> dict[str, Any]:
     """Run backlog admission for the current cycle."""
     phase_started = time.monotonic()
-    admission_decision = admit_backlog_items(
+    admission_decision = runtime.ready_flow_port.admit_backlog_items(
         runtime.cp_config,
         runtime.auto_config,
         config.project_owner,
@@ -4415,7 +4416,7 @@ def _run_admission_phase(
         gh_runner=gh_runner,
     )
     timings_ms["admission"] = int((time.monotonic() - phase_started) * 1000)
-    admission_summary = admission_summary_payload(
+    admission_summary = runtime.ready_flow_port.admission_summary_payload(
         admission_decision,
         enabled=bool(
             runtime.auto_config is not None and runtime.auto_config.admission.enabled
