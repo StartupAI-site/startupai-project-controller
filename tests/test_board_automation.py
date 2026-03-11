@@ -3888,6 +3888,7 @@ def test_rebalance_wip_uses_ports_for_ready_demote_and_comment(
     """Lane overflow demotion can flow through ports."""
     config = _load(tmp_path)
     policy = _automation_config()
+    now = automation.datetime.now(automation.timezone.utc)
     board_calls: list[tuple[str, str]] = []
     review_state_port = _fake_review_state_port(
         snapshots_by_status={
@@ -3921,9 +3922,9 @@ def test_rebalance_wip_uses_ports_for_ready_demote_and_comment(
         automation,
         "_query_latest_wip_activity_timestamp",
         lambda ref, *a, **k: (
-            automation.datetime(2026, 3, 10, 12, 0, tzinfo=automation.timezone.utc)
+            now - automation.timedelta(hours=1)
             if ref == "crew#88"
-            else automation.datetime(2026, 3, 10, 11, 0, tzinfo=automation.timezone.utc)
+            else now - automation.timedelta(hours=2)
         ),
     )
     monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)

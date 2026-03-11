@@ -131,6 +131,9 @@ from startupai_controller.application.automation.ready_claim import (
     claim_ready_issue as _app_claim_ready_issue,
     schedule_ready_items as _app_schedule_ready_items,
 )
+from startupai_controller.application.automation.codex_gate import (
+    codex_review_gate as _app_codex_review_gate,
+)
 from startupai_controller.application.automation.review_rescue import (
     automerge_review as _app_automerge_review,
     review_rescue as _app_review_rescue,
@@ -4030,12 +4033,6 @@ def codex_review_gate(
         config,
         gh_runner=gh_runner,
     )
-    if not linked:
-        return 0, (
-            f"{pr_repo}#{pr_number}: codex gate not applicable "
-            "(no linked issues)"
-        )
-
     review_refs = _review_scope_refs(
         pr_repo,
         pr_number,
@@ -4044,47 +4041,34 @@ def codex_review_gate(
         project_number,
         gh_runner=gh_runner,
     )
-    if not review_refs:
-        refs = [issue.ref for issue in linked]
-        return 0, (
-            f"{pr_repo}#{pr_number}: codex gate not applicable "
-            f"(linked issues not in Review: {refs})"
-        )
-
     verdict = query_latest_codex_verdict(
         pr_repo,
         pr_number,
         trusted_actors=automation_config.trusted_codex_actors,
         gh_runner=gh_runner,
     )
-    if verdict is None:
-        return 2, (
-            f"{pr_repo}#{pr_number}: missing codex verdict marker "
-            "(codex-review: pass|fail from trusted actor)"
+
+    def _fail_router(**kwargs) -> None:
+        _apply_codex_fail_routing(
+            issue_ref=kwargs["issue_ref"],
+            route=kwargs["route"],
+            checklist=kwargs["checklist"],
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            dry_run=kwargs["dry_run"],
+            gh_runner=gh_runner,
         )
 
-    if verdict.decision == "pass":
-        return 0, (
-            f"{pr_repo}#{pr_number}: codex-review=pass "
-            f"(source={verdict.source}, actor={verdict.actor})"
-        )
-
-    if apply_fail_routing:
-        for issue_ref in review_refs:
-            _apply_codex_fail_routing(
-                issue_ref=issue_ref,
-                route=verdict.route,
-                checklist=verdict.checklist,
-                config=config,
-                project_owner=project_owner,
-                project_number=project_number,
-                dry_run=dry_run,
-                gh_runner=gh_runner,
-            )
-
-    return 2, (
-        f"{pr_repo}#{pr_number}: codex-review=fail "
-        f"(route={verdict.route}, source={verdict.source}, actor={verdict.actor})"
+    return _app_codex_review_gate(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        linked_refs=[issue.ref for issue in linked],
+        review_refs=review_refs,
+        verdict=verdict,
+        dry_run=dry_run,
+        apply_fail_routing=apply_fail_routing,
+        fail_router=_fail_router,
     )
 
 
