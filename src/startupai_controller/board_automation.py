@@ -133,6 +133,9 @@ from startupai_controller.application.automation.ready_claim import (
     claim_ready_issue as _app_claim_ready_issue,
     schedule_ready_items as _app_schedule_ready_items,
 )
+from startupai_controller.application.automation.ready_dependencies import (
+    enforce_ready_dependency_guard as _app_enforce_ready_dependency_guard,
+)
 from startupai_controller.application.automation.audit_in_progress import (
     audit_in_progress as _app_audit_in_progress,
 )
@@ -2946,31 +2949,21 @@ def enforce_ready_dependency_guard(
         config,
         gh_runner=gh_runner,
     )
-    unmet = find_unmet_ready_dependencies(
+    return _app_enforce_ready_dependency_guard(
         config=config,
+        project_owner=project_owner,
+        project_number=project_number,
         ready_items=review_state_port.list_issues_by_status("Ready"),
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
+        dry_run=dry_run,
         status_resolver=status_resolver,
-        project_owner=project_owner,
-        project_number=project_number,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        find_unmet_dependencies=find_unmet_ready_dependencies,
+        set_blocked_with_reason=_set_blocked_with_reason,
     )
-    for ref, reason in unmet:
-        if not dry_run:
-            try:
-                _set_blocked_with_reason(
-                    ref,
-                    reason,
-                    config,
-                    project_owner,
-                    project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError:
-                pass
-    return [ref for ref, _ in unmet]
 
 
 # ---------------------------------------------------------------------------
