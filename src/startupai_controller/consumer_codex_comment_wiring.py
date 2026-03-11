@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 import subprocess
 from typing import Any, Callable
 
 import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
 import startupai_controller.consumer_comment_pr_wiring as _comment_pr_wiring
 import startupai_controller.consumer_review_queue_helpers as _review_queue_helpers
+from startupai_controller.board_graph import _resolve_issue_coordinates
+from startupai_controller.consumer_workflow import render_workflow_prompt
+from startupai_controller.domain.launch_policy import classify_pr_candidates as _classify_pr_candidates_pure
+from startupai_controller.domain.models import OpenPullRequestMatch
+from startupai_controller.domain.repair_policy import marker_for as _marker_for, parse_pr_url as _parse_pr_url
+from startupai_controller.domain.resolution_policy import normalize_resolution_payload
+from startupai_controller.domain.verdict_policy import (
+    verdict_comment_body as _verdict_comment_body,
+    verdict_marker_text as _verdict_marker_text,
+)
+from startupai_controller.runtime.wiring import build_github_port_bundle, run_runtime_gh as _run_gh
+from startupai_controller.validate_critical_path_promotion import GhQueryError, parse_issue_ref
 
-
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
-
-    return board_consumer_compat
+logger = logging.getLogger("board-consumer")
 
 
 def assemble_codex_prompt(
@@ -34,7 +42,6 @@ def assemble_codex_prompt(
     branch_reconcile_error: str | None = None,
 ) -> str:
     """Build the codex execution prompt from the current shell seams."""
-    shell = _shell_module()
     return _codex_runtime_wiring.assemble_codex_prompt(
         issue_context,
         issue_ref,
@@ -48,10 +55,10 @@ def assemble_codex_prompt(
         repair_pr_url=repair_pr_url,
         branch_reconcile_state=branch_reconcile_state,
         branch_reconcile_error=branch_reconcile_error,
-        parse_issue_ref=shell.parse_issue_ref,
-        resolve_issue_coordinates=shell._resolve_issue_coordinates,
-        extract_acceptance_criteria=shell._extract_acceptance_criteria,
-        render_workflow_prompt=shell.render_workflow_prompt,
+        parse_issue_ref=parse_issue_ref,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        extract_acceptance_criteria=_comment_pr_wiring.extract_acceptance_criteria,
+        render_workflow_prompt=render_workflow_prompt,
     )
 
 
@@ -66,7 +73,6 @@ def run_codex_session(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> int:
     """Run codex exec with the current shell seams."""
-    shell = _shell_module()
     return _codex_runtime_wiring.run_codex_session(
         worktree_path,
         prompt,
@@ -75,8 +81,8 @@ def run_codex_session(
         timeout_seconds,
         heartbeat_fn=heartbeat_fn,
         subprocess_runner=subprocess_runner,
-        resolve_cli_command_fn=shell._resolve_cli_command,
-        logger=shell.logger,
+        resolve_cli_command_fn=_codex_runtime_wiring.resolve_cli_command,
+        logger=logger,
     )
 
 
@@ -106,7 +112,6 @@ def create_or_update_pr(
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Ensure a PR exists for the branch."""
-    shell = _shell_module()
     return _codex_runtime_wiring.create_or_update_pr(
         worktree_path,
         branch,
@@ -118,10 +123,10 @@ def create_or_update_pr(
         issue_ref,
         session_id,
         gh_runner=gh_runner,
-        run_gh=shell._run_gh,
-        build_pr_body_fn=shell._build_pr_body,
+        run_gh=_run_gh,
+        build_pr_body_fn=build_pr_body,
         repo_to_prefix_for_repo=_comment_pr_wiring.repo_to_prefix_for_repo,
-        parse_issue_ref=shell.parse_issue_ref,
+        parse_issue_ref=parse_issue_ref,
     )
 
 
@@ -151,9 +156,8 @@ def default_review_comment_checker(
     gh_runner: Callable[..., str] | None = None,
 ) -> Callable[[str, str, int, str], bool]:
     """Build the default marker-check helper through ReviewStatePort."""
-    shell = _shell_module()
     return _comment_pr_wiring.default_review_comment_checker(
-        build_github_port_bundle=shell.build_github_port_bundle,
+        build_github_port_bundle=build_github_port_bundle,
         gh_runner=gh_runner,
     )
 
@@ -167,13 +171,12 @@ def runtime_comment_poster(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post an issue comment through the runtime port boundary."""
-    shell = _shell_module()
     _comment_pr_wiring.runtime_comment_poster(
         owner,
         repo,
         number,
         body,
-        build_github_port_bundle=shell.build_github_port_bundle,
+        build_github_port_bundle=build_github_port_bundle,
         gh_runner=gh_runner,
     )
 
@@ -186,12 +189,11 @@ def runtime_issue_closer(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Close an issue through the runtime port boundary."""
-    shell = _shell_module()
     _comment_pr_wiring.runtime_issue_closer(
         owner,
         repo,
         number,
-        build_github_port_bundle=shell.build_github_port_bundle,
+        build_github_port_bundle=build_github_port_bundle,
         gh_runner=gh_runner,
     )
 
@@ -203,11 +205,10 @@ def runtime_automerge_enabler(
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Enable auto-merge through the runtime port boundary."""
-    shell = _shell_module()
     return _comment_pr_wiring.runtime_automerge_enabler(
         pr_repo,
         pr_number,
-        build_github_port_bundle=shell.build_github_port_bundle,
+        build_github_port_bundle=build_github_port_bundle,
         gh_runner=gh_runner,
     )
 
@@ -219,12 +220,11 @@ def runtime_failed_check_rerun(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Re-run a failed check through the runtime port boundary."""
-    shell = _shell_module()
     _comment_pr_wiring.runtime_failed_check_rerun(
         pr_repo,
         run_id,
-        build_github_port_bundle=shell.build_github_port_bundle,
-        gh_query_error_cls=shell.GhQueryError,
+        build_github_port_bundle=build_github_port_bundle,
+        gh_query_error_cls=GhQueryError,
         gh_runner=gh_runner,
     )
 
@@ -242,7 +242,6 @@ def post_consumer_claim_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post the deterministic claim provenance marker."""
-    shell = _shell_module()
     _comment_pr_wiring.post_consumer_claim_comment(
         issue_ref,
         session_id,
@@ -250,10 +249,10 @@ def post_consumer_claim_comment(
         branch_name,
         executor,
         config,
-        resolve_issue_coordinates=shell._resolve_issue_coordinates,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
         consumer_provenance_marker_fn=_comment_pr_wiring.consumer_provenance_marker,
-        default_review_comment_checker_fn=shell._default_review_comment_checker,
-        runtime_comment_poster_fn=shell._runtime_comment_poster,
+        default_review_comment_checker_fn=default_review_comment_checker,
+        runtime_comment_poster_fn=runtime_comment_poster,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
@@ -269,13 +268,12 @@ def list_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[Any]:
     """Return open PRs that reference an issue number in the repository."""
-    shell = _shell_module()
     return _comment_pr_wiring.list_open_pr_candidates(
         owner,
         repo,
         issue_number,
-        build_github_port_bundle=shell.build_github_port_bundle,
-        open_pr_match_factory=shell.OpenPullRequestMatch,
+        build_github_port_bundle=build_github_port_bundle,
+        open_pr_match_factory=OpenPullRequestMatch,
         parse_consumer_provenance_fn=_comment_pr_wiring.parse_consumer_provenance,
         pr_port=pr_port,
         gh_runner=gh_runner,
@@ -294,15 +292,14 @@ def classify_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, Any | None, str]:
     """Classify open PRs for an issue as adoptable, ambiguous, non-local, or none."""
-    shell = _shell_module()
     return _comment_pr_wiring.classify_open_pr_candidates(
         issue_ref,
         owner,
         repo,
         issue_number,
         automation_config,
-        list_open_pr_candidates_fn=shell._list_open_pr_candidates,
-        classify_pr_candidates_pure=shell._classify_pr_candidates_pure,
+        list_open_pr_candidates_fn=list_open_pr_candidates,
+        classify_pr_candidates_pure=_classify_pr_candidates_pure,
         expected_branch=expected_branch,
         pr_port=pr_port,
         gh_runner=gh_runner,
@@ -320,17 +317,16 @@ def post_result_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post a machine-marker result comment on the issue."""
-    shell = _shell_module()
     _comment_pr_wiring.post_result_comment(
         issue_ref,
         result,
         session_id,
         config,
-        marker_for=shell._marker_for,
-        resolve_issue_coordinates=shell._resolve_issue_coordinates,
-        normalize_resolution_payload=shell.normalize_resolution_payload,
-        default_review_comment_checker_fn=shell._default_review_comment_checker,
-        runtime_comment_poster_fn=shell._runtime_comment_poster,
+        marker_for=_marker_for,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        normalize_resolution_payload=normalize_resolution_payload,
+        default_review_comment_checker_fn=default_review_comment_checker,
+        runtime_comment_poster_fn=runtime_comment_poster,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
@@ -346,16 +342,15 @@ def post_pr_codex_verdict(
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Post the machine-readable codex pass verdict required for auto-merge."""
-    shell = _shell_module()
     return _comment_pr_wiring.post_pr_codex_verdict(
         pr_url,
         session_id,
-        parse_pr_url=shell._parse_pr_url,
-        verdict_marker_text=shell._verdict_marker_text,
-        default_review_comment_checker_fn=shell._default_review_comment_checker,
-        verdict_comment_body=shell._verdict_comment_body,
-        runtime_comment_poster_fn=shell._runtime_comment_poster,
-        gh_query_error_cls=shell.GhQueryError,
+        parse_pr_url=_parse_pr_url,
+        verdict_marker_text=_verdict_marker_text,
+        default_review_comment_checker_fn=default_review_comment_checker,
+        verdict_comment_body=_verdict_comment_body,
+        runtime_comment_poster_fn=runtime_comment_poster,
+        gh_query_error_cls=GhQueryError,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
@@ -372,11 +367,10 @@ def backfill_review_verdicts(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Re-post missing codex verdict markers for successful review sessions."""
-    shell = _shell_module()
     return _comment_pr_wiring.backfill_review_verdicts(
         db,
-        post_pr_codex_verdict_fn=shell._post_pr_codex_verdict,
-        log_warning=lambda issue_ref, session_id, err: shell.logger.warning(
+        post_pr_codex_verdict_fn=post_pr_codex_verdict,
+        log_warning=lambda issue_ref, session_id, err: logger.warning(
             "Review verdict backfill failed for %s (%s): %s",
             issue_ref,
             session_id,
@@ -400,14 +394,13 @@ def backfill_review_verdicts_from_snapshots(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Backfill missing verdict markers using already-fetched PR comment payloads."""
-    shell = _shell_module()
     return _review_queue_helpers.backfill_review_verdicts_from_snapshots(
         store,
         entries,
         snapshots,
         pr_port=pr_port,
-        post_pr_codex_verdict=shell._post_pr_codex_verdict,
-        log_warning=lambda issue_ref, session_id, err: shell.logger.warning(
+        post_pr_codex_verdict=post_pr_codex_verdict,
+        log_warning=lambda issue_ref, session_id, err: logger.warning(
             "Review verdict backfill failed for %s (%s): %s",
             issue_ref,
             session_id,
@@ -428,16 +421,15 @@ def pre_backfill_verdicts_for_due_prs(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Post missing verdicts before snapshot build for due PRs."""
-    shell = _shell_module()
     return _review_queue_helpers.pre_backfill_verdicts_for_due_prs(
         store,
         due_items,
-        post_pr_codex_verdict=shell._post_pr_codex_verdict,
+        post_pr_codex_verdict=post_pr_codex_verdict,
         pr_port=pr_port,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        log_warning=lambda issue_ref, err: shell.logger.warning(
+        log_warning=lambda issue_ref, err: logger.warning(
             "Pre-backfill verdict failed for %s: %s",
             issue_ref,
             err,

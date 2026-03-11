@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import logging
+from pathlib import Path
 from typing import Any, Callable
 
+import startupai_controller.consumer_cycle_wiring as _cycle_wiring
+import startupai_controller.consumer_operational_wiring as _operational_wiring
+import startupai_controller.consumer_preflight_wiring as _preflight_wiring
+import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
 import startupai_controller.consumer_support_wiring as _support_wiring
+from startupai_controller.application.consumer.cycle import (
+    run_prepared_cycle as _run_prepared_cycle_use_case,
+)
 from startupai_controller.application.consumer.daemon import (
     DispatchMultiWorkerLaunchesDeps,
     PrepareMultiWorkerCycleDeps,
@@ -13,7 +23,9 @@ from startupai_controller.application.consumer.daemon import (
     RunDaemonLoopDeps,
     RunMultiWorkerDaemonLoopDeps,
     dispatch_multi_worker_launches as _dispatch_multi_worker_launches_use_case,
+    log_completed_worker_results as _log_completed_worker_results_use_case,
     multi_worker_dispatch_state as _multi_worker_dispatch_state_use_case,
+    next_available_slots as _next_available_slots_use_case,
     prepare_multi_worker_cycle as _prepare_multi_worker_cycle_use_case,
     prepare_multi_worker_launch_context as _prepare_multi_worker_launch_context_use_case,
     run_daemon_loop as _run_daemon_loop_use_case,
@@ -25,13 +37,56 @@ from startupai_controller.application.consumer.status import (
     CollectStatusPayloadDeps,
     collect_status_payload as _collect_status_payload_use_case,
 )
+from startupai_controller.automation_port_helpers import _list_project_items_by_status
+from startupai_controller.board_automation_config import load_automation_config
+from startupai_controller.consumer_types import ActiveWorkerTask, WorktreePrepareError
+from startupai_controller.consumer_workflow import (
+    WorkflowConfigError,
+    read_workflow_snapshot,
+    workflow_status_payload,
+)
+from startupai_controller.control_plane_runtime import (
+    CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
+    CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE,
+    CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL,
+    CONTROL_KEY_DEGRADED,
+    CONTROL_KEY_DEGRADED_REASON,
+    CONTROL_KEY_LAST_RATE_LIMIT_AT,
+    CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT,
+    CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT,
+    _apply_automation_runtime,
+    _control_plane_health_summary,
+    _current_main_workflows,
+    _mark_degraded,
+)
+from startupai_controller.domain.models import CycleResult
+from startupai_controller.domain.review_queue_policy import (
+    parse_iso8601_timestamp as _parse_iso8601_timestamp,
+)
+from startupai_controller.runtime.wiring import (
+    build_gh_runner_port,
+    build_process_runner_port,
+    gh_reason_code,
+    open_consumer_db,
+)
+from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
+    GhQueryError,
+    load_config,
+    parse_issue_ref,
+)
+
+logger = logging.getLogger("board-consumer")
 
 
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
+def _drain_requested(path: Path) -> bool:
+    """Return True when a graceful drain has been requested."""
+    return path.exists()
 
-    return board_consumer_compat
+
+def _log_completed_worker_results(active_tasks: dict[Any, Any]) -> None:
+    """Log and discard completed worker futures."""
+    _log_completed_worker_results_use_case(active_tasks, logger=logger)
 
 
 @dataclass(frozen=True)
@@ -102,71 +157,71 @@ class StatusRuntimeWiringDeps:
     control_key_last_successful_github_mutation_at: str
 
 
-def _daemon_runtime_wiring_deps(shell: Any) -> DaemonRuntimeWiringDeps:
-    """Build daemon-loop wiring deps from the live shell module."""
+def _daemon_runtime_wiring_deps() -> DaemonRuntimeWiringDeps:
+    """Build daemon-loop wiring deps without reaching back into compat."""
     return DaemonRuntimeWiringDeps(
-        config_error_type=shell.ConfigError,
-        workflow_config_error_type=shell.WorkflowConfigError,
-        gh_query_error_type=shell.GhQueryError,
-        worktree_prepare_error_type=shell.WorktreePrepareError,
-        prepare_cycle=shell._prepare_cycle,
-        mark_degraded=shell._mark_degraded,
-        gh_reason_code=shell.gh_reason_code,
-        logger=shell.logger,
+        config_error_type=ConfigError,
+        workflow_config_error_type=WorkflowConfigError,
+        gh_query_error_type=GhQueryError,
+        worktree_prepare_error_type=WorktreePrepareError,
+        prepare_cycle=_preflight_wiring.prepare_cycle,
+        mark_degraded=_mark_degraded,
+        gh_reason_code=gh_reason_code,
+        logger=logger,
         claim_suppression_state=_support_wiring.claim_suppression_state,
-        parse_iso8601_timestamp=shell._parse_iso8601_timestamp,
-        record_metric=shell._record_metric,
-        prepare_launch_candidate=shell._prepare_launch_candidate,
-        maybe_activate_claim_suppression=shell._maybe_activate_claim_suppression,
-        block_prelaunch_issue=shell._block_prelaunch_issue,
-        select_candidate_for_cycle=shell._select_candidate_for_cycle,
-        prepare_multi_worker_launch_context=shell._prepare_multi_worker_launch_context,
-        submit_multi_worker_task=shell._submit_multi_worker_task,
-        run_worker_cycle=shell._run_worker_cycle,
-        active_worker_task_type=shell.ActiveWorkerTask,
-        next_available_slots=shell._next_available_slots,
-        executor_factory=shell.ThreadPoolExecutor,
-        log_completed_worker_results=shell._log_completed_worker_results,
-        drain_requested=shell._drain_requested,
-        prepare_multi_worker_cycle=shell._prepare_multi_worker_cycle,
-        multi_worker_dispatch_state=shell._multi_worker_dispatch_state,
-        sleep_for_claim_suppression_if_needed=shell._sleep_for_claim_suppression_if_needed,
-        dispatch_multi_worker_launches=shell._dispatch_multi_worker_launches,
-        load_automation_config=shell.load_automation_config,
-        apply_automation_runtime=shell._apply_automation_runtime,
-        current_main_workflows=shell._current_main_workflows,
-        recover_interrupted_sessions=shell._recover_interrupted_sessions,
-        run_multi_worker_daemon_loop=shell._run_multi_worker_daemon_loop,
-        run_one_cycle=shell.run_one_cycle,
+        parse_iso8601_timestamp=_parse_iso8601_timestamp,
+        record_metric=_support_wiring.record_metric,
+        prepare_launch_candidate=_cycle_wiring.prepare_launch_candidate,
+        maybe_activate_claim_suppression=_support_wiring.maybe_activate_claim_suppression,
+        block_prelaunch_issue=_operational_wiring.block_prelaunch_issue,
+        select_candidate_for_cycle=_selection_retry_wiring.select_candidate_for_cycle_from_shell,
+        prepare_multi_worker_launch_context=_support_wiring.prepare_multi_worker_launch_context,
+        submit_multi_worker_task=_support_wiring.submit_multi_worker_task,
+        run_worker_cycle=_support_wiring.run_worker_cycle,
+        active_worker_task_type=ActiveWorkerTask,
+        next_available_slots=_next_available_slots_use_case,
+        executor_factory=ThreadPoolExecutor,
+        log_completed_worker_results=_log_completed_worker_results,
+        drain_requested=_drain_requested,
+        prepare_multi_worker_cycle=prepare_multi_worker_cycle,
+        multi_worker_dispatch_state=multi_worker_dispatch_state,
+        sleep_for_claim_suppression_if_needed=sleep_for_claim_suppression_if_needed,
+        dispatch_multi_worker_launches=dispatch_multi_worker_launches,
+        load_automation_config=load_automation_config,
+        apply_automation_runtime=_apply_automation_runtime,
+        current_main_workflows=_current_main_workflows,
+        recover_interrupted_sessions=_operational_wiring.recover_interrupted_sessions,
+        run_multi_worker_daemon_loop=run_multi_worker_daemon_loop,
+        run_one_cycle=run_one_cycle_live,
     )
 
 
-def _status_runtime_wiring_deps(shell: Any) -> StatusRuntimeWiringDeps:
-    """Build status wiring deps from the live shell module."""
+def _status_runtime_wiring_deps() -> StatusRuntimeWiringDeps:
+    """Build status wiring deps without reaching back into compat."""
     return StatusRuntimeWiringDeps(
-        config_error_type=shell.ConfigError,
-        load_automation_config=shell.load_automation_config,
-        apply_automation_runtime=shell._apply_automation_runtime,
-        current_main_workflows=shell._current_main_workflows,
-        read_workflow_snapshot=shell.read_workflow_snapshot,
-        open_consumer_db=shell.open_consumer_db,
-        load_config=shell.load_config,
-        list_project_items_by_status=shell._list_project_items_by_status,
-        parse_issue_ref=shell.parse_issue_ref,
+        config_error_type=ConfigError,
+        load_automation_config=load_automation_config,
+        apply_automation_runtime=_apply_automation_runtime,
+        current_main_workflows=_current_main_workflows,
+        read_workflow_snapshot=read_workflow_snapshot,
+        open_consumer_db=open_consumer_db,
+        load_config=load_config,
+        list_project_items_by_status=_list_project_items_by_status,
+        parse_issue_ref=parse_issue_ref,
         load_admission_summary=_support_wiring.load_admission_summary,
-        control_plane_health_summary=shell._control_plane_health_summary,
-        drain_requested=shell._drain_requested,
-        workflow_status_payload=shell.workflow_status_payload,
-        session_retry_state=shell._session_retry_state,
-        parse_iso8601_timestamp=shell._parse_iso8601_timestamp,
-        control_key_degraded=shell.CONTROL_KEY_DEGRADED,
-        control_key_degraded_reason=shell.CONTROL_KEY_DEGRADED_REASON,
-        control_key_claim_suppressed_until=shell.CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL,
-        control_key_claim_suppressed_reason=shell.CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
-        control_key_claim_suppressed_scope=shell.CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE,
-        control_key_last_rate_limit_at=shell.CONTROL_KEY_LAST_RATE_LIMIT_AT,
-        control_key_last_successful_board_sync_at=shell.CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT,
-        control_key_last_successful_github_mutation_at=shell.CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT,
+        control_plane_health_summary=_control_plane_health_summary,
+        drain_requested=_drain_requested,
+        workflow_status_payload=workflow_status_payload,
+        session_retry_state=_support_wiring.session_retry_state,
+        parse_iso8601_timestamp=_parse_iso8601_timestamp,
+        control_key_degraded=CONTROL_KEY_DEGRADED,
+        control_key_degraded_reason=CONTROL_KEY_DEGRADED_REASON,
+        control_key_claim_suppressed_until=CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL,
+        control_key_claim_suppressed_reason=CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
+        control_key_claim_suppressed_scope=CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE,
+        control_key_last_rate_limit_at=CONTROL_KEY_LAST_RATE_LIMIT_AT,
+        control_key_last_successful_board_sync_at=CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT,
+        control_key_last_successful_github_mutation_at=CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT,
     )
 
 
@@ -254,7 +309,7 @@ def run_one_cycle(
     )
 
 
-def run_one_cycle_from_shell(
+def run_one_cycle_live(
     config: Any,
     db: Any,
     *,
@@ -273,8 +328,7 @@ def run_one_cycle_from_shell(
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
 ) -> Any:
-    """Execute one poll-claim-execute cycle through live board_consumer deps."""
-    shell = _shell_module()
+    """Execute one poll-claim-execute cycle through direct runtime deps."""
     return run_one_cycle(
         config=config,
         db=db,
@@ -292,18 +346,18 @@ def run_one_cycle_from_shell(
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
-        prepare_cycle=shell._prepare_cycle,
-        config_error_type=shell.ConfigError,
-        workflow_config_error_type=shell.WorkflowConfigError,
-        gh_query_error_type=shell.GhQueryError,
-        mark_degraded=shell._mark_degraded,
-        gh_reason_code=shell.gh_reason_code,
-        cycle_result_factory=shell.CycleResult,
-        build_gh_runner_port=shell.build_gh_runner_port,
-        build_process_runner_port=shell.build_process_runner_port,
-        run_prepared_cycle=shell.run_prepared_cycle,
-        prepared_cycle_deps=shell._prepared_cycle_deps(),
-        logger=shell.logger,
+        prepare_cycle=_preflight_wiring.prepare_cycle,
+        config_error_type=ConfigError,
+        workflow_config_error_type=WorkflowConfigError,
+        gh_query_error_type=GhQueryError,
+        mark_degraded=_mark_degraded,
+        gh_reason_code=gh_reason_code,
+        cycle_result_factory=CycleResult,
+        build_gh_runner_port=build_gh_runner_port,
+        build_process_runner_port=build_process_runner_port,
+        run_prepared_cycle=_run_prepared_cycle_use_case,
+        prepared_cycle_deps=_operational_wiring.prepared_cycle_deps(),
+        logger=logger,
     )
 
 
@@ -314,10 +368,9 @@ def prepare_multi_worker_cycle(
     dry_run: bool,
     sleeper: Callable[[float], None],
     di_kwargs: dict[str, Any],
-    shell: Any,
 ) -> Any | None:
     """Run one bounded preflight pass for the multi-worker daemon."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     return _prepare_multi_worker_cycle_use_case(
         config,
         db,
@@ -340,11 +393,9 @@ def multi_worker_dispatch_state(
     db: Any,
     prepared: Any,
     active_tasks: dict[Any, Any],
-    *,
-    shell: Any,
 ) -> tuple[list[int], set[str]]:
     """Compute currently available slots and active issue refs."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     return _multi_worker_dispatch_state_use_case(
         db,
         prepared,
@@ -358,10 +409,9 @@ def sleep_for_claim_suppression_if_needed(
     config: Any,
     *,
     sleeper: Callable[[float], None],
-    shell: Any,
 ) -> bool:
     """Sleep until claim suppression clears, if active."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     return _sleep_for_claim_suppression_if_needed_use_case(
         db,
         config,
@@ -379,10 +429,9 @@ def prepare_multi_worker_launch_context(
     prepared: Any,
     dry_run: bool,
     di_kwargs: dict[str, Any],
-    shell: Any,
 ) -> tuple[Any | None, bool]:
     """Prepare launch context for one candidate."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     return _prepare_multi_worker_launch_context_use_case(
         candidate,
         config=config,
@@ -415,10 +464,9 @@ def submit_multi_worker_task(
     launch_context: Any | None,
     dry_run: bool,
     di_kwargs: dict[str, Any],
-    shell: Any,
 ) -> None:
     """Submit one prepared candidate to a worker slot."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     _submit_multi_worker_task_use_case(
         executor,
         active_tasks,
@@ -445,10 +493,9 @@ def dispatch_multi_worker_launches(
     active_tasks: dict[Any, Any],
     dry_run: bool,
     di_kwargs: dict[str, Any],
-    shell: Any,
 ) -> int:
     """Launch as many ready candidates as the current hydration budget allows."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     return _dispatch_multi_worker_launches_use_case(
         executor,
         config,
@@ -478,10 +525,9 @@ def run_multi_worker_daemon_loop(
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
     di_kwargs: dict[str, Any] | None = None,
-    shell: Any,
 ) -> None:
     """Run the daemon loop with multiple concurrent worker slots."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     _run_multi_worker_daemon_loop_use_case(
         config,
         db,
@@ -508,10 +554,9 @@ def run_daemon_loop(
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
     di_kwargs: dict[str, Any] | None = None,
-    shell: Any,
 ) -> None:
     """Run continuous poll-claim-execute loop."""
-    deps = _daemon_runtime_wiring_deps(shell)
+    deps = _daemon_runtime_wiring_deps()
     _run_daemon_loop_use_case(
         config,
         db,
@@ -536,10 +581,9 @@ def collect_status_payload(
     config: Any,
     *,
     local_only: bool = False,
-    shell: Any,
 ) -> dict[str, Any]:
     """Collect consumer status as a JSON-serializable payload."""
-    deps = _status_runtime_wiring_deps(shell)
+    deps = _status_runtime_wiring_deps()
     return _collect_status_payload_use_case(
         config,
         local_only=local_only,

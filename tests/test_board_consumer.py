@@ -18,14 +18,103 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from startupai_controller.board_consumer_compat import (
+from startupai_controller.application.consumer.preflight import ReconciliationResult
+from startupai_controller.board_automation import (
+    BoardAutomationConfig,
+    ClaimReadyResult,
+    load_automation_config,
+)
+from startupai_controller.board_consumer_cli import (
+    _cmd_drain,
+    _cmd_reconcile,
+    _cmd_report_slo,
+    _cmd_resume,
+    _cmd_status,
+    _create_status_http_server,
+    build_parser,
+)
+from startupai_controller.consumer_workflow import load_workflow_definition
+from startupai_controller.consumer_board_state_helpers import (
+    escalate_to_claude_from_shell as _escalate_to_claude,
+    return_issue_to_ready_from_shell as _return_issue_to_ready,
+    transition_issue_to_in_progress_from_shell as _transition_issue_to_in_progress,
+    transition_issue_to_review_from_shell as _transition_issue_to_review,
+)
+from startupai_controller.consumer_codex_comment_wiring import (
+    assemble_codex_prompt as _assemble_codex_prompt,
+    backfill_review_verdicts as _backfill_review_verdicts,
+    build_pr_body as _build_pr_body,
+    create_or_update_pr as _create_or_update_pr,
+    parse_codex_result as _parse_codex_result,
+    post_pr_codex_verdict as _post_pr_codex_verdict,
+    post_result_comment as _post_result_comment,
+    pre_backfill_verdicts_for_due_prs as _pre_backfill_verdicts_for_due_prs,
+    run_codex_session as _run_codex_session,
+)
+from startupai_controller.consumer_codex_runtime_wiring import (
+    resolve_cli_command as _resolve_cli_command,
+)
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_context_helpers import (
+    fetch_issue_context as _fetch_issue_context,
+)
+from startupai_controller.consumer_drain_control import (
+    clear_drain as _clear_drain,
+    drain_requested as _drain_requested,
+    request_drain as _request_drain,
+)
+from startupai_controller.consumer_execution_support_helpers import (
+    has_commits_on_branch as _has_commits_on_branch,
+)
+from startupai_controller.consumer_launch_support_wiring import (
+    create_worktree as _create_worktree,
+    prepare_worktree as _prepare_worktree,
+    reconcile_repair_branch as _reconcile_repair_branch,
+)
+from startupai_controller.consumer_operational_wiring import (
+    attempt_launch_context_claim as _attempt_launch_context_claim,
+    block_prelaunch_issue as _block_prelaunch_issue,
+    execute_claimed_session as _execute_claimed_session,
+    handle_non_review_execution_outcome as _handle_non_review_execution_outcome,
+    reconcile_board_truth as _reconcile_board_truth,
+    recover_interrupted_sessions as _recover_interrupted_sessions,
+    resolve_launch_context_for_cycle as _resolve_launch_context_for_cycle,
+)
+from startupai_controller.consumer_review_queue_helpers import (
+    apply_review_queue_partial_failure as _apply_review_queue_partial_failure,
+    apply_review_queue_result as _apply_review_queue_result,
+    build_review_snapshots_for_queue_entries as _build_review_snapshots_for_queue_entries,
+)
+from startupai_controller.consumer_runtime_wiring import (
+    collect_status_payload as _collect_status_payload,
+)
+from startupai_controller.consumer_selection_retry_wiring import (
+    select_best_candidate_from_shell as _select_best_candidate,
+)
+from startupai_controller.consumer_support_wiring import (
+    hydrate_issue_context as _hydrate_issue_context,
+)
+from startupai_controller.consumer_types import (
     ClaimedSessionContext,
-    ConsumerConfig,
-    CycleResult,
     PendingClaimContext,
     PrCreationOutcome,
     PreparedLaunchContext,
+    SessionExecutionOutcome,
+    WorktreePrepareError,
+)
+from startupai_controller.control_plane_rescue import (
+    _drain_review_queue,
+    _replay_deferred_actions,
+)
+from startupai_controller.board_consumer import run_daemon_loop, run_one_cycle
+from startupai_controller.domain.models import (
+    CycleResult,
+    IssueSnapshot,
+    OpenPullRequestMatch,
     RepairBranchReconcileOutcome,
+    ReviewQueueDrainSummary,
+)
+from startupai_controller.domain.review_queue_policy import (
     ESCALATION_CEILING_FAILED,
     ESCALATION_CEILING_TRANSIENT,
     MAX_REQUEUE_CYCLES,
@@ -34,71 +123,15 @@ from startupai_controller.board_consumer_compat import (
     REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS,
     REVIEW_QUEUE_PENDING_RETRY_SECONDS,
     REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS,
-    _backfill_review_verdicts,
-    _apply_review_queue_result,
-    _apply_review_queue_partial_failure,
-    _attempt_launch_context_claim,
-    _block_prelaunch_issue,
-    _blocker_class,
-    _build_review_snapshots_for_queue_entries,
-    _cmd_drain,
-    _cmd_report_slo,
-    _cmd_reconcile,
-    _cmd_resume,
-    _collect_status_payload,
-    _create_status_http_server,
-    _drain_review_queue,
-    _cmd_status,
-    _assemble_codex_prompt,
-    _build_pr_body,
-    _clear_drain,
-    _handle_non_review_execution_outcome,
-    _execute_claimed_session,
-    _create_or_update_pr,
-    _create_worktree,
-    _drain_requested,
-    _escalate_to_claude,
-    _escalation_ceiling_for_blocker_class,
-    _extract_acceptance_criteria,
-    _fetch_issue_context,
-    _hydrate_issue_context,
-    _has_commits_on_branch,
-    _parse_codex_result,
-    _post_pr_codex_verdict,
-    _pre_backfill_verdicts_for_due_prs,
-    _prepare_worktree,
-    _post_result_comment,
-    _reconcile_repair_branch,
-    _reconcile_board_truth,
-    _replay_deferred_actions,
-    _recover_interrupted_sessions,
-    _request_drain,
-    _resolve_launch_context_for_cycle,
-    _review_queue_retry_seconds_for_blocked_reason,
-    _review_queue_retry_seconds_for_result,
-    _return_issue_to_ready,
-    _transition_issue_to_in_progress,
-    _transition_issue_to_review,
-    _resolve_cli_command,
-    _run_codex_session,
-    _select_best_candidate,
-    build_parser,
-    run_daemon_loop,
-    run_one_cycle,
-    ReconciliationResult,
-    ReviewQueueDrainSummary,
-    SessionExecutionOutcome,
-    WorktreePrepareError,
+    blocker_class as _blocker_class,
+    escalation_ceiling_for_blocker_class as _escalation_ceiling_for_blocker_class,
+    review_queue_retry_seconds_for_blocked_reason as _review_queue_retry_seconds_for_blocked_reason,
+    review_queue_retry_seconds_for_result as _review_queue_retry_seconds_for_result,
 )
-from startupai_controller.board_automation import (
-    BoardAutomationConfig,
-    ClaimReadyResult,
-    load_automation_config,
+from startupai_controller.consumer_comment_pr_wiring import (
+    extract_acceptance_criteria as _extract_acceptance_criteria,
 )
-from startupai_controller.consumer_workflow import load_workflow_definition
-from startupai_controller.domain.models import IssueSnapshot
 from startupai_controller.board_io import CycleBoardSnapshot, GhCommandError, _ProjectItemSnapshot
-from startupai_controller.board_consumer_compat import OpenPullRequestMatch
 from startupai_controller.consumer_db import ConsumerDB
 from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import (
@@ -569,8 +602,10 @@ class TestCreateWorktree:
                 stderr="",
             )
 
-        monkeypatch.setattr("startupai_controller.board_consumer_compat.os.path.isdir", lambda path: path == expected_path)
-
+        monkeypatch.setattr(
+            "startupai_controller.adapters.local_process.os.path.isdir",
+            lambda path: path == expected_path,
+        )
         path, branch = _create_worktree(
             "crew#84", "Test Issue", config, subprocess_runner=subprocess_runner
         )
@@ -644,10 +679,9 @@ class TestCreateWorktree:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.os.path.isdir",
+            "startupai_controller.adapters.local_process.os.path.isdir",
             lambda path: path == expected_path,
         )
-
         path, branch = _create_worktree(
             "crew#84", "Test Issue", config, subprocess_runner=subprocess_runner
         )
@@ -1054,11 +1088,11 @@ class TestRunCodexSession:
                 return self.returncode
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._resolve_cli_command",
+            "startupai_controller.consumer_codex_runtime_wiring.resolve_cli_command",
             lambda _command: "/usr/bin/codex",
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.subprocess.Popen",
+            "startupai_controller.consumer_codex_runtime_wiring.subprocess.Popen",
             FakeProcess,
         )
 
@@ -1079,7 +1113,10 @@ class TestRunCodexSession:
 
 class TestResolveCliCommand:
     def test_uses_path_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("startupai_controller.board_consumer_compat.shutil.which", lambda _cmd: "/bin/codex")
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.shutil.which",
+            lambda _cmd: "/bin/codex",
+        )
         assert _resolve_cli_command("codex") == "/bin/codex"
 
     def test_falls_back_to_known_user_install_location(
@@ -1091,9 +1128,12 @@ class TestResolveCliCommand:
         codex_path.write_text("#!/bin/sh\n", encoding="utf-8")
         codex_path.chmod(0o755)
 
-        monkeypatch.setattr("startupai_controller.board_consumer_compat.shutil.which", lambda _cmd: None)
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.Path.home",
+            "startupai_controller.consumer_codex_runtime_wiring.shutil.which",
+            lambda _cmd: None,
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.Path.home",
             classmethod(lambda cls: tmp_path),
         )
 
@@ -1808,7 +1848,7 @@ class TestRunOneCycle:
             return True
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._post_pr_codex_verdict",
+            "startupai_controller.consumer_codex_comment_wiring.post_pr_codex_verdict",
             post_verdict,
         )
 
@@ -1837,15 +1877,15 @@ class TestRunOneCycle:
             verdicts.append((pr_url, session_id))
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._transition_issue_to_review",
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
             transition,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._post_pr_codex_verdict",
+            "startupai_controller.consumer_codex_comment_wiring.post_pr_codex_verdict",
             post_verdict,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.review_rescue",
+            "startupai_controller.consumer_automation_bridge.review_rescue",
             lambda *args, **kwargs: SimpleNamespace(
                 rerun_checks=(),
                 auto_merge_enabled=True,
@@ -1918,7 +1958,7 @@ class TestRunOneCycle:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.review_rescue",
+            "startupai_controller.consumer_automation_bridge.review_rescue",
             lambda *args, **kwargs: SimpleNamespace(
                 rerun_checks=(),
                 auto_merge_enabled=False,
@@ -1928,7 +1968,7 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
             lambda *args, **kwargs: {
                 ("StartupAI-site/startupai-crew", 210): SimpleNamespace(
                     pr_comment_bodies=(),
@@ -1936,7 +1976,7 @@ class TestRunOneCycle:
             },
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._backfill_review_verdicts_from_snapshots",
+            "startupai_controller.consumer_review_queue_helpers.backfill_review_verdicts_from_snapshots",
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
@@ -1998,7 +2038,7 @@ class TestRunOneCycle:
             now=now,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
             lambda *args, **kwargs: {
                 ("StartupAI-site/startupai-crew", 210): SimpleNamespace(
                     pr_comment_bodies=(),
@@ -2006,7 +2046,7 @@ class TestRunOneCycle:
             },
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._backfill_review_verdicts_from_snapshots",
+            "startupai_controller.consumer_review_queue_helpers.backfill_review_verdicts_from_snapshots",
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
@@ -2015,7 +2055,7 @@ class TestRunOneCycle:
         )
         rescue_calls: list[tuple[str, int]] = []
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.review_rescue",
+            "startupai_controller.consumer_automation_bridge.review_rescue",
             lambda pr_repo, pr_number, *args, **kwargs: rescue_calls.append(
                 (pr_repo, pr_number)
             )
@@ -2263,14 +2303,14 @@ class TestRunOneCycle:
             )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.datetime",
+            "startupai_controller.consumer_review_queue_helpers.datetime",
             SimpleNamespace(
                 now=lambda tz=None: now,
                 fromisoformat=datetime.fromisoformat,
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 GhQueryError("query:rate_limit:Failed running gh pr view")
             ),
@@ -2339,7 +2379,7 @@ class TestRunOneCycle:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._partition_review_queue_entries_by_probe_change",
+            "startupai_controller.consumer_review_queue_helpers.partition_review_queue_entries_by_probe_change",
             lambda entries, **kwargs: ([], entries),
         )
 
@@ -2347,7 +2387,7 @@ class TestRunOneCycle:
             raise AssertionError("full review snapshot build should be skipped")
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
             fail_build,
         )
 
@@ -2418,7 +2458,7 @@ class TestRunOneCycle:
             lambda self, pr_refs: {pr_ref: "digest-new" for pr_ref in pr_refs},
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
             lambda **kwargs: {
                 ("StartupAI-site/startupai-crew", 210): SimpleNamespace(
                     pr_comment_bodies=(),
@@ -2426,7 +2466,7 @@ class TestRunOneCycle:
             },
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.review_rescue",
+            "startupai_controller.consumer_automation_bridge.review_rescue",
             lambda *args, **kwargs: SimpleNamespace(
                 rerun_checks=(),
                 auto_merge_enabled=True,
@@ -2539,7 +2579,7 @@ class TestRunOneCycle:
         transitioned: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._classify_open_pr_candidates",
+            "startupai_controller.consumer_codex_comment_wiring.classify_open_pr_candidates",
             lambda *args, **kwargs: (
                 "adoptable",
                 OpenPullRequestMatch(
@@ -2562,26 +2602,26 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._create_worktree",
+            "startupai_controller.consumer_launch_support_wiring.create_worktree",
             lambda issue_ref, title, config, **kwargs: (
                 str(tmp_path / "claimed-worktree"),
                 kwargs["branch_name_override"],
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._create_or_update_pr",
+            "startupai_controller.consumer_codex_comment_wiring.create_or_update_pr",
             lambda *args, **kwargs: "https://github.com/O/R/pull/77",
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._reconcile_repair_branch",
+            "startupai_controller.consumer_launch_support_wiring.reconcile_repair_branch",
             lambda *args, **kwargs: RepairBranchReconcileOutcome("up_to_date"),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._return_issue_to_ready",
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
             lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._transition_issue_to_review",
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
             lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
         )
 
@@ -2608,7 +2648,7 @@ class TestRunOneCycle:
         blocked: list[tuple[str, str]] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._classify_open_pr_candidates",
+            "startupai_controller.consumer_codex_comment_wiring.classify_open_pr_candidates",
             lambda *args, **kwargs: (
                 "adoptable",
                 OpenPullRequestMatch(
@@ -2628,21 +2668,21 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._create_worktree",
+            "startupai_controller.consumer_launch_support_wiring.create_worktree",
             lambda issue_ref, title, config, **kwargs: (
                 str(tmp_path / "claimed-worktree"),
                 kwargs["branch_name_override"],
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._reconcile_repair_branch",
+            "startupai_controller.consumer_launch_support_wiring.reconcile_repair_branch",
             lambda *args, **kwargs: RepairBranchReconcileOutcome(
                 "reconcile_setup_failed",
                 "repair-branch-diverged-from-origin",
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._set_blocked_with_reason",
+            "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
             lambda issue_ref, reason, *args, **kwargs: blocked.append((issue_ref, reason)),
         )
 
@@ -2665,7 +2705,7 @@ class TestRunOneCycle:
         setup = self._setup_cycle(tmp_path)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._classify_open_pr_candidates",
+            "startupai_controller.consumer_codex_comment_wiring.classify_open_pr_candidates",
             lambda *args, **kwargs: (
                 "adoptable",
                 OpenPullRequestMatch(
@@ -2685,14 +2725,14 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._create_worktree",
+            "startupai_controller.consumer_launch_support_wiring.create_worktree",
             lambda issue_ref, title, config, **kwargs: (
                 str(tmp_path / "claimed-worktree"),
                 kwargs["branch_name_override"],
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._reconcile_repair_branch",
+            "startupai_controller.consumer_launch_support_wiring.reconcile_repair_branch",
             lambda *args, **kwargs: RepairBranchReconcileOutcome(
                 "conflicted_main_merge"
             ),
@@ -2891,7 +2931,7 @@ class TestRunOneCycle:
         setup = self._setup_cycle(tmp_path)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.claim_ready_issue",
+            "startupai_controller.consumer_automation_bridge.claim_ready_issue",
             lambda *args, **kwargs: ClaimReadyResult(reason="wip-limit"),
         )
 
@@ -2911,7 +2951,7 @@ class TestRunOneCycle:
             raise GhQueryError("selection fetch failed")
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._select_best_candidate",
+            "startupai_controller.consumer_selection_retry_wiring.select_best_candidate_from_shell",
             raising_select,
         )
 
@@ -2932,7 +2972,7 @@ class TestRunOneCycle:
             raise GhQueryError("temporary github failure")
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.claim_ready_issue",
+            "startupai_controller.consumer_automation_bridge.claim_ready_issue",
             raising_claim,
         )
 
@@ -2967,7 +3007,7 @@ class TestRunOneCycle:
                 rate_limit_reset_at=None,
             )
 
-        monkeypatch.setattr("startupai_controller.board_consumer_compat.claim_ready_issue", raising_claim)
+        monkeypatch.setattr("startupai_controller.consumer_automation_bridge.claim_ready_issue", raising_claim)
 
         first = run_one_cycle(
             setup["config"],
@@ -2999,7 +3039,7 @@ class TestRunOneCycle:
 
         setup["subprocess_runner"] = failing_subprocess
         with patch(
-            "startupai_controller.board_consumer_compat._set_blocked_with_reason",
+            "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
             side_effect=lambda issue_ref, reason, *args, **kwargs: requeued.append(reason),
         ):
             result = run_one_cycle(setup["config"], setup["db"], **{
@@ -3041,10 +3081,10 @@ class TestRunOneCycle:
         requeued: list[str] = []
 
         with patch(
-            "startupai_controller.board_consumer_compat._parse_codex_result",
+            "startupai_controller.consumer_codex_comment_wiring.parse_codex_result",
             return_value=None,
         ), patch(
-            "startupai_controller.board_consumer_compat._return_issue_to_ready",
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
             side_effect=lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         ):
             result = run_one_cycle(setup["config"], setup["db"], **{
@@ -3071,7 +3111,7 @@ class TestRunOneCycle:
         requeued: list[str] = []
 
         with patch(
-            "startupai_controller.board_consumer_compat._return_issue_to_ready",
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
             side_effect=lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         ):
             result = run_one_cycle(
@@ -3141,7 +3181,7 @@ class TestRunOneCycle:
         requeued: list[str] = []
 
         with patch(
-            "startupai_controller.board_consumer_compat._return_issue_to_ready",
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
             side_effect=lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         ):
             result = run_one_cycle(
@@ -3178,26 +3218,26 @@ class TestConsumerShellSeams:
         launch_context = _make_prepared_launch_context(tmp_path)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._select_launch_candidate_for_cycle",
+            "startupai_controller.consumer_operational_wiring.select_launch_candidate_for_cycle",
             lambda **kwargs: (_ for _ in ()).throw(
                 AssertionError("selected candidate lookup should be skipped")
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._prepare_selected_launch_candidate",
+            "startupai_controller.consumer_operational_wiring.prepare_selected_launch_candidate",
             lambda **kwargs: (_ for _ in ()).throw(
                 AssertionError("launch preparation should be skipped")
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._claim_launch_context",
+            "startupai_controller.consumer_operational_wiring.claim_launch_context",
             lambda **kwargs: (
                 ClaimedSessionContext("sess-001", 3, kwargs["slot_id"]),
                 None,
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._execute_claimed_session",
+            "startupai_controller.consumer_operational_wiring.execute_claimed_session",
             lambda **kwargs: SessionExecutionOutcome(
                 session_status="success",
                 failure_reason=None,
@@ -3209,7 +3249,7 @@ class TestConsumerShellSeams:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._finalize_claimed_session",
+            "startupai_controller.consumer_operational_wiring.finalize_claimed_session",
             lambda **kwargs: CycleResult(
                 action="claimed",
                 issue_ref=kwargs["launch_context"].issue_ref,
@@ -3239,11 +3279,11 @@ class TestConsumerShellSeams:
         prepared = _make_prepared_cycle_context(tmp_path, config)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._select_launch_candidate_for_cycle",
+            "startupai_controller.consumer_operational_wiring.select_launch_candidate_for_cycle",
             lambda **kwargs: (SimpleNamespace(issue_ref="crew#84"), None),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._prepare_selected_launch_candidate",
+            "startupai_controller.consumer_operational_wiring.prepare_selected_launch_candidate",
             lambda **kwargs: (_ for _ in ()).throw(
                 AssertionError("dry-run should not prepare a worktree")
             ),
@@ -3281,7 +3321,7 @@ class TestConsumerShellSeams:
         db.acquire_lease("crew#84", session_id, now=datetime.now(timezone.utc))
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.claim_ready_issue",
+            "startupai_controller.consumer_automation_bridge.claim_ready_issue",
             lambda *args, **kwargs: ClaimReadyResult(reason="wip-limit"),
         )
 
@@ -3334,7 +3374,7 @@ class TestConsumerShellSeams:
         launch_context = _make_prepared_launch_context(tmp_path)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._return_issue_to_ready",
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("board unavailable")),
         )
 
@@ -3382,26 +3422,26 @@ class TestConsumerShellSeams:
         claimed_context = ClaimedSessionContext("sess-001", 3, 1)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._assemble_codex_prompt",
+            "startupai_controller.consumer_codex_comment_wiring.assemble_codex_prompt",
             lambda *args, **kwargs: "prompt",
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._run_codex_session",
+            "startupai_controller.consumer_codex_comment_wiring.run_codex_session",
             lambda *args, **kwargs: 0,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._parse_codex_result",
+            "startupai_controller.consumer_codex_comment_wiring.parse_codex_result",
             lambda *args, **kwargs: _codex_result_json(
                 outcome="failed",
                 summary="repair failed",
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._session_status_from_codex_result",
+            "startupai_controller.consumer_session_completion_helpers.session_status_from_codex_result",
             lambda *args, **kwargs: ("failed", "tests_failed"),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._create_pr_for_execution_result",
+            "startupai_controller.consumer_operational_wiring.create_pr_for_execution_result",
             lambda **kwargs: PrCreationOutcome(
                 pr_url="https://github.com/O/R/pull/10",
                 has_commits=True,
@@ -3410,13 +3450,13 @@ class TestConsumerShellSeams:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._handoff_execution_to_review",
+            "startupai_controller.consumer_operational_wiring.handoff_execution_to_review",
             lambda **kwargs: (_ for _ in ()).throw(
                 AssertionError("failed repair PRs should not transition to review")
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._handle_non_review_execution_outcome",
+            "startupai_controller.consumer_operational_wiring.handle_non_review_execution_outcome",
             lambda **kwargs: ("failed", None, "repair-pr-failed"),
         )
 
@@ -3460,7 +3500,7 @@ class TestConsumerShellSeams:
         transitioned: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._transition_issue_to_review",
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
             lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
         )
 
@@ -3496,7 +3536,7 @@ class TestConsumerShellSeams:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._transition_issue_to_in_progress",
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_in_progress_from_shell",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 AssertionError("review items without active repair must stay put")
             ),
@@ -3520,7 +3560,7 @@ class TestConsumerShellSeams:
         db = _make_db(tmp_path)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._set_blocked_with_reason",
+            "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("mutation offline")),
         )
 
@@ -3686,7 +3726,7 @@ class TestDrainControls:
             raise GhQueryError("review query failed")
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._list_project_items_by_status",
+            "startupai_controller.consumer_runtime_wiring._list_project_items_by_status",
             failing_review_query,
         )
 
@@ -3954,7 +3994,7 @@ class TestRunDaemonLoop:
         requeued: list[str] = []
 
         with patch(
-            "startupai_controller.board_consumer_compat._return_issue_to_ready",
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
             side_effect=lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         ):
             recovered = _recover_interrupted_sessions(config, db)
@@ -4031,11 +4071,11 @@ class TestRunDaemonLoop:
         transitioned: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._return_issue_to_ready",
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
             lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._transition_issue_to_review",
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
             lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
         )
 
@@ -4064,7 +4104,7 @@ class TestRunDaemonLoop:
         moved: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._transition_issue_to_in_progress",
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_in_progress_from_shell",
             lambda issue_ref, *args, **kwargs: moved.append(issue_ref),
         )
         review_item = _ProjectItemSnapshot(
@@ -4201,7 +4241,7 @@ class TestRunDaemonLoop:
             called["sleep"] = True
             raise AssertionError("sleep should not be called while draining")
 
-        monkeypatch.setattr("startupai_controller.board_consumer_compat.run_one_cycle", fail_run_one_cycle)
+        monkeypatch.setattr("startupai_controller.consumer_runtime_wiring.run_one_cycle_live", fail_run_one_cycle)
         try:
             run_daemon_loop(config, db, sleep_fn=fail_sleep)
         finally:
@@ -4244,17 +4284,17 @@ class TestRunDaemonLoop:
             def submit(self, fn, *args, **kwargs):
                 return _ImmediateFuture(fn(*args, **kwargs))
 
-        monkeypatch.setattr("startupai_controller.board_consumer_compat.ThreadPoolExecutor", _FakeExecutor)
+        monkeypatch.setattr("startupai_controller.consumer_runtime_wiring.ThreadPoolExecutor", _FakeExecutor)
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat.load_automation_config",
+            "startupai_controller.consumer_runtime_wiring.load_automation_config",
             lambda *args, **kwargs: None,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._current_main_workflows",
+            "startupai_controller.consumer_runtime_wiring._current_main_workflows",
             lambda *args, **kwargs: ({}, {"crew": SimpleNamespace(available=True)}, 1),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._recover_interrupted_sessions",
+            "startupai_controller.consumer_operational_wiring.recover_interrupted_sessions",
             lambda *args, **kwargs: [],
         )
         prepared = SimpleNamespace(
@@ -4272,15 +4312,15 @@ class TestRunDaemonLoop:
             github_request_counts={},
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._prepare_cycle",
+            "startupai_controller.consumer_preflight_wiring.prepare_cycle",
             lambda *args, **kwargs: prepared,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._select_candidate_for_cycle",
+            "startupai_controller.consumer_selection_retry_wiring.select_candidate_for_cycle_from_shell",
             lambda *args, **kwargs: next(candidates),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._prepare_launch_candidate",
+            "startupai_controller.consumer_cycle_wiring.prepare_launch_candidate",
             lambda issue_ref, **kwargs: SimpleNamespace(issue_ref=issue_ref),
         )
 
@@ -4303,7 +4343,7 @@ class TestRunDaemonLoop:
             )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer_compat._run_worker_cycle",
+            "startupai_controller.consumer_support_wiring.run_worker_cycle",
             fake_worker_cycle,
         )
 
@@ -4751,9 +4791,6 @@ class TestBlockedStreakEscalation:
 
 class TestPendingAutomergeRetry:
     def test_review_queue_short_retry_for_pending_verification(self) -> None:
-        from startupai_controller.board_consumer_compat import (
-            _review_queue_retry_seconds_for_blocked_reason,
-        )
         seconds = _review_queue_retry_seconds_for_blocked_reason(
             "auto-merge pending verification"
         )

@@ -229,6 +229,25 @@ def test_only_board_consumer_cli_imports_the_consumer_shell() -> None:
     )
 
 
+def test_consumer_stack_has_no_compat_or_shell_service_locator_patterns() -> None:
+    offending_compat_imports: list[str] = []
+    offending_service_locator_usage: list[str] = []
+    for path in sorted(SRC_ROOT.glob("consumer*.py")):
+        source = _source_text(path)
+        if "board_consumer_compat" in source:
+            offending_compat_imports.append(path.name)
+        if "_shell_module(" in source or "shell=sys.modules[__name__]" in source:
+            offending_service_locator_usage.append(path.name)
+    assert offending_compat_imports == [], (
+        "consumer modules still depend on board_consumer_compat: "
+        f"{offending_compat_imports}"
+    )
+    assert offending_service_locator_usage == [], (
+        "consumer modules still use shell service-locator patterns: "
+        f"{offending_service_locator_usage}"
+    )
+
+
 def test_thin_entrypoints_do_not_import_direct_mechanism_modules() -> None:
     for path in THIN_ENTRY_MODULES:
         imported = _runtime_imported_modules(path)

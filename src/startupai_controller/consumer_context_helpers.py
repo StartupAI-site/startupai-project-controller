@@ -5,13 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from startupai_controller.runtime.wiring import (
+    build_github_port_bundle as _build_github_port_bundle,
+)
+
 
 def fetch_issue_context(
     owner: str,
     repo: str,
     number: int,
     *,
-    build_github_port_bundle: Callable[..., Any],
+    build_github_port_bundle: Callable[..., Any] = _build_github_port_bundle,
     issue_context_port: Any | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:

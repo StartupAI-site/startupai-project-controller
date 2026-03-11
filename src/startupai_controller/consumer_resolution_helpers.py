@@ -7,12 +7,17 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable
 
-
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
-
-    return board_consumer_compat
+import startupai_controller.consumer_automation_bridge as _automation_bridge
+import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
+from startupai_controller.board_graph import _resolve_issue_coordinates
+from startupai_controller.control_plane_runtime import (
+    _mark_degraded,
+    _record_successful_github_mutation,
+)
+from startupai_controller.domain.models import LinkedIssue
+from startupai_controller.domain.resolution_policy import build_resolution_comment
+from startupai_controller.runtime.wiring import gh_reason_code
+from startupai_controller.validate_critical_path_promotion import GhQueryError
 
 
 def repo_root_for_issue_ref(
@@ -367,6 +372,25 @@ def queue_issue_close(
     )
 
 
+def queue_status_transition(
+    db: Any,
+    issue_ref: str,
+    *,
+    to_status: str,
+    from_statuses: set[str],
+    blocked_reason: str | None = None,
+) -> None:
+    """Queue a board status mutation for replay after GitHub recovery."""
+    payload: dict[str, Any] = {
+        "issue_ref": issue_ref,
+        "to_status": to_status,
+        "from_statuses": sorted(from_statuses),
+    }
+    if blocked_reason is not None:
+        payload["blocked_reason"] = blocked_reason
+    db.queue_deferred_action(issue_ref, "set_status", payload)
+
+
 def set_issue_handoff_target(
     issue_ref: str,
     target: str,
@@ -517,7 +541,6 @@ def apply_resolution_action_from_shell(
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Apply a verified resolution decision using live shell seams."""
-    shell = _shell_module()
     return apply_resolution_action(
         issue_ref,
         evaluation,
@@ -529,17 +552,17 @@ def apply_resolution_action_from_shell(
         board_mutator=board_mutator,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        resolve_issue_coordinates=shell._resolve_issue_coordinates,
-        build_resolution_comment=shell.build_resolution_comment,
-        mark_issues_done=shell.mark_issues_done,
-        record_successful_github_mutation=shell._record_successful_github_mutation,
-        mark_degraded=shell._mark_degraded,
-        gh_reason_code=shell.gh_reason_code,
-        queue_status_transition=shell._queue_status_transition,
-        runtime_comment_poster=shell._runtime_comment_poster,
-        runtime_issue_closer=shell._runtime_issue_closer,
-        set_blocked_with_reason=shell._set_blocked_with_reason,
-        set_issue_handoff_target_fn=shell._set_issue_handoff_target,
-        linked_issue_type=shell.LinkedIssue,
-        gh_query_error_type=shell.GhQueryError,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        build_resolution_comment=build_resolution_comment,
+        mark_issues_done=_automation_bridge.mark_issues_done,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        mark_degraded=_mark_degraded,
+        gh_reason_code=gh_reason_code,
+        queue_status_transition=queue_status_transition,
+        runtime_comment_poster=_codex_comment_wiring.runtime_comment_poster,
+        runtime_issue_closer=_codex_comment_wiring.runtime_issue_closer,
+        set_blocked_with_reason=_automation_bridge.set_blocked_with_reason,
+        set_issue_handoff_target_fn=set_issue_handoff_target,
+        linked_issue_type=LinkedIssue,
+        gh_query_error_type=GhQueryError,
     )

@@ -36,6 +36,7 @@ from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
     parse_issue_ref,
 )
+from startupai_controller.runtime.wiring import gh_reason_code as _gh_reason_code
 
 
 @dataclass(frozen=True)
@@ -185,7 +186,7 @@ def apply_review_queue_partial_failure(
     *,
     config: Any,
     error: str | None,
-    gh_reason_code: Callable[[str | Exception], str],
+    gh_reason_code: Callable[[str | Exception], str] = _gh_reason_code,
     now: datetime | None = None,
 ) -> None:
     """Back off queued review entries after a partial-failure cycle."""

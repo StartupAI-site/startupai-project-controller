@@ -4,9 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Any, Callable
 
+import startupai_controller.consumer_automation_bridge as _automation_bridge
+import startupai_controller.consumer_board_state_helpers as _board_state_helpers
+import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 import startupai_controller.consumer_review_queue_helpers as _review_queue_helpers
+from startupai_controller.consumer_types import (
+    PreparedDueReviewProcessing,
+    PreparedReviewQueueBatch,
+    ReviewGroupProcessingOutcome,
+    ReviewQueueProcessingOutcome,
+)
+from startupai_controller.domain.models import ReviewQueueDrainSummary
+from startupai_controller.runtime.wiring import gh_reason_code
 
 
 @dataclass(frozen=True)
@@ -27,36 +39,31 @@ class ReviewQueueWiringDeps:
     log_backfill_warning: Callable[[str, str, Exception], None]
 
 
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
-
-    return board_consumer_compat
+logger = logging.getLogger("board-consumer")
 
 
 def build_review_queue_wiring_deps() -> ReviewQueueWiringDeps:
     """Build shell-facing review-queue wiring dependencies."""
-    shell = _shell_module()
     return ReviewQueueWiringDeps(
-        prepared_batch_factory=shell.PreparedReviewQueueBatch,
-        summary_factory=shell.ReviewQueueDrainSummary,
-        prepared_due_processing_factory=shell.PreparedDueReviewProcessing,
-        review_group_outcome_factory=shell.ReviewGroupProcessingOutcome,
-        review_queue_processing_outcome_factory=shell.ReviewQueueProcessingOutcome,
-        post_pr_codex_verdict=shell._post_pr_codex_verdict,
-        review_rescue_fn=shell.review_rescue,
-        escalate_to_claude=shell._escalate_to_claude,
-        gh_reason_code=shell.gh_reason_code,
-        log_probe_warning=lambda err: shell.logger.warning(
+        prepared_batch_factory=PreparedReviewQueueBatch,
+        summary_factory=ReviewQueueDrainSummary,
+        prepared_due_processing_factory=PreparedDueReviewProcessing,
+        review_group_outcome_factory=ReviewGroupProcessingOutcome,
+        review_queue_processing_outcome_factory=ReviewQueueProcessingOutcome,
+        post_pr_codex_verdict=_codex_comment_wiring.post_pr_codex_verdict,
+        review_rescue_fn=_automation_bridge.review_rescue,
+        escalate_to_claude=_board_state_helpers.escalate_to_claude_from_shell,
+        gh_reason_code=gh_reason_code,
+        log_probe_warning=lambda err: logger.warning(
             "Review queue wakeup probe failed: %s",
             err,
         ),
-        log_pre_backfill_warning=lambda issue_ref, err: shell.logger.warning(
+        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
             "Pre-backfill verdict failed for %s: %s",
             issue_ref,
             err,
         ),
-        log_backfill_warning=lambda issue_ref, session_id, err: shell.logger.warning(
+        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
             "Review verdict backfill failed for %s (%s): %s",
             issue_ref,
             session_id,

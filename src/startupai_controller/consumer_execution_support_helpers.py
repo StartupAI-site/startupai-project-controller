@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 import subprocess
 from typing import Any, Callable
 
-from startupai_controller.validate_critical_path_promotion import direct_predecessors
+from startupai_controller.runtime.wiring import build_worktree_port as _build_worktree_port
+from startupai_controller.validate_critical_path_promotion import (
+    direct_predecessors,
+    in_any_critical_path as _in_any_critical_path,
+)
 
 
 def run_workspace_hooks(
@@ -17,7 +21,7 @@ def run_workspace_hooks(
     branch_name: str,
     worktree_port: Any | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    build_worktree_port: Callable[..., Any],
+    build_worktree_port: Callable[..., Any] = _build_worktree_port,
 ) -> None:
     """Run repo-owned workspace hook commands in the claimed worktree."""
     port = worktree_port or build_worktree_port(subprocess_runner=subprocess_runner)
@@ -96,7 +100,7 @@ def build_dependency_summary(
     project_number: int,
     *,
     status_resolver: Callable[..., str] | None = None,
-    in_any_critical_path: Callable[[Any, str], bool],
+    in_any_critical_path: Callable[[Any, str], bool] = _in_any_critical_path,
 ) -> str:
     """Build a human-readable dependency summary for the codex prompt."""
     if not in_any_critical_path(config, issue_ref):

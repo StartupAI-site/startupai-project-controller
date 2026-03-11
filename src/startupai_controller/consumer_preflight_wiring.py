@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
+import startupai_controller.consumer_operational_wiring as _operational_wiring
+import startupai_controller.consumer_support_wiring as _support_wiring
+from startupai_controller.control_plane_rescue import (
+    _drain_review_queue,
+    _replay_deferred_actions,
+)
 from startupai_controller.application.consumer.preflight import (
     PrepareCyclePhasesDeps,
     execute_prepare_cycle_phases as _execute_prepare_cycle_phases_use_case,
@@ -21,45 +28,60 @@ from startupai_controller.application.consumer.preflight_runtime import (
     run_reconciliation_phase as _run_reconciliation_phase_use_case,
     run_review_queue_phase as _run_review_queue_phase_use_case,
 )
+from startupai_controller.consumer_types import PreparedCycleContext
+from startupai_controller.control_plane_runtime import (
+    CONTROL_KEY_DEGRADED,
+    _apply_automation_runtime,
+    _clear_degraded,
+    _current_main_workflows,
+    _mark_degraded,
+    _persist_admission_summary,
+    _record_successful_board_sync,
+    _record_successful_github_mutation,
+)
+from startupai_controller.runtime.wiring import (
+    GitHubRuntimeMemo as CycleGitHubMemo,
+    begin_runtime_request_stats,
+    build_github_port_bundle,
+    build_ready_flow_port,
+    build_session_store,
+    end_runtime_request_stats,
+)
+from startupai_controller.domain.scheduling_policy import snapshot_to_issue_ref as _snapshot_to_issue_ref
+from startupai_controller.validate_critical_path_promotion import ConfigError, load_config, parse_issue_ref
+from startupai_controller.board_automation_config import load_automation_config
 
-
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
-
-    return board_consumer_compat
+logger = logging.getLogger("board-consumer")
 
 
 def build_init_cycle_runtime_deps() -> InitializeCycleRuntimeDeps:
     """Build the deps for cycle runtime initialization."""
-    shell = _shell_module()
     return InitializeCycleRuntimeDeps(
-        build_session_store=shell.build_session_store,
-        load_config=shell.load_config,
-        load_automation_config=shell.load_automation_config,
-        apply_automation_runtime=shell._apply_automation_runtime,
-        current_main_workflows=shell._current_main_workflows,
-        build_github_port_bundle=shell.build_github_port_bundle,
-        build_ready_flow_port=shell.build_ready_flow_port,
-        cycle_github_memo_factory=shell.CycleGitHubMemo,
-        config_error_type=shell.ConfigError,
-        logger=shell.logger,
+        build_session_store=build_session_store,
+        load_config=load_config,
+        load_automation_config=load_automation_config,
+        apply_automation_runtime=_apply_automation_runtime,
+        current_main_workflows=_current_main_workflows,
+        build_github_port_bundle=build_github_port_bundle,
+        build_ready_flow_port=build_ready_flow_port,
+        cycle_github_memo_factory=CycleGitHubMemo,
+        config_error_type=ConfigError,
+        logger=logger,
     )
 
 
 def build_phase_helper_deps() -> PhaseHelperDeps:
     """Build the deps for preflight phase helpers."""
-    shell = _shell_module()
     return PhaseHelperDeps(
-        replay_deferred_actions=shell._replay_deferred_actions,
-        drain_review_queue=shell._drain_review_queue,
-        reconcile_board_truth=shell._reconcile_board_truth,
-        record_successful_github_mutation=shell._record_successful_github_mutation,
-        record_successful_board_sync=shell._record_successful_board_sync,
-        clear_degraded=shell._clear_degraded,
-        mark_degraded=shell._mark_degraded,
-        persist_admission_summary=shell._persist_admission_summary,
-        logger=shell.logger,
+        replay_deferred_actions=_replay_deferred_actions,
+        drain_review_queue=_drain_review_queue,
+        reconcile_board_truth=_operational_wiring.reconcile_board_truth,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        record_successful_board_sync=_record_successful_board_sync,
+        clear_degraded=_clear_degraded,
+        mark_degraded=_mark_degraded,
+        persist_admission_summary=_persist_admission_summary,
+        logger=logger,
     )
 
 
@@ -232,14 +254,13 @@ def execute_prepare_cycle_phases(
 ) -> Any:
     """Execute the preflight phases for one cycle."""
     if deps is None:
-        shell = _shell_module()
         deps = PrepareCyclePhasesDeps(
-            run_deferred_replay_phase=shell._run_deferred_replay_phase,
-            load_board_snapshot_phase=shell._load_board_snapshot_phase,
-            run_executor_routing_phase=shell._run_executor_routing_phase,
-            run_reconciliation_phase=shell._run_reconciliation_phase,
-            run_review_queue_phase=shell._run_review_queue_phase,
-            run_admission_phase=shell._run_admission_phase,
+            run_deferred_replay_phase=run_deferred_replay_phase,
+            load_board_snapshot_phase=load_board_snapshot_phase,
+            run_executor_routing_phase=run_executor_routing_phase,
+            run_reconciliation_phase=run_reconciliation_phase,
+            run_review_queue_phase=run_review_queue_phase,
+            run_admission_phase=run_admission_phase,
         )
         result = _execute_prepare_cycle_phases_use_case(
             config,
@@ -287,23 +308,22 @@ def prepare_cycle(
     gh_runner: Callable[..., str] | None = None,
 ) -> Any:
     """Run control-plane preflight once for a daemon tick."""
-    shell = _shell_module()
     return _prepare_cycle_use_case(
         config,
         db,
         deps=PrepareCycleDeps(
-            initialize_cycle_runtime_deps=shell._build_init_cycle_runtime_deps(),
-            phase_helper_deps=shell._build_phase_helper_deps(),
-            begin_runtime_request_stats=shell.begin_runtime_request_stats,
-            end_runtime_request_stats=shell.end_runtime_request_stats,
-            snapshot_to_issue_ref=shell._snapshot_to_issue_ref,
-            parse_issue_ref=shell.parse_issue_ref,
-            record_metric=shell._record_metric,
-            control_key_degraded=shell.CONTROL_KEY_DEGRADED,
+            initialize_cycle_runtime_deps=build_init_cycle_runtime_deps(),
+            phase_helper_deps=build_phase_helper_deps(),
+            begin_runtime_request_stats=begin_runtime_request_stats,
+            end_runtime_request_stats=end_runtime_request_stats,
+            snapshot_to_issue_ref=_snapshot_to_issue_ref,
+            parse_issue_ref=parse_issue_ref,
+            record_metric=_support_wiring.record_metric,
+            control_key_degraded=CONTROL_KEY_DEGRADED,
             prepare_cycle_phases_deps_factory=PrepareCyclePhasesDeps,
-            execute_prepare_cycle_phases=shell._execute_prepare_cycle_phases,
+            execute_prepare_cycle_phases=execute_prepare_cycle_phases,
         ),
-        prepared_cycle_context_factory=shell.PreparedCycleContext,
+        prepared_cycle_context_factory=PreparedCycleContext,
         dry_run=dry_run,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,

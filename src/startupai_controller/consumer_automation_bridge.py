@@ -13,6 +13,9 @@ from startupai_controller.application.automation.review_wiring import (
     review_rescue as _wiring_review_rescue,
     sync_review_state as _wiring_sync_review_state,
 )
+from startupai_controller.automation_ready_review_wiring import (
+    claim_ready_issue as _wiring_claim_ready_issue,
+)
 from startupai_controller.automation_board_state_helpers import (
     legacy_board_status_mutator as _legacy_board_status_mutator_helper,
     mark_issues_done as _mark_issues_done_helper,
@@ -28,6 +31,7 @@ from startupai_controller.automation_port_helpers import (
     _set_single_select_field,
     query_closing_issues,
 )
+from startupai_controller.runtime.wiring import build_ready_flow_port
 
 
 def _set_board_status(
@@ -167,6 +171,24 @@ def mark_issues_done(
         gh_runner=gh_runner,
         transition_issue_status_fn=_transition_issue_status,
     )
+
+
+def claim_ready_issue(
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    **kwargs,
+) -> Any:
+    """Compatibility helper around the ready-flow claim operation."""
+    ready_flow_port = kwargs.pop("ready_flow_port", None) or build_ready_flow_port()
+    if ready_flow_port is not None:
+        return ready_flow_port.claim_ready_issue(
+            config,
+            project_owner,
+            project_number,
+            **kwargs,
+        )
+    return _wiring_claim_ready_issue(config, project_owner, project_number, **kwargs)
 
 
 def sync_review_state(

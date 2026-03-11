@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 from startupai_controller import consumer_automation_bridge as _automation_bridge
+import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
+import startupai_controller.consumer_resolution_helpers as _resolution_helpers
+from startupai_controller.board_graph import _resolve_issue_coordinates
+from startupai_controller.domain.repair_policy import marker_for as _marker_for
+from startupai_controller.runtime.wiring import build_github_port_bundle
 from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
     parse_issue_ref,
 )
+
+logger = logging.getLogger("board-consumer")
 
 
 def transition_issue_to_review(
@@ -320,13 +328,6 @@ def reconcile_stale_in_progress_items(
     return moved_ready, moved_review, moved_blocked
 
 
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
-
-    return board_consumer_compat
-
-
 def transition_issue_to_review_from_shell(
     issue_ref: str,
     config: Any,
@@ -367,13 +368,12 @@ def transition_issue_to_in_progress_from_shell(
 ) -> None:
     """Move an actively running local repair back into In Progress."""
     del board_info_resolver, board_mutator
-    shell = _shell_module()
     return transition_issue_to_in_progress(
         issue_ref,
         config,
         project_owner,
         project_number,
-        build_github_port_bundle=shell.build_github_port_bundle,
+        build_github_port_bundle=build_github_port_bundle,
         from_statuses=from_statuses,
         review_state_port=review_state_port,
         board_port=board_port,
@@ -396,13 +396,12 @@ def return_issue_to_ready_from_shell(
 ) -> None:
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
     del board_info_resolver, board_mutator
-    shell = _shell_module()
     return return_issue_to_ready(
         issue_ref,
         config,
         project_owner,
         project_number,
-        build_github_port_bundle=shell.build_github_port_bundle,
+        build_github_port_bundle=build_github_port_bundle,
         from_statuses=from_statuses,
         review_state_port=review_state_port,
         board_port=board_port,
@@ -423,7 +422,6 @@ def escalate_to_claude_from_shell(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    shell = _shell_module()
     return _execution_support_helpers.escalate_to_claude(
         issue_ref,
         config,
@@ -434,11 +432,15 @@ def escalate_to_claude_from_shell(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        marker_for=shell._marker_for,
-        resolve_issue_coordinates=shell._resolve_issue_coordinates,
-        set_blocked_with_reason=shell._set_blocked_with_reason,
-        set_issue_handoff_target=shell._set_issue_handoff_target,
-        default_review_comment_checker=shell._default_review_comment_checker,
-        runtime_comment_poster=shell._runtime_comment_poster,
-        logger=shell.logger,
+        marker_for=_marker_for,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        set_blocked_with_reason=_automation_bridge.set_blocked_with_reason,
+        set_issue_handoff_target=lambda *args, **kwargs: _resolution_helpers.set_issue_handoff_target(
+            *args,
+            build_github_port_bundle=build_github_port_bundle,
+            **kwargs,
+        ),
+        default_review_comment_checker=_codex_comment_wiring.default_review_comment_checker,
+        runtime_comment_poster=_codex_comment_wiring.runtime_comment_poster,
+        logger=logger,
     )

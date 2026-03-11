@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from typing import Any, Callable
 
+import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
+import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
+import startupai_controller.consumer_operational_wiring as _operational_wiring
+import startupai_controller.consumer_support_wiring as _support_wiring
+from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.consumer_launch_helpers import (
     resolve_launch_candidate_metadata as _resolve_launch_candidate_metadata_helper,
     resolve_launch_issue_context as _resolve_launch_issue_context_helper,
@@ -18,13 +24,13 @@ from startupai_controller.consumer_worktree_helpers import (
     prepare_worktree as _prepare_worktree_helper,
     reconcile_repair_branch as _reconcile_repair_branch_helper,
 )
+from startupai_controller.consumer_types import WorktreePrepareError
+from startupai_controller.consumer_workflow import load_worktree_workflow
+from startupai_controller.domain.launch_policy import launch_session_kind as _launch_session_kind
+from startupai_controller.runtime.wiring import build_session_store, build_worktree_port
+from startupai_controller.validate_critical_path_promotion import parse_issue_ref
 
-
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
-
-    return board_consumer_compat
+logger = logging.getLogger("board-consumer")
 
 
 def git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
@@ -44,22 +50,21 @@ def prepare_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
-    shell = _shell_module()
     return _prepare_worktree_helper(
         issue_ref,
         title,
         config,
         db,
-        parse_issue_ref=shell.parse_issue_ref,
-        build_session_store=shell.build_session_store,
-        build_worktree_port=shell.build_worktree_port,
-        list_repo_worktrees=shell._list_repo_worktrees,
-        worktree_is_clean=shell._worktree_is_clean,
-        worktree_ownership_is_safe=shell._worktree_ownership_is_safe,
-        create_worktree=shell._create_worktree,
-        record_metric=shell._record_metric,
-        error_cls=shell.WorktreePrepareError,
-        log_warning=lambda ref, err: shell.logger.warning(
+        parse_issue_ref=parse_issue_ref,
+        build_session_store=build_session_store,
+        build_worktree_port=build_worktree_port,
+        list_repo_worktrees=_support_wiring.list_repo_worktrees,
+        worktree_is_clean=_support_wiring.worktree_is_clean,
+        worktree_ownership_is_safe=_support_wiring.worktree_ownership_is_safe,
+        create_worktree=create_worktree,
+        record_metric=_support_wiring.record_metric,
+        error_cls=WorktreePrepareError,
+        log_warning=lambda ref, err: logger.warning(
             "Worktree reuse lookup failed for %s (%s); falling back to create",
             ref,
             err,
@@ -81,12 +86,11 @@ def create_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create a worktree for the issue."""
-    shell = _shell_module()
     return _create_worktree_helper(
         issue_ref,
         title,
         config,
-        build_worktree_port=shell.build_worktree_port,
+        build_worktree_port=build_worktree_port,
         branch_name_override=branch_name_override,
         worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
@@ -101,11 +105,10 @@ def fast_forward_existing_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree when possible."""
-    shell = _shell_module()
     _fast_forward_existing_worktree_helper(
         worktree_path,
         branch,
-        build_worktree_port=shell.build_worktree_port,
+        build_worktree_port=build_worktree_port,
         worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
     )
@@ -119,11 +122,10 @@ def reconcile_repair_branch(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> Any:
     """Reconcile a repair branch against origin/main and its remote head."""
-    shell = _shell_module()
     return _reconcile_repair_branch_helper(
         worktree_path,
         branch,
-        build_worktree_port=shell.build_worktree_port,
+        build_worktree_port=build_worktree_port,
         worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
     )
@@ -146,7 +148,6 @@ def setup_launch_worktree(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, str, str | None, str | None]:
     """Set up a launch worktree and reconcile repair branches when needed."""
-    shell = _shell_module()
     return _setup_launch_worktree_helper(
         issue_ref,
         title,
@@ -155,11 +156,11 @@ def setup_launch_worktree(
         config=config,
         cp_config=cp_config,
         db=db,
-        prepare_worktree=shell._prepare_worktree,
-        record_metric=shell._record_metric,
-        block_prelaunch_issue=shell._block_prelaunch_issue,
-        reconcile_repair_branch=shell._reconcile_repair_branch,
-        worktree_error_cls=shell.WorktreePrepareError,
+        prepare_worktree=prepare_worktree,
+        record_metric=_support_wiring.record_metric,
+        block_prelaunch_issue=_operational_wiring.block_prelaunch_issue,
+        reconcile_repair_branch=reconcile_repair_branch,
+        worktree_error_cls=WorktreePrepareError,
         session_store=session_store,
         worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
@@ -177,13 +178,12 @@ def resolve_launch_runtime(
     prepared: Any,
 ) -> tuple[Any, Any]:
     """Load worktree workflow and effective consumer config."""
-    shell = _shell_module()
     return _resolve_launch_runtime_helper(
         candidate_prefix,
         worktree_path,
         config=config,
         prepared=prepared,
-        load_worktree_workflow=shell.load_worktree_workflow,
+        load_worktree_workflow=load_worktree_workflow,
     )
 
 
@@ -197,7 +197,6 @@ def resolve_launch_candidate_metadata(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[Any, ...]:
     """Resolve launch candidate identity and repair-session metadata."""
-    shell = _shell_module()
     return _resolve_launch_candidate_metadata_helper(
         issue_ref,
         cp_config=cp_config,
@@ -205,11 +204,11 @@ def resolve_launch_candidate_metadata(
         board_snapshot=board_snapshot,
         pr_port=pr_port,
         gh_runner=gh_runner,
-        parse_issue_ref=shell.parse_issue_ref,
-        resolve_issue_coordinates=shell._resolve_issue_coordinates,
-        snapshot_for_issue=shell._snapshot_for_issue,
-        classify_open_pr_candidates=shell._classify_open_pr_candidates,
-        launch_session_kind=shell._launch_session_kind,
+        parse_issue_ref=parse_issue_ref,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        snapshot_for_issue=_support_wiring.snapshot_for_issue,
+        classify_open_pr_candidates=_codex_comment_wiring.classify_open_pr_candidates,
+        launch_session_kind=_launch_session_kind,
     )
 
 
@@ -226,7 +225,6 @@ def resolve_launch_issue_context(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[dict[str, Any], str]:
     """Hydrate launch issue context and compute the launch title."""
-    shell = _shell_module()
     return _resolve_launch_issue_context_helper(
         issue_ref,
         owner=owner,
@@ -237,7 +235,7 @@ def resolve_launch_issue_context(
         db=db,
         issue_context_port=issue_context_port,
         gh_runner=gh_runner,
-        hydrate_issue_context=shell._hydrate_issue_context,
+        hydrate_issue_context=_support_wiring.hydrate_issue_context,
     )
 
 
@@ -251,7 +249,6 @@ def run_launch_workspace_hooks(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
 ) -> None:
     """Run workflow-defined launch hooks for a prepared worktree."""
-    shell = _shell_module()
     _run_launch_workspace_hooks_helper(
         workflow_definition,
         worktree_path=worktree_path,
@@ -259,5 +256,5 @@ def run_launch_workspace_hooks(
         branch_name=branch_name,
         worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
-        run_workspace_hooks=shell._run_workspace_hooks,
+        run_workspace_hooks=_execution_support_helpers.run_workspace_hooks,
     )

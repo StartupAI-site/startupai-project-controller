@@ -85,6 +85,14 @@ class ClaimedSessionContext:
 
 
 @dataclass(frozen=True)
+class PendingClaimContext:
+    """Session state prepared for board claim after local launch prep."""
+
+    session_id: str
+    effective_max_retries: int
+
+
+@dataclass(frozen=True)
 class SessionExecutionOutcome:
     """Outcome of executing a claimed local session."""
 

@@ -8,20 +8,26 @@ from typing import Any, Callable
 import startupai_controller.consumer_claim_helpers as _claim_helpers
 from startupai_controller import consumer_selection_helpers as _selection_helpers
 from startupai_controller.board_graph import _ready_snapshot_rank
-
-
-def _shell_module():
-    """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer_compat
-
-    return board_consumer_compat
+from startupai_controller.domain.review_queue_policy import (
+    effective_retry_backoff as _effective_retry_backoff_primitives,
+    is_retryable_failure_reason as _is_retryable_failure_reason,
+    session_retry_due_at as _session_retry_due_at,
+)
+from startupai_controller.runtime.wiring import build_github_port_bundle
+from startupai_controller.domain.scheduling_policy import snapshot_to_issue_ref as _snapshot_to_issue_ref
+from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
+    evaluate_ready_promotion,
+    in_any_critical_path,
+    parse_issue_ref,
+)
 
 
 def effective_retry_backoff(
     config: Any,
     workflow: Any | None,
     *,
-    effective_retry_backoff_primitives: Callable[..., tuple[int, int]],
+    effective_retry_backoff_primitives: Callable[..., tuple[int, int]] = _effective_retry_backoff_primitives,
 ) -> tuple[int, int]:
     """Return effective retry backoff (base, max) in seconds."""
     runtime = workflow.runtime if workflow is not None else None
@@ -47,7 +53,7 @@ def retry_backoff_active(
     *,
     base_seconds: int,
     max_seconds: int,
-    session_retry_due_at: Callable[..., Any],
+    session_retry_due_at: Callable[..., Any] = _session_retry_due_at,
 ) -> bool:
     """Return True when a recent failed attempt is still cooling down."""
     latest = db.latest_session_for_issue(issue_ref)
@@ -290,7 +296,6 @@ def select_best_candidate_from_shell(
 ) -> str | None:
     """Select the highest-ranked ready issue for the consumer shell."""
     del automation_config
-    shell = _shell_module()
     return select_best_candidate(
         config,
         project_owner,
@@ -303,12 +308,12 @@ def select_best_candidate_from_shell(
         github_memo=github_memo,
         gh_runner=gh_runner,
         issue_filter=issue_filter,
-        build_github_port_bundle=shell.build_github_port_bundle,
-        parse_issue_ref=shell.parse_issue_ref,
-        config_error_type=shell.ConfigError,
-        snapshot_to_issue_ref=shell._snapshot_to_issue_ref,
-        in_any_critical_path=shell.in_any_critical_path,
-        evaluate_ready_promotion=shell.evaluate_ready_promotion,
+        build_github_port_bundle=build_github_port_bundle,
+        parse_issue_ref=parse_issue_ref,
+        config_error_type=ConfigError,
+        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+        in_any_critical_path=in_any_critical_path,
+        evaluate_ready_promotion=evaluate_ready_promotion,
         ready_snapshot_rank=_ready_snapshot_rank,
     )
 
@@ -324,7 +329,6 @@ def select_candidate_for_cycle_from_shell(
     excluded_issue_refs: set[str] | None = None,
 ) -> str | None:
     """Select the next eligible issue for one consumer cycle slot."""
-    shell = _shell_module()
     return select_candidate_for_cycle(
         config,
         db,
@@ -333,8 +337,8 @@ def select_candidate_for_cycle_from_shell(
         status_resolver=status_resolver,
         gh_runner=gh_runner,
         excluded_issue_refs=excluded_issue_refs,
-        parse_issue_ref=shell.parse_issue_ref,
-        effective_retry_backoff=shell._effective_retry_backoff,
-        retry_backoff_active=shell._retry_backoff_active,
-        select_best_candidate=shell._select_best_candidate,
+        parse_issue_ref=parse_issue_ref,
+        effective_retry_backoff=effective_retry_backoff,
+        retry_backoff_active=retry_backoff_active,
+        select_best_candidate=select_best_candidate_from_shell,
     )
