@@ -133,6 +133,9 @@ from startupai_controller.application.automation.ready_claim import (
     claim_ready_issue as _app_claim_ready_issue,
     schedule_ready_items as _app_schedule_ready_items,
 )
+from startupai_controller.application.automation.auto_promote import (
+    auto_promote_successors as _app_auto_promote_successors,
+)
 from startupai_controller.application.automation.ready_dependencies import (
     enforce_ready_dependency_guard as _app_enforce_ready_dependency_guard,
 )
@@ -1409,85 +1412,49 @@ def auto_promote_successors(
     gh_runner: Callable[..., str] | None = None,
 ) -> PromotionResult:
     """Promote eligible successors of a Done issue."""
-    result = PromotionResult()
-    successors = direct_successors(config, issue_ref)
-
-    if not successors:
-        return result
-
     check_comment = comment_checker or _comment_exists
-    post_comment = comment_poster or _post_comment
 
-    for successor_ref in sorted(successors):
-        parsed = parse_issue_ref(successor_ref)
+    def _post_bridge_comment(
+        owner: str,
+        repo: str,
+        number: int,
+        body: str,
+        *,
+        gh_runner: Callable[..., str] | None = None,
+    ) -> None:
+        if comment_poster is not None:
+            comment_poster(owner, repo, number, body)
+            return
+        target_board_port = board_port or _default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        target_board_port.post_issue_comment(f"{owner}/{repo}", number, body)
 
-        if parsed.prefix == this_repo_prefix:
-            # Same-repo successor: attempt direct promotion
-            code, output = promote_to_ready(
-                issue_ref=successor_ref,
-                config=config,
-                project_owner=project_owner,
-                project_number=project_number,
-                dry_run=dry_run,
-                status_resolver=status_resolver,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                controller_owned_resolver=lambda ref: _controller_owned_admission(
-                    ref, automation_config
-                ),
-            )
-            if code == 0:
-                result.promoted.append(successor_ref)
-            else:
-                result.skipped.append((successor_ref, output))
-        else:
-            # Cross-repo successor: post bridge comment
-            job_id = _new_handoff_job_id(issue_ref, successor_ref)
-            marker = _marker_for("promote-bridge", successor_ref)
-
-            succ_owner, succ_repo, succ_number = _issue_ref_to_repo_parts(
-                successor_ref, config
-            )
-
-            if check_comment(
-                succ_owner, succ_repo, succ_number, marker
-            ):
-                result.skipped.append(
-                    (successor_ref, "Bridge comment already exists")
-                )
-                continue
-
-            if not dry_run:
-                handoff_marker = (
-                    f"<!-- {MARKER_PREFIX}:handoff:job={job_id} -->"
-                )
-                body = (
-                    f"{marker}\n"
-                    f"{handoff_marker}\n"
-                    f"**Auto-promote candidate**: `{successor_ref}` may be "
-                    f"eligible for Ready now that `{issue_ref}` is Done.\n\n"
-                    f"Run from the appropriate repo:\n"
-                    f"```\nmake promote-ready ISSUE={successor_ref}\n```"
-                )
-                if comment_poster is not None:
-                    post_comment(succ_owner, succ_repo, succ_number, body)
-                else:
-                    board_port = board_port or _default_board_mutation_port(
-                        project_owner,
-                        project_number,
-                        config,
-                        gh_runner=gh_runner,
-                    )
-                    board_port.post_issue_comment(
-                        f"{succ_owner}/{succ_repo}",
-                        succ_number,
-                        body,
-                    )
-
-            result.cross_repo_pending.append(successor_ref)
-            result.handoff_jobs.append(job_id)
-
-    return result
+    return _app_auto_promote_successors(
+        issue_ref=issue_ref,
+        config=config,
+        this_repo_prefix=this_repo_prefix,
+        project_owner=project_owner,
+        project_number=project_number,
+        automation_config=automation_config,
+        dry_run=dry_run,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        promote_to_ready=promote_to_ready,
+        controller_owned_resolver=lambda ref: _controller_owned_admission(
+            ref,
+            automation_config,
+        ),
+        comment_exists=check_comment,
+        post_cross_repo_comment=_post_bridge_comment,
+        resolve_issue_parts=_issue_ref_to_repo_parts,
+        new_handoff_job_id=_new_handoff_job_id,
+    )
 
 
 # ---------------------------------------------------------------------------
