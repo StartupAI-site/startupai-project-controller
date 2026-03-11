@@ -43,8 +43,10 @@ from startupai_controller.board_automation import (
 from startupai_controller import consumer_board_state_helpers as _board_state_helpers
 from startupai_controller import consumer_codex_helpers as _codex_helpers
 from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
+from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
+from startupai_controller import consumer_selection_helpers as _selection_helpers
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
     load_automation_config,
@@ -1109,14 +1111,14 @@ def _run_workspace_hooks(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Run repo-owned workspace hook commands in the claimed worktree."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
-    port.run_workspace_hooks(
+    _execution_support_helpers.run_workspace_hooks(
         commands,
         worktree_path=worktree_path,
         issue_ref=issue_ref,
         branch_name=branch_name,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
+        build_worktree_port=build_worktree_port,
     )
 
 
@@ -1146,59 +1148,26 @@ def _select_best_candidate(
     Skips items with unmet graph dependencies.
     Returns issue_ref (e.g. "crew#84") or None.
     """
-    if this_repo_prefix is not None:
-        repo_prefixes = (this_repo_prefix,)
-    ready_items = ready_items or tuple(
-        build_github_port_bundle(
-            project_owner,
-            project_number,
-            config=config,
-            github_memo=github_memo,
-            gh_runner=gh_runner,
-        ).review_state.list_issues_by_status("Ready")
+    return _selection_helpers.select_best_candidate(
+        config,
+        project_owner,
+        project_number,
+        executor=executor,
+        this_repo_prefix=this_repo_prefix,
+        repo_prefixes=repo_prefixes,
+        status_resolver=status_resolver,
+        ready_items=ready_items,
+        github_memo=github_memo,
+        gh_runner=gh_runner,
+        issue_filter=issue_filter,
+        build_github_port_bundle=build_github_port_bundle,
+        parse_issue_ref=parse_issue_ref,
+        config_error_type=ConfigError,
+        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+        in_any_critical_path=in_any_critical_path,
+        evaluate_ready_promotion=evaluate_ready_promotion,
+        ready_snapshot_rank=_ready_snapshot_rank,
     )
-    eligible: list[_ProjectItemSnapshot] = []
-    for snapshot in ready_items:
-        if snapshot.executor.strip().lower() != executor:
-            continue
-        ref = snapshot.issue_ref
-        try:
-            parsed_ref = parse_issue_ref(ref)
-        except ConfigError:
-            ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
-            if ref is None:
-                continue
-            parsed_ref = parse_issue_ref(ref)
-        if parsed_ref.prefix not in repo_prefixes:
-            continue
-        if issue_filter is not None and not issue_filter(ref):
-            continue
-        if in_any_critical_path(config, ref):
-            is_ready = None
-            if github_memo is not None:
-                is_ready = github_memo.dependency_ready.get(ref)
-            if is_ready is None:
-                val_code, _ = evaluate_ready_promotion(
-                    issue_ref=ref,
-                    config=config,
-                    project_owner=project_owner,
-                    project_number=project_number,
-                    status_resolver=status_resolver,
-                    require_in_graph=True,
-                )
-                is_ready = val_code == 0
-                if github_memo is not None:
-                    github_memo.dependency_ready[ref] = is_ready
-            if not is_ready:
-                continue
-        eligible.append(snapshot)
-
-    if not eligible:
-        return None
-
-    eligible.sort(key=lambda s: _ready_snapshot_rank(s, config))
-    best_ref = _snapshot_to_issue_ref(eligible[0].issue_ref, config.issue_prefixes)
-    return best_ref
 
 
 def _list_project_items_by_status(
@@ -1210,13 +1179,13 @@ def _list_project_items_by_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
     """Compatibility helper that reads board snapshots through ReviewStatePort."""
-    return list(
-        build_github_port_bundle(
-            project_owner,
-            project_number,
-            config=config,
-            gh_runner=gh_runner,
-        ).review_state.build_board_snapshot().items_with_status(status)
+    return _selection_helpers.list_project_items_by_status(
+        status,
+        project_owner,
+        project_number,
+        config=config,
+        gh_runner=gh_runner,
+        build_github_port_bundle=build_github_port_bundle,
     )
 
 
@@ -3491,46 +3460,24 @@ def _escalate_to_claude(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Block the issue for Claude handoff and post one escalation comment."""
-    marker = _marker_for("consumer-escalation", issue_ref)
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-    blocked_reason = reason or "max retries exceeded"
-
-    _set_blocked_with_reason(
+    _execution_support_helpers.escalate_to_claude(
         issue_ref,
-        blocked_reason,
         config,
         project_owner,
         project_number,
+        reason,
         board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
         gh_runner=gh_runner,
+        marker_for=_marker_for,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        set_issue_handoff_target=_set_issue_handoff_target,
+        default_review_comment_checker=_default_review_comment_checker,
+        runtime_comment_poster=_runtime_comment_poster,
+        logger=logger,
     )
-
-    # Set Handoff To field
-    try:
-        _set_issue_handoff_target(
-            issue_ref,
-            "claude",
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        )
-    except (GhQueryError, Exception):
-        logger.warning("Failed to set Handoff To field for %s", issue_ref)
-
-    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
-    if checker(owner, repo, number, marker, gh_runner=gh_runner):
-        return
-
-    # Post escalation comment
-    body = (
-        f"{marker}\n"
-        f"**Escalation**: codex execution exhausted retries.\n\n"
-        f"Reason: {blocked_reason}\n\n"
-        f"Handoff To: `claude`"
-    )
-    poster = comment_poster or _runtime_comment_poster
-    poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
 # ---------------------------------------------------------------------------
@@ -3547,19 +3494,14 @@ def _build_dependency_summary(
     status_resolver: Callable[..., str] | None = None,
 ) -> str:
     """Build a human-readable dependency summary for the codex prompt."""
-    from startupai_controller.validate_critical_path_promotion import direct_predecessors
-
-    if not in_any_critical_path(config, issue_ref):
-        return "(Not in critical path.)"
-
-    preds = direct_predecessors(config, issue_ref)
-    if not preds:
-        return "(No predecessors.)"
-
-    lines = []
-    for pred in sorted(preds):
-        lines.append(f"- {pred} (Done)")
-    return "\n".join(lines)
+    return _execution_support_helpers.build_dependency_summary(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        status_resolver=status_resolver,
+        in_any_critical_path=in_any_critical_path,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3574,15 +3516,11 @@ def _has_commits_on_branch(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Check if there are commits on branch beyond main."""
-    runner = subprocess_runner or (
-        lambda args, **kw: subprocess.run(args, **kw)
+    return _execution_support_helpers.has_commits_on_branch(
+        worktree_path,
+        branch,
+        subprocess_runner=subprocess_runner,
     )
-    result = runner(
-        ["git", "-C", worktree_path, "log", "main..HEAD", "--oneline"],
-        capture_output=True,
-        text=True,
-    )
-    return bool(result.stdout.strip())
 
 
 def _next_available_slot(db: ConsumerDB, limit: int) -> int | None:
