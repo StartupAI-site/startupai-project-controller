@@ -87,6 +87,17 @@ from startupai_controller.application.consumer.cycle import (
     PreparedCycleDeps,
     run_prepared_cycle,
 )
+from startupai_controller.application.consumer.preflight import (
+    PrepareCyclePhasesDeps,
+    ReconciliationDeps,
+    ReconciliationResult,
+    execute_prepare_cycle_phases as _execute_prepare_cycle_phases_use_case,
+    reconcile_board_truth as _reconcile_board_truth_use_case,
+)
+from startupai_controller.application.consumer.recovery import (
+    RecoveryDeps,
+    recover_interrupted_sessions as _recover_interrupted_sessions_use_case,
+)
 from startupai_controller.consumer_workflow import (
     DEFAULT_WORKFLOW_FILENAME,
     WorkflowConfigError,
@@ -4102,88 +4113,34 @@ def _recover_interrupted_sessions(
     except ConfigError as err:
         logger.error("Interrupted-session recovery skipped: %s", err)
         return recovered
-    effective_pr_port = pr_port or build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=cp_config,
+    return _recover_interrupted_sessions_use_case(
+        config,
+        db,
+        recovered=recovered,
+        cp_config=cp_config,
+        deps=RecoveryDeps(
+            gh_query_error_type=GhQueryError,
+            build_github_port_bundle=build_github_port_bundle,
+            load_automation_config=load_automation_config,
+            resolve_issue_coordinates=_resolve_issue_coordinates,
+            classify_open_pr_candidates=_classify_open_pr_candidates,
+            return_issue_to_ready=_return_issue_to_ready,
+            transition_issue_to_review=_transition_issue_to_review,
+            set_blocked_with_reason=_set_blocked_with_reason,
+        ),
+        automation_config=automation_config,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
         gh_runner=gh_runner,
-    ).pull_requests
-    effective_review_state_port = review_state_port or effective_pr_port
-    effective_board_port = board_port or effective_pr_port
-
-    for lease in recovered:
-        try:
-            owner, repo, number = _resolve_issue_coordinates(lease.issue_ref, cp_config)
-            try:
-                classification, pr_match, _reason = _classify_open_pr_candidates(
-                    lease.issue_ref,
-                    owner,
-                    repo,
-                    number,
-                    automation_config or load_automation_config(config.automation_config_path),
-                    expected_branch=lease.branch_name,
-                    pr_port=effective_pr_port,
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError:
-                classification, pr_match = ("none", None)
-            pr_url = lease.pr_url or (pr_match.url if pr_match is not None else None)
-            if lease.session_kind == "repair":
-                _return_issue_to_ready(
-                    lease.issue_ref,
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    from_statuses={"In Progress", "Review"},
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-            elif pr_url or classification == "adoptable":
-                _transition_issue_to_review(
-                    lease.issue_ref,
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-            elif classification == "none":
-                _return_issue_to_ready(
-                    lease.issue_ref,
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-            else:
-                _set_blocked_with_reason(
-                    lease.issue_ref,
-                    f"execution-authority:{classification}",
-                    cp_config,
-                    config.project_owner,
-                    config.project_number,
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    gh_runner=gh_runner,
-                )
-        except (GhQueryError, Exception) as err:
-            logger.error(
-                "Interrupted-session board recovery failed for %s: %s",
-                lease.issue_ref,
-                err,
-            )
-
-    return recovered
+        log_error=lambda issue_ref, err: logger.error(
+            "Interrupted-session board recovery failed for %s: %s",
+            issue_ref,
+            err,
+        ),
+    )
 
 
 def _initialize_cycle_runtime(
@@ -4462,65 +4419,31 @@ def _execute_prepare_cycle_phases(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[CycleBoardSnapshot, ReviewQueueDrainSummary, dict[str, Any], dict[str, int]]:
     """Execute the preflight phases for one cycle."""
-    timings_ms: dict[str, int] = {}
-
-    _run_deferred_replay_phase(
+    result = _execute_prepare_cycle_phases_use_case(
         config,
         db,
-        runtime,
-        timings_ms=timings_ms,
+        runtime=runtime,
+        deps=PrepareCyclePhasesDeps(
+            run_deferred_replay_phase=_run_deferred_replay_phase,
+            load_board_snapshot_phase=_load_board_snapshot_phase,
+            run_executor_routing_phase=_run_executor_routing_phase,
+            run_reconciliation_phase=_run_reconciliation_phase,
+            run_review_queue_phase=_run_review_queue_phase,
+            run_admission_phase=_run_admission_phase,
+        ),
+        dry_run=dry_run,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        dry_run=dry_run,
     )
-    board_snapshot = _load_board_snapshot_phase(
-        config,
-        runtime,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
+    return (
+        result.board_snapshot,
+        result.review_queue_summary,
+        result.admission_summary,
+        result.timings_ms,
     )
-    _run_executor_routing_phase(
-        config,
-        db,
-        runtime,
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
-    _run_reconciliation_phase(
-        config,
-        db,
-        runtime,
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
-    review_queue_summary, board_snapshot = _run_review_queue_phase(
-        config,
-        db,
-        runtime,
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
-    admission_summary = _run_admission_phase(
-        config,
-        db,
-        runtime,
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
-
-    return board_snapshot, review_queue_summary, admission_summary, timings_ms
 
 
 def _prepare_cycle(
@@ -4795,16 +4718,6 @@ def _next_available_slot(db: ConsumerDB, limit: int) -> int | None:
     return None
 
 
-@dataclass(frozen=True)
-class ReconciliationResult:
-    """Summary of consumer-led board truth reconciliation."""
-
-    moved_ready: tuple[str, ...] = ()
-    moved_in_progress: tuple[str, ...] = ()
-    moved_review: tuple[str, ...] = ()
-    moved_blocked: tuple[str, ...] = ()
-
-
 def _reconcile_board_truth(
     consumer_config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
@@ -4822,30 +4735,6 @@ def _reconcile_board_truth(
     gh_runner: Callable[..., str] | None = None,
 ) -> ReconciliationResult:
     """Make board `In Progress` truthful against local consumer state."""
-    if automation_config is None:
-        return ReconciliationResult()
-
-    store = session_store or build_session_store(db)
-    active_workers = store.active_workers()
-    active_issue_refs = {worker.issue_ref for worker in active_workers}
-    active_repair_issue_refs = {
-        worker.issue_ref
-        for worker in active_workers
-        if worker.session_kind == "repair"
-    }
-    moved_ready: list[str] = []
-    moved_in_progress: list[str] = []
-    moved_review: list[str] = []
-    moved_blocked: list[str] = []
-    effective_pr_port = pr_port or build_github_port_bundle(
-        consumer_config.project_owner,
-        consumer_config.project_number,
-        config=critical_path_config,
-        gh_runner=gh_runner,
-    ).pull_requests
-    effective_review_state_port = review_state_port or effective_pr_port
-    effective_board_port = board_port or effective_pr_port
-
     def _issue_ref_for_snapshot(
         snapshot: _ProjectItemSnapshot | IssueSnapshot,
     ) -> str | None:
@@ -4855,46 +4744,27 @@ def _reconcile_board_truth(
             snapshot.issue_ref, critical_path_config.issue_prefixes
         )
 
-    moved_in_progress.extend(
-        _reconcile_active_repair_review_items(
-            consumer_config,
-            critical_path_config,
-            active_repair_issue_refs=active_repair_issue_refs,
-            review_state_port=effective_review_state_port,
-            board_port=effective_board_port,
-            board_snapshot=board_snapshot,
-            issue_ref_for_snapshot=_issue_ref_for_snapshot,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-            dry_run=dry_run,
-        )
-    )
-    ready_refs, review_refs, blocked_refs = _reconcile_stale_in_progress_items(
+    return _reconcile_board_truth_use_case(
         consumer_config,
         critical_path_config,
         automation_config,
-        store=store,
-        pr_port=effective_pr_port,
-        review_state_port=effective_review_state_port,
-        board_port=effective_board_port,
+        db,
+        deps=ReconciliationDeps(
+            build_session_store=build_session_store,
+            build_github_port_bundle=build_github_port_bundle,
+            issue_ref_for_snapshot=_issue_ref_for_snapshot,
+            reconcile_active_repair_review_items=_reconcile_active_repair_review_items,
+            reconcile_stale_in_progress_items=_reconcile_stale_in_progress_items,
+        ),
+        session_store=session_store,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_snapshot=board_snapshot,
-        issue_ref_for_snapshot=_issue_ref_for_snapshot,
-        active_issue_refs=active_issue_refs,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
         dry_run=dry_run,
-    )
-    moved_ready.extend(ready_refs)
-    moved_review.extend(review_refs)
-    moved_blocked.extend(blocked_refs)
-
-    return ReconciliationResult(
-        moved_ready=tuple(moved_ready),
-        moved_in_progress=tuple(moved_in_progress),
-        moved_review=tuple(moved_review),
-        moved_blocked=tuple(moved_blocked),
     )
 
 
