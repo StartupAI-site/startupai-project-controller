@@ -94,14 +94,25 @@ and active workers by slot with session kind.
 
 ### 3. Architecture (As-Built)
 
-The codebase follows a hexagonal-lite pattern (per crew ADR-007 principles):
+The codebase follows a hexagonal-lite pattern with an explicit application layer
+(per crew ADR-007 principles):
 
 ```
+application/ Use-case coordination -- entry shells delegate here
 domain/      Pure policy -- stdlib only, zero outer-layer imports
 ports/       Protocol classes -- domain/ + stdlib only
 adapters/    Capability-specific mechanism implementations over transport/store code
 runtime/     Composition root -- wiring adapters to ports per command/cycle
 ```
+
+**Application modules** (behavior-preserving extraction targets now living out of
+entry shells):
+
+| Area | Modules |
+|------|---------|
+| Consumer | `application/consumer/cycle.py` |
+| Control plane | `application/control_plane/tick.py` |
+| Automation | `application/automation/admit_backlog.py`, `auto_promote.py`, `ready_claim.py`, `ready_dependencies.py`, `review_sync.py`, `review_rescue.py`, `codex_gate.py`, `audit_in_progress.py`, `dispatch_agent.py`, `rebalance.py`, `execution_policy.py` |
 
 **Domain modules** (pure policy, independently testable):
 
@@ -121,7 +132,7 @@ runtime/     Composition root -- wiring adapters to ports per command/cycle
 Prohibited: `board_io`, `consumer_db`, `github_http`, `subprocess`, `sqlite3`,
 `logging`, `os.environ`.
 
-**Port protocols** (6 typed boundaries):
+**Port protocols** (9 typed boundaries):
 
 | Port | Purpose |
 |------|---------|
@@ -130,7 +141,10 @@ Prohibited: `board_io`, `consumer_db`, `github_http`, `subprocess`, `sqlite3`,
 | `BoardMutationPort` | Board state transitions |
 | `SessionStorePort` | Session/lease persistence (13 methods) |
 | `WorktreePort` | Worktree creation and management |
-| `GhRunnerPort` | GitHub CLI subprocess execution |
+| `IssueContextPort` | Issue title/body/labels reads for launch preparation |
+| `ProcessRunnerPort` | Codex/process execution boundary |
+| `ServiceControlPort` | Service-state checks for control-plane health |
+| `ReadyFlowPort` | Shared ready-queue orchestration boundary used by consumer/control plane |
 
 **Composition root** (`runtime/wiring.py`): Builds per-command / per-cycle
 adapter bundles for GitHub-backed ports, session store access, and
@@ -143,16 +157,17 @@ transport/types) instead of routing through a single giant shim.
 `SqliteSessionStore` (delegates to `ConsumerDB`) implements the persistence
 boundary.
 
-**Wired functions** (fully port-based, canonical boundaries):
+**Wired use cases** (runtime-owned composition, no adapter imports from entry shells):
 
-- `_reconcile_board_truth()` -- via SessionStorePort
-- `_drain_review_queue()` -- via SessionStorePort
-- `board_control_plane._tick()` -- review queue drain and admission via runtime wiring
+- `application/consumer/cycle.py` -- consumer claimed-session path
+- `application/control_plane/tick.py` -- control-plane tick orchestration
+- `application/automation/*` -- extracted ready/review/execution flows
 - `board_graph.py` -- typed input only, no adapter/shim reads
 
 **Transitional state**: Runtime orchestrators no longer import `board_io.py`,
 `consumer_db.py`, `github_http.py`, or adapter helpers directly. The remaining
-transitional surfaces are adapter concentration and compatibility-shell issues:
+transitional surfaces are concentrated in the still-large entry shells and
+compatibility layers:
 
 - `GitHubCliAdapter` remains as a compatibility facade while runtime ownership
   is split across capability adapters (smaller than before, not yet deleted).
@@ -162,11 +177,16 @@ transitional surfaces are adapter concentration and compatibility-shell issues:
   `SqliteSessionStore`; not yet fully decomposed by capability.
 - Adapter-internal types (`CodexReviewVerdict`, `PullRequestViewPayload`,
   `MetricEvent`, `RecoveredLease`) remain owned by adapter/mechanism modules.
+- `board_consumer.py` is smaller on its claimed-session path but still retains
+  meaningful orchestration and mechanism debt outside the extracted slice.
+- `board_automation.py` now delegates the ready/review/execution use cases to
+  `application/automation/`, but still hosts legacy helpers and non-extracted
+  commands.
 
 **Deferred work**: Remaining port extensions (MetricsPort, DeferredActionPort,
 ContextCachePort) and compatibility shell removal are tracked as follow-up.
-God-function decomposition of `_drain_review_queue` and
-`_prepare_launch_candidate` is complete.
+Further consumer decomposition and compatibility shell retirement remain
+follow-up work.
 
 ### 4. Cross-Repo Relationship
 
@@ -209,7 +229,8 @@ God-function decomposition of `_drain_review_queue` and
 - Policy changes cannot accidentally introduce GitHub/SQLite side effects.
 - Independent CI runs in ~9s without heavy CrewAI/Supabase deps.
 - Lighter startupai-crew focused on its actual purpose.
-- God-functions decomposed into focused sub-functions with single responsibilities.
+- Significant automation/control-plane behavior now lives in dedicated
+  application use-case modules instead of entry-shell command bodies.
 
 ### Tradeoffs
 

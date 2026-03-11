@@ -35,6 +35,11 @@ ENTRYPOINT_MODULES = {
     "startupai_controller.board_automation",
     "startupai_controller.board_control_plane",
 }
+DIRECT_MECHANISM_MODULES = {"sqlite3", "subprocess"}
+THIN_ENTRY_MODULES = (
+    SRC_ROOT / "board_automation.py",
+    SRC_ROOT / "board_control_plane.py",
+)
 
 def _is_type_checking_test(node: ast.expr) -> bool:
     return isinstance(node, ast.Name) and node.id == "TYPE_CHECKING"
@@ -131,6 +136,17 @@ def test_board_control_plane_does_not_import_private_consumer_helpers() -> None:
     assert "startupai_controller.board_automation" not in imported, (
         "board_control_plane.py still imports board_automation.py at runtime"
     )
+
+
+def test_thin_entrypoints_do_not_import_direct_mechanism_modules() -> None:
+    for path in THIN_ENTRY_MODULES:
+        imported = _runtime_imported_modules(path)
+        offending = sorted(
+            module for module in imported if module in DIRECT_MECHANISM_MODULES
+        )
+        assert offending == [], (
+            f"{path.name} imports direct mechanism modules: {offending}"
+        )
 
 
 def test_ports_do_not_import_adapters() -> None:

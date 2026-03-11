@@ -10,10 +10,10 @@
 
 The controller manages the [StartupAI Alpha → Launch](https://github.com/orgs/StartupAI-site/projects/1) project board. It provides:
 
-1. **Board Automation** (`board_automation.py`) — 16 subcommands for workflow-driven board mutations (mark-done, auto-promote, enforce-ready-dependencies, etc.)
-2. **Board Consumer** (`board_consumer.py`) — Daemon that polls the board, claims `Ready` issues, dispatches codex sessions, and manages lifecycle
-3. **Control Plane** (`board_control_plane.py`) — Sync/recovery operations (tick, field sync)
-4. **Supporting modules** — board_io, board_graph, consumer_db, consumer_workflow, github_http, promote_ready, validate_critical_path_promotion, project_field_sync, resolution_proof, gh_cli_timeout
+1. **Board Automation** (`board_automation.py`) — CLI/compatibility shell for workflow-driven board mutations. Ready/review/execution flows now delegate into `application/automation/`.
+2. **Board Consumer** (`board_consumer.py`) — Daemon entry shell around the extracted consumer cycle in `application/consumer/`.
+3. **Control Plane** (`board_control_plane.py`) — Sync/recovery shell around `application/control_plane/`.
+4. **Supporting layers** — `application/`, `domain/`, `ports/`, `adapters/`, `runtime/`, plus legacy compatibility shells such as `board_io.py`, `consumer_db.py`, and GitHub-facing compatibility modules.
 
 Runtime wiring is assembled through `src/startupai_controller/runtime/wiring.py`.
 Coordinators should depend on `domain/`, `ports/`, and runtime wiring only.
@@ -27,9 +27,10 @@ This repo is a control plane. Reliability matters more than cleverness.
 
 - Refactors are behavior-preserving by default. Do not change queue semantics, retry policy, board transitions, launch behavior, review behavior, or status semantics unless the task explicitly requires it.
 - `domain/` is pure policy. No GitHub, SQLite, subprocess, env/config-loading, or shim imports.
+- `application/` owns use-case coordination. It may depend on `domain/` and `ports/`, and should not grow adapter/runtime/entrypoint imports.
 - `ports/` define typed boundaries only where the domain needs isolation from external mechanisms.
 - `adapters/` own GitHub, SQLite, worktree, subprocess, and transport mechanics.
-- `board_consumer.py`, `board_automation.py`, and `board_control_plane.py` are application coordinators. They should orchestrate use cases, not accumulate new policy.
+- `board_consumer.py`, `board_automation.py`, and `board_control_plane.py` are entry shells. They should delegate to application use cases, not accumulate new policy.
 - New internal code must import from canonical paths (`domain/`, `ports/`, `adapters/`). Do not add new internal dependencies on `board_io.py`, `consumer_db.py`, or `github_http.py` except where explicitly documented as transitional.
 - Do not bypass a port by calling an adapter directly from orchestration. If the port is missing capability, extend the port.
 - Do not create new mega-modules. If you touch a large coordinator, prefer extracting one focused policy module instead of adding more branches.
@@ -39,13 +40,13 @@ This repo is a control plane. Reliability matters more than cleverness.
 
 ## Directory Structure
 ```
-src/startupai_controller/   # 48 Python modules
+src/startupai_controller/   # 69 Python modules across application/domain/ports/adapters/runtime
 config/                      # Config and schema files
 ├── board-automation-config.json
 ├── critical-paths.json
 ├── project-field-sync-config.json
 └── codex_session_result.schema.json
-tests/                       # 24 test files (765 tests)
+tests/                       # 25 test files (771 tests)
 docs/adr/                    # Architecture decisions
 systemd/                     # systemd user unit
 ```
@@ -130,4 +131,4 @@ systemctl --user status startupai-consumer
 - stdlib-only + PyYAML (no heavy deps)
 
 ---
-**Last Updated**: 2026-03-10
+**Last Updated**: 2026-03-11
