@@ -1785,7 +1785,7 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            "startupai_controller.adapters.pull_requests.GitHubPullRequestAdapter.review_state_digests",
             lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
         result = run_one_cycle(setup["config"], setup["db"], **{
@@ -1870,7 +1870,7 @@ class TestRunOneCycle:
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
-            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            "startupai_controller.adapters.pull_requests.GitHubPullRequestAdapter.review_state_digests",
             lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
 
@@ -1940,7 +1940,7 @@ class TestRunOneCycle:
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
-            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            "startupai_controller.adapters.pull_requests.GitHubPullRequestAdapter.review_state_digests",
             lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
         rescue_calls: list[tuple[str, int]] = []
@@ -2344,7 +2344,7 @@ class TestRunOneCycle:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.adapters.github_cli.GitHubCliAdapter.review_state_digests",
+            "startupai_controller.adapters.pull_requests.GitHubPullRequestAdapter.review_state_digests",
             lambda self, pr_refs: {pr_ref: "digest-new" for pr_ref in pr_refs},
         )
         monkeypatch.setattr(

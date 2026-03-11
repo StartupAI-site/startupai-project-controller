@@ -11,6 +11,7 @@ from datetime import datetime
 import json
 import time
 
+from startupai_controller.adapters.github_base import GitHubAdapterBase
 from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.github_transport import _run_gh
 from startupai_controller.adapters.github_types import (
@@ -155,8 +156,29 @@ def _query_latest_non_automation_comment_timestamp(
     return latest
 
 
-class GitHubReviewStateAdapter(GitHubBoardMutationAdapter):
+class GitHubReviewStateAdapter(GitHubAdapterBase):
     """Capability adapter implementing board-read and review-state mechanics."""
+
+    def _board_mutation_adapter(self) -> GitHubBoardMutationAdapter:
+        """Build a board-mutation helper with the same runtime context."""
+        return GitHubBoardMutationAdapter(
+            project_owner=self._project_owner,
+            project_number=self._project_number,
+            config=self._config,
+            github_memo=self._github_memo,
+            gh_runner=self._gh_runner,
+        )
+
+    def _query_board_info(self, issue_ref: str):
+        """Delegate board identity/status lookup to the board-mutation adapter."""
+        return self._board_mutation_adapter()._query_board_info(issue_ref)
+
+    def _query_project_field_value(self, issue_ref: str, field_name: str) -> str:
+        """Delegate raw field reads to the board-mutation adapter."""
+        return self._board_mutation_adapter()._query_project_field_value(
+            issue_ref,
+            field_name,
+        )
 
     def get_issue_status(self, issue_ref: str) -> str | None:
         info = self._query_board_info(issue_ref)

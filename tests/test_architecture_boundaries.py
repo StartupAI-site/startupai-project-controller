@@ -5,6 +5,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
+from startupai_controller.adapters.pull_requests import GitHubPullRequestAdapter
+from startupai_controller.adapters.review_state import GitHubReviewStateAdapter
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "startupai_controller"
@@ -137,3 +140,8 @@ def test_ports_do_not_import_adapters() -> None:
             module for module in imported if module.startswith(ADAPTER_PREFIX)
         )
         assert offending == [], f"{path.name} imports adapters: {offending}"
+
+
+def test_capability_adapters_do_not_inherit_each_other() -> None:
+    assert not issubclass(GitHubReviewStateAdapter, GitHubBoardMutationAdapter)
+    assert not issubclass(GitHubPullRequestAdapter, GitHubReviewStateAdapter)

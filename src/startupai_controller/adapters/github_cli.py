@@ -11,10 +11,10 @@ from __future__ import annotations
 from datetime import datetime
 import json
 
+from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.github_transport import _run_gh
 from startupai_controller.adapters.pull_requests import (
     CycleGitHubMemo,
-    GitHubCliAdapter as _BaseGitHubCliAdapter,
     GitHubPullRequestAdapter,
     _codex_gate_from_payload,
     _list_project_items as _impl_list_project_items,
@@ -49,6 +49,7 @@ from startupai_controller.adapters.pull_requests import (
     query_required_status_checks,
 )
 from startupai_controller.adapters.review_state import (
+    GitHubReviewStateAdapter,
     _comment_exists,
     _query_latest_matching_comment_timestamp,
     _query_latest_non_automation_comment_timestamp,
@@ -223,7 +224,11 @@ def _list_project_items(project_owner, project_number, *, statuses=None, gh_runn
     )
 
 
-class GitHubCliAdapter(_BaseGitHubCliAdapter):
+class GitHubCliAdapter(
+    GitHubPullRequestAdapter,
+    GitHubReviewStateAdapter,
+    GitHubBoardMutationAdapter,
+):
     """Compatibility facade that keeps legacy monkeypatch points working."""
 
     def has_copilot_review_signal(self, pr_repo: str, pr_number: int) -> bool:

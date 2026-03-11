@@ -12,8 +12,10 @@ from typing import Callable
 import subprocess
 
 from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
-from startupai_controller.adapters.pull_requests import CycleGitHubMemo
-from startupai_controller.adapters.github_cli import GitHubCliAdapter
+from startupai_controller.adapters.pull_requests import (
+    CycleGitHubMemo,
+    GitHubPullRequestAdapter,
+)
 from startupai_controller.adapters.github_http_adapter import (
     begin_request_stats,
     end_request_stats,
@@ -68,7 +70,7 @@ def build_github_port_bundle(
 ) -> GitHubPortBundle:
     """Build the per-command/per-cycle GitHub adapter bundle."""
     memo = github_memo or CycleGitHubMemo()
-    pr_adapter = GitHubCliAdapter(
+    pr_adapter = GitHubPullRequestAdapter(
         project_owner=project_owner,
         project_number=project_number,
         config=config,
