@@ -257,6 +257,155 @@ if TYPE_CHECKING:
 logger = logging.getLogger("board-consumer")
 
 
+_DYNAMIC_EXPORTS: dict[str, Any] = {
+    "CycleRuntimeContext": _AppCycleRuntimeContext,
+    "mark_issues_done": (_automation_bridge, "mark_issues_done"),
+    "_set_blocked_with_reason": (_automation_bridge, "set_blocked_with_reason"),
+    "review_rescue": (_automation_bridge, "review_rescue"),
+    "sync_review_state": (_automation_bridge, "sync_review_state"),
+    "_complete_session": (_support_wiring, "complete_session"),
+    "_verify_resolution_payload": (_support_wiring, "verify_resolution_payload"),
+    "_resolution_evidence_payload": (_support_wiring, "resolution_evidence_payload"),
+    "_apply_resolution_action": (_resolution_helpers, "apply_resolution_action_from_shell"),
+    "_select_best_candidate": (_selection_retry_wiring, "select_best_candidate_from_shell"),
+    "_hydrate_issue_context": (_support_wiring, "hydrate_issue_context"),
+    "_prepare_worktree": (_launch_support_wiring, "prepare_worktree"),
+    "_create_worktree": (_launch_support_wiring, "create_worktree"),
+    "_git_command_detail": (_launch_support_wiring, "git_command_detail"),
+    "_reconcile_repair_branch": (_launch_support_wiring, "reconcile_repair_branch"),
+    "_assemble_codex_prompt": (_codex_comment_wiring, "assemble_codex_prompt"),
+    "_run_codex_session": (_codex_comment_wiring, "run_codex_session"),
+    "_parse_codex_result": (_codex_comment_wiring, "parse_codex_result"),
+    "_create_or_update_pr": (_codex_comment_wiring, "create_or_update_pr"),
+    "_build_pr_body": (_codex_comment_wiring, "build_pr_body"),
+    "_default_review_comment_checker": (_codex_comment_wiring, "default_review_comment_checker"),
+    "_post_consumer_claim_comment": (_codex_comment_wiring, "post_consumer_claim_comment"),
+    "_list_open_pr_candidates": (_codex_comment_wiring, "list_open_pr_candidates"),
+    "_classify_open_pr_candidates": (_codex_comment_wiring, "classify_open_pr_candidates"),
+    "_post_result_comment": (_codex_comment_wiring, "post_result_comment"),
+    "_post_pr_codex_verdict": (_codex_comment_wiring, "post_pr_codex_verdict"),
+    "_backfill_review_verdicts": (_codex_comment_wiring, "backfill_review_verdicts"),
+    "_backfill_review_verdicts_from_snapshots": (
+        _codex_comment_wiring,
+        "backfill_review_verdicts_from_snapshots",
+    ),
+    "_pre_backfill_verdicts_for_due_prs": (_codex_comment_wiring, "pre_backfill_verdicts_for_due_prs"),
+    "_queue_review_item": (_review_queue_helpers, "queue_review_item"),
+    "_apply_review_queue_result": (_review_queue_helpers, "apply_review_queue_result"),
+    "ReviewRescueExecution": (_review_queue_helpers, "ReviewRescueExecution"),
+    "_transition_issue_to_review": (_board_state_helpers, "transition_issue_to_review_from_shell"),
+    "_transition_issue_to_in_progress": (
+        _board_state_helpers,
+        "transition_issue_to_in_progress_from_shell",
+    ),
+    "_return_issue_to_ready": (_board_state_helpers, "return_issue_to_ready_from_shell"),
+    "_recover_interrupted_sessions": (_operational_wiring, "recover_interrupted_sessions"),
+    "_build_init_cycle_runtime_deps": (_preflight_wiring, "build_init_cycle_runtime_deps"),
+    "_build_phase_helper_deps": (_preflight_wiring, "build_phase_helper_deps"),
+    "_run_deferred_replay_phase": (_preflight_wiring, "run_deferred_replay_phase"),
+    "_load_board_snapshot_phase": (_preflight_wiring, "load_board_snapshot_phase"),
+    "_run_executor_routing_phase": (_preflight_wiring, "run_executor_routing_phase"),
+    "_run_reconciliation_phase": (_preflight_wiring, "run_reconciliation_phase"),
+    "_run_review_queue_phase": (_preflight_wiring, "run_review_queue_phase"),
+    "_run_admission_phase": (_preflight_wiring, "run_admission_phase"),
+    "_execute_prepare_cycle_phases": (_preflight_wiring, "execute_prepare_cycle_phases"),
+    "_prepare_cycle": (_preflight_wiring, "prepare_cycle"),
+    "_select_candidate_for_cycle": (_selection_retry_wiring, "select_candidate_for_cycle_from_shell"),
+    "_escalate_to_claude": (_board_state_helpers, "escalate_to_claude_from_shell"),
+    "_reconcile_board_truth": (_operational_wiring, "reconcile_board_truth"),
+    "_block_prelaunch_issue": (_operational_wiring, "block_prelaunch_issue"),
+    "_setup_launch_worktree": (_launch_support_wiring, "setup_launch_worktree"),
+    "_resolve_launch_runtime": (_launch_support_wiring, "resolve_launch_runtime"),
+    "_resolve_launch_candidate_metadata": (_launch_support_wiring, "resolve_launch_candidate_metadata"),
+    "_resolve_launch_issue_context": (_launch_support_wiring, "resolve_launch_issue_context"),
+    "_run_launch_workspace_hooks": (_launch_support_wiring, "run_launch_workspace_hooks"),
+    "_assemble_prepared_launch_context": (_cycle_wiring, "assemble_prepared_launch_context"),
+    "_prepare_launch_candidate": (_cycle_wiring, "prepare_launch_candidate"),
+    "_select_launch_candidate_for_cycle": (_operational_wiring, "select_launch_candidate_for_cycle"),
+    "_prepare_selected_launch_candidate": (_operational_wiring, "prepare_selected_launch_candidate"),
+    "_handle_selected_launch_query_error": (_operational_wiring, "handle_selected_launch_query_error"),
+    "_handle_selected_launch_workflow_config_error": (
+        _operational_wiring,
+        "handle_selected_launch_workflow_config_error",
+    ),
+    "_handle_selected_launch_worktree_error": (
+        _operational_wiring,
+        "handle_selected_launch_worktree_error",
+    ),
+    "_handle_selected_launch_runtime_error": (
+        _operational_wiring,
+        "handle_selected_launch_runtime_error",
+    ),
+    "_resolve_launch_context_for_cycle": (_operational_wiring, "resolve_launch_context_for_cycle"),
+    "_open_pending_claim_session": (_operational_wiring, "open_pending_claim_session"),
+    "_enforce_claim_retry_ceiling": (_operational_wiring, "enforce_claim_retry_ceiling"),
+    "_attempt_launch_context_claim": (_operational_wiring, "attempt_launch_context_claim"),
+    "_claim_launch_ready_issue": (_operational_wiring, "claim_launch_ready_issue"),
+    "_handle_launch_claim_api_failure": (_operational_wiring, "handle_launch_claim_api_failure"),
+    "_handle_launch_claim_unexpected_failure": (
+        _operational_wiring,
+        "handle_launch_claim_unexpected_failure",
+    ),
+    "_handle_launch_claim_rejection": (_operational_wiring, "handle_launch_claim_rejection"),
+    "_mark_claimed_session_running": (_operational_wiring, "mark_claimed_session_running"),
+    "_claim_launch_context": (_operational_wiring, "claim_launch_context"),
+    "_create_pr_for_execution_result": (_operational_wiring, "create_pr_for_execution_result"),
+    "_handoff_execution_to_review": (_operational_wiring, "handoff_execution_to_review"),
+    "_transition_claimed_session_to_review": (
+        _operational_wiring,
+        "transition_claimed_session_to_review",
+    ),
+    "_post_claimed_session_verdict_marker": (
+        _operational_wiring,
+        "post_claimed_session_verdict_marker",
+    ),
+    "_queue_claimed_session_for_review": (_operational_wiring, "queue_claimed_session_for_review"),
+    "_run_immediate_review_handoff": (_operational_wiring, "run_immediate_review_handoff"),
+    "_handle_non_review_execution_outcome": (
+        _operational_wiring,
+        "handle_non_review_execution_outcome",
+    ),
+    "_final_phase_for_claimed_session": (_operational_wiring, "final_phase_for_claimed_session"),
+    "_persist_claimed_session_completion": (
+        _operational_wiring,
+        "persist_claimed_session_completion",
+    ),
+    "_post_claimed_session_result_comment": (
+        _operational_wiring,
+        "post_claimed_session_result_comment",
+    ),
+    "_maybe_escalate_claimed_session_failure": (
+        _operational_wiring,
+        "maybe_escalate_claimed_session_failure",
+    ),
+    "_execute_claimed_session": (_operational_wiring, "execute_claimed_session"),
+    "_finalize_claimed_session": (_operational_wiring, "finalize_claimed_session"),
+    "_prepared_cycle_deps": (_operational_wiring, "prepared_cycle_deps"),
+    "run_one_cycle": (_runtime_wiring, "run_one_cycle_from_shell"),
+    "_run_worker_cycle": (_support_wiring, "run_worker_cycle"),
+    "_prepare_multi_worker_launch_context": (_support_wiring, "prepare_multi_worker_launch_context"),
+    "_submit_multi_worker_task": (_support_wiring, "submit_multi_worker_task"),
+    "_dispatch_multi_worker_launches": (_support_wiring, "dispatch_multi_worker_launches"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve compatibility exports lazily from their owning modules."""
+    try:
+        target = _DYNAMIC_EXPORTS[name]
+    except KeyError as exc:  # pragma: no cover - normal missing attribute behavior
+        raise AttributeError(name) from exc
+    if isinstance(target, tuple):
+        module, attr = target
+        return getattr(module, attr)
+    return target
+
+
+def __dir__() -> list[str]:
+    """Expose dynamic compatibility exports to introspection."""
+    return sorted(set(globals()) | set(_DYNAMIC_EXPORTS))
+
+
 def claim_ready_issue(
     config,
     project_owner: str,
@@ -286,20 +435,7 @@ DEFAULT_STATUS_PORT = 8765
 # ---------------------------------------------------------------------------
 
 
-# CycleRuntimeContext: re-exported from application.consumer.preflight_runtime
-CycleRuntimeContext = _AppCycleRuntimeContext
-
-
-mark_issues_done = _automation_bridge.mark_issues_done
-
-
-_set_blocked_with_reason = _automation_bridge.set_blocked_with_reason
-
-
-review_rescue = _automation_bridge.review_rescue
-
-
-sync_review_state = _automation_bridge.sync_review_state
+# CycleRuntimeContext and selected bridge exports are resolved via __getattr__.
 
 
 def _record_metric(
@@ -329,9 +465,6 @@ def _clear_claim_suppression(db: ConsumerDB) -> None:
     db.set_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE, None)
 
 
-_activate_claim_suppression = _support_wiring.activate_claim_suppression
-
-
 def _maybe_activate_claim_suppression(
     db: ConsumerDB,
     config: ConsumerConfig,
@@ -345,11 +478,14 @@ def _maybe_activate_claim_suppression(
         return False
     if gh_reason_code(error) != "rate_limit":
         return False
-    _activate_claim_suppression(db, config, scope=scope, error=error, now=now)
+    _support_wiring.activate_claim_suppression(
+        db,
+        config,
+        scope=scope,
+        error=error,
+        now=now,
+    )
     return True
-
-
-_default_admission_summary = _support_wiring.default_admission_summary
 
 
 def _queue_status_transition(
@@ -403,10 +539,6 @@ def _effective_retry_backoff(
         workflow,
         effective_retry_backoff_primitives=_effective_retry_backoff_primitives,
     )
-
-
-_complete_session = _support_wiring.complete_session
-
 
 def _retry_backoff_active(
     db: ConsumerDB,
@@ -463,20 +595,6 @@ def _verify_code_refs_on_main(
     return _resolution_helpers.verify_code_refs_on_main(repo_root, code_refs)
 
 
-def _run_validation_on_main(
-    repo_root: Path,
-    command: str,
-    *,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> tuple[bool, int | None, str]:
-    """Run the repo validation command against canonical main."""
-    return _resolution_helpers.run_validation_on_main(
-        repo_root,
-        command,
-        subprocess_runner=subprocess_runner,
-    )
-
-
 def _commit_reachable_from_origin_main(
     repo_root: Path,
     commit_sha: str,
@@ -506,10 +624,6 @@ def _pr_is_merged(
         run_gh=_run_gh,
     )
 
-
-_verify_resolution_payload = _support_wiring.verify_resolution_payload
-
-
 def _resolution_validation_command(
     issue_ref: str,
     normalized: dict[str, Any],
@@ -525,10 +639,6 @@ def _resolution_validation_command(
         workflows=workflows,
         parse_issue_ref=parse_issue_ref,
     )
-
-
-_resolution_evidence_payload = _support_wiring.resolution_evidence_payload
-
 
 def _resolution_is_strong(
     normalized: dict[str, Any],
@@ -554,23 +664,6 @@ def _resolution_blocked_reason(
     )
 
 
-def _queue_issue_comment(
-    db: ConsumerDB,
-    issue_ref: str,
-    body: str,
-) -> None:
-    """Queue an issue comment for replay after GitHub recovery."""
-    _resolution_helpers.queue_issue_comment(db, issue_ref, body)
-
-
-def _queue_issue_close(
-    db: ConsumerDB,
-    issue_ref: str,
-) -> None:
-    """Queue an issue close mutation for replay."""
-    _resolution_helpers.queue_issue_close(db, issue_ref)
-
-
 def _set_issue_handoff_target(
     issue_ref: str,
     target: str,
@@ -593,10 +686,6 @@ def _set_issue_handoff_target(
         gh_runner=gh_runner,
         build_github_port_bundle=build_github_port_bundle,
     )
-
-
-_apply_resolution_action = _resolution_helpers.apply_resolution_action_from_shell
-
 
 def _run_workspace_hooks(
     commands: tuple[str, ...],
@@ -622,10 +711,6 @@ def _run_workspace_hooks(
 # ---------------------------------------------------------------------------
 # Helper: select best candidate
 # ---------------------------------------------------------------------------
-
-
-_select_best_candidate = _selection_retry_wiring.select_best_candidate_from_shell
-
 
 def _list_project_items_by_status(
     status: str,
@@ -698,10 +783,6 @@ def _issue_context_cache_is_fresh(
         parse_iso8601_timestamp=_parse_iso8601_timestamp,
     )
 
-
-_hydrate_issue_context = _support_wiring.hydrate_issue_context
-
-
 def _list_repo_worktrees(
     repo_root: Path,
     *,
@@ -740,34 +821,14 @@ def _worktree_ownership_is_safe(
     """Return True when a clean worktree is safe to adopt for an issue."""
     return _worktree_ownership_is_safe_helper(store, issue_ref, worktree_path)
 
-
-_prepare_worktree = _launch_support_wiring.prepare_worktree
-
-
 # ---------------------------------------------------------------------------
 # Helper: create worktree
 # ---------------------------------------------------------------------------
 
 
-_create_worktree = _launch_support_wiring.create_worktree
-
-
-_fast_forward_existing_worktree = _launch_support_wiring.fast_forward_existing_worktree
-
-
-_git_command_detail = _launch_support_wiring.git_command_detail
-
-
-_reconcile_repair_branch = _launch_support_wiring.reconcile_repair_branch
-
-
 # ---------------------------------------------------------------------------
 # Helper: assemble codex prompt
 # ---------------------------------------------------------------------------
-
-
-_assemble_codex_prompt = _codex_comment_wiring.assemble_codex_prompt
-
 
 def _extract_acceptance_criteria(body: str) -> str:
     """Extract acceptance criteria section from issue body."""
@@ -777,10 +838,6 @@ def _extract_acceptance_criteria(body: str) -> str:
 # ---------------------------------------------------------------------------
 # Helper: run codex session
 # ---------------------------------------------------------------------------
-
-
-_run_codex_session = _codex_comment_wiring.run_codex_session
-
 
 def _resolve_cli_command(command: str) -> str:
     """Resolve a CLI binary without relying on interactive shell PATH setup."""
@@ -810,22 +867,9 @@ def _clear_drain(path: Path) -> bool:
 # Helper: parse codex result
 # ---------------------------------------------------------------------------
 
-
-_parse_codex_result = _codex_comment_wiring.parse_codex_result
-
-
 # ---------------------------------------------------------------------------
 # Helper: create or update PR
 # ---------------------------------------------------------------------------
-
-
-_create_or_update_pr = _codex_comment_wiring.create_or_update_pr
-
-
-_build_pr_body = _codex_comment_wiring.build_pr_body
-
-
-_default_review_comment_checker = _codex_comment_wiring.default_review_comment_checker
 
 
 _runtime_comment_poster = _codex_comment_wiring.runtime_comment_poster
@@ -840,43 +884,16 @@ _runtime_automerge_enabler = _codex_comment_wiring.runtime_automerge_enabler
 _runtime_failed_check_rerun = _codex_comment_wiring.runtime_failed_check_rerun
 
 
-_post_consumer_claim_comment = _codex_comment_wiring.post_consumer_claim_comment
-
-
 # OpenPullRequestMatch: re-exported from domain.models
-
-
-_list_open_pr_candidates = _codex_comment_wiring.list_open_pr_candidates
-
-
-_classify_open_pr_candidates = _codex_comment_wiring.classify_open_pr_candidates
 
 
 # ---------------------------------------------------------------------------
 # Helper: post result comment
 # ---------------------------------------------------------------------------
 
-
-_post_result_comment = _codex_comment_wiring.post_result_comment
-
-
 # ---------------------------------------------------------------------------
 # Helper: post Codex verdict marker on the PR
 # ---------------------------------------------------------------------------
-
-
-_post_pr_codex_verdict = _codex_comment_wiring.post_pr_codex_verdict
-
-
-# ---------------------------------------------------------------------------
-# Helper: backfill missing Codex verdict markers for review sessions
-# ---------------------------------------------------------------------------
-
-
-_backfill_review_verdicts = _codex_comment_wiring.backfill_review_verdicts
-
-
-_group_review_queue_entries_by_pr = _review_queue_helpers.group_review_queue_entries_by_pr
 
 
 def _repark_unchanged_review_queue_entries(
@@ -945,23 +962,6 @@ def _build_review_snapshots_for_queue_entries(
         trusted_codex_actors=trusted_codex_actors,
     )
 
-
-_backfill_review_verdicts_from_snapshots = _codex_comment_wiring.backfill_review_verdicts_from_snapshots
-
-
-_pre_backfill_verdicts_for_due_prs = _codex_comment_wiring.pre_backfill_verdicts_for_due_prs
-
-
-def _review_queue_next_attempt_at(
-    *,
-    now: datetime | None = None,
-    delay_seconds: int = DEFAULT_REVIEW_QUEUE_RETRY_SECONDS,
-) -> str:
-    """Return the next scheduled review-queue attempt timestamp."""
-    current = now or datetime.now(timezone.utc)
-    return (current + timedelta(seconds=delay_seconds)).isoformat()
-
-
 # _review_queue_retry_seconds_for_blocked_reason: imported from domain.review_queue_policy
 # _review_queue_retry_seconds_for_skipped_reason: imported from domain.review_queue_policy
 # _review_queue_retry_seconds_for_result: imported from domain.review_queue_policy
@@ -984,18 +984,10 @@ def _review_queue_retry_seconds_for_partial_failure(
         reason_code,
     )
 
-
-_queue_review_item = _review_queue_helpers.queue_review_item
-
-
 # ---------------------------------------------------------------------------
 # Blocked-streak escalation policy: imported from domain.review_queue_policy
 # _blocker_class, _escalation_ceiling_for_blocker_class, ESCALATION_CEILING_*
 # ---------------------------------------------------------------------------
-
-
-_apply_review_queue_result = _review_queue_helpers.apply_review_queue_result
-
 
 def _apply_review_queue_partial_failure(
     store: SessionStorePort,
@@ -1015,237 +1007,9 @@ def _apply_review_queue_partial_failure(
         now=now,
     )
 
-
-_update_board_snapshot_statuses = _support_wiring.update_board_snapshot_statuses
-
-
-_prepare_review_queue_batch = _review_queue_wiring.prepare_review_queue_batch_from_shell
-
-
-_prepare_due_review_processing = (
-    _review_queue_wiring.prepare_due_review_processing_from_shell
-)
-
-
-_process_due_review_group = _review_queue_wiring.process_due_review_group_from_shell
-
-
-ReviewRescueExecution = _review_queue_helpers.ReviewRescueExecution
-
-
-_build_review_queue_wiring_deps = _review_queue_wiring.build_review_queue_wiring_deps
-
-
-_run_review_rescue_for_group = _review_queue_wiring.run_review_rescue_for_group_from_shell
-
-
-_apply_review_queue_group_result = (
-    _review_queue_wiring.apply_review_queue_group_result_from_shell
-)
-
-
-_summarize_review_group_outcome = (
-    _review_queue_wiring.summarize_review_group_outcome_from_shell
-)
-
-
-_process_review_queue_due_groups = (
-    _review_queue_wiring.process_review_queue_due_groups_from_shell
-)
-
-
-# ---------------------------------------------------------------------------
-# _drain_review_queue sub-functions: focused extraction from god-function
-# ---------------------------------------------------------------------------
-
-
-_seed_new_review_entries = _review_queue_wiring.seed_new_review_entries_from_shell
-
-
-def _reconcile_review_queue_identity(
-    store: SessionStorePort,
-    review_refs: set[str],
-    *,
-    now: datetime | None = None,
-) -> None:
-    """Reconcile queue rows and requeue counters against current PR identity.
-
-    When the active session's PR URL changes, update the queue entry and
-    reset the requeue counter to avoid false escalation.
-    """
-    _review_queue_helpers.reconcile_review_queue_identity(
-        store,
-        review_refs,
-        now=now,
-    )
-
-
-_replay_deferred_action = _deferred_action_helpers.replay_deferred_action_from_shell
-
-
-_replay_deferred_status_action = (
-    _deferred_action_helpers.replay_deferred_status_action_from_shell
-)
-
-
-def _replay_deferred_verdict_marker(
-    *,
-    payload: dict[str, Any],
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Replay a deferred PR verdict marker post."""
-    _deferred_action_helpers.replay_deferred_verdict_marker(
-        payload=payload,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        post_pr_codex_verdict=_post_pr_codex_verdict,
-    )
-
-
-def _replay_deferred_issue_comment(
-    *,
-    payload: dict[str, Any],
-    critical_path_config: CriticalPathConfig,
-    board_port: BoardMutationPort | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Replay a deferred issue comment post."""
-    _deferred_action_helpers.replay_deferred_issue_comment(
-        payload=payload,
-        critical_path_config=critical_path_config,
-        board_port=board_port,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        runtime_comment_poster=_runtime_comment_poster,
-    )
-
-
-def _replay_deferred_issue_close(
-    *,
-    payload: dict[str, Any],
-    critical_path_config: CriticalPathConfig,
-    board_port: BoardMutationPort | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Replay a deferred issue close."""
-    _deferred_action_helpers.replay_deferred_issue_close(
-        payload=payload,
-        critical_path_config=critical_path_config,
-        board_port=board_port,
-        gh_runner=gh_runner,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        runtime_issue_closer=_runtime_issue_closer,
-    )
-
-
-def _replay_deferred_check_rerun(
-    *,
-    payload: dict[str, Any],
-    pr_port: PullRequestPort | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Replay a deferred failed-check rerun request."""
-    _deferred_action_helpers.replay_deferred_check_rerun(
-        payload=payload,
-        pr_port=pr_port,
-        gh_runner=gh_runner,
-        runtime_failed_check_rerun=_runtime_failed_check_rerun,
-    )
-
-
-def _replay_deferred_automerge_enable(
-    *,
-    payload: dict[str, Any],
-    pr_port: PullRequestPort | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Replay a deferred auto-merge enablement."""
-    _deferred_action_helpers.replay_deferred_automerge_enable(
-        payload=payload,
-        pr_port=pr_port,
-        gh_runner=gh_runner,
-        runtime_automerge_enabler=_runtime_automerge_enabler,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Helper: advance board state after successful PR creation
 # ---------------------------------------------------------------------------
-
-
-_transition_issue_to_review = _board_state_helpers.transition_issue_to_review_from_shell
-
-
-_transition_issue_to_in_progress = (
-    _board_state_helpers.transition_issue_to_in_progress_from_shell
-)
-
-
-_return_issue_to_ready = _board_state_helpers.return_issue_to_ready_from_shell
-
-
-_build_reconciliation_wiring_deps = _operational_wiring.build_reconciliation_wiring_deps
-
-
-_reconcile_active_repair_review_items = _operational_wiring.reconcile_active_repair_review_items
-
-
-_reconcile_single_in_progress_item = _operational_wiring.reconcile_single_in_progress_item
-
-
-_reconcile_stale_in_progress_items = _operational_wiring.reconcile_stale_in_progress_items
-
-
-_recover_interrupted_sessions = _operational_wiring.recover_interrupted_sessions
-
-
-_build_init_cycle_runtime_deps = _preflight_wiring.build_init_cycle_runtime_deps
-
-
-_build_phase_helper_deps = _preflight_wiring.build_phase_helper_deps
-
-
-_initialize_cycle_runtime = _preflight_wiring.initialize_cycle_runtime
-
-
-_run_deferred_replay_phase = _preflight_wiring.run_deferred_replay_phase
-
-
-_load_board_snapshot_phase = _preflight_wiring.load_board_snapshot_phase
-
-
-_run_executor_routing_phase = _preflight_wiring.run_executor_routing_phase
-
-
-_run_reconciliation_phase = _preflight_wiring.run_reconciliation_phase
-
-
-_run_review_queue_phase = _preflight_wiring.run_review_queue_phase
-
-
-_run_admission_phase = _preflight_wiring.run_admission_phase
-
-
-_execute_prepare_cycle_phases = _preflight_wiring.execute_prepare_cycle_phases
-
-
-_prepare_cycle = _preflight_wiring.prepare_cycle
-
-
-_select_candidate_for_cycle = _selection_retry_wiring.select_candidate_for_cycle_from_shell
-
-
-# ---------------------------------------------------------------------------
-# Helper: escalate to claude
-# ---------------------------------------------------------------------------
-
-
-_escalate_to_claude = _board_state_helpers.escalate_to_claude_from_shell
 
 
 # ---------------------------------------------------------------------------
@@ -1291,57 +1055,9 @@ def _has_commits_on_branch(
     )
 
 
-_reconcile_board_truth = _operational_wiring.reconcile_board_truth
-
-
-_block_prelaunch_issue = _operational_wiring.block_prelaunch_issue
-
-
 # ---------------------------------------------------------------------------
 # _prepare_launch_candidate sub-functions: focused extraction from god-function
 # ---------------------------------------------------------------------------
-
-
-_setup_launch_worktree = _launch_support_wiring.setup_launch_worktree
-
-
-_resolve_launch_runtime = _launch_support_wiring.resolve_launch_runtime
-
-
-_resolve_launch_candidate_metadata = _launch_support_wiring.resolve_launch_candidate_metadata
-
-
-_resolve_launch_issue_context = _launch_support_wiring.resolve_launch_issue_context
-
-
-_run_launch_workspace_hooks = _launch_support_wiring.run_launch_workspace_hooks
-
-
-_assemble_prepared_launch_context = _cycle_wiring.assemble_prepared_launch_context
-
-
-_prepare_launch_candidate = _cycle_wiring.prepare_launch_candidate
-
-
-_select_launch_candidate_for_cycle = _operational_wiring.select_launch_candidate_for_cycle
-
-
-_prepare_selected_launch_candidate = _operational_wiring.prepare_selected_launch_candidate
-
-
-_handle_selected_launch_query_error = _operational_wiring.handle_selected_launch_query_error
-
-
-_handle_selected_launch_workflow_config_error = _operational_wiring.handle_selected_launch_workflow_config_error
-
-
-_handle_selected_launch_worktree_error = _operational_wiring.handle_selected_launch_worktree_error
-
-
-_handle_selected_launch_runtime_error = _operational_wiring.handle_selected_launch_runtime_error
-
-
-_resolve_launch_context_for_cycle = _operational_wiring.resolve_launch_context_for_cycle
 
 
 @dataclass(frozen=True)
@@ -1351,32 +1067,6 @@ class PendingClaimContext:
     session_id: str
     effective_max_retries: int
 
-
-_open_pending_claim_session = _operational_wiring.open_pending_claim_session
-
-
-_enforce_claim_retry_ceiling = _operational_wiring.enforce_claim_retry_ceiling
-
-
-_attempt_launch_context_claim = _operational_wiring.attempt_launch_context_claim
-
-
-_claim_launch_ready_issue = _operational_wiring.claim_launch_ready_issue
-
-
-_handle_launch_claim_api_failure = _operational_wiring.handle_launch_claim_api_failure
-
-
-_handle_launch_claim_unexpected_failure = _operational_wiring.handle_launch_claim_unexpected_failure
-
-
-_handle_launch_claim_rejection = _operational_wiring.handle_launch_claim_rejection
-
-
-_mark_claimed_session_running = _operational_wiring.mark_claimed_session_running
-
-
-_claim_launch_context = _operational_wiring.claim_launch_context
 
 
 def _session_status_from_codex_result(
@@ -1389,58 +1079,9 @@ def _session_status_from_codex_result(
         codex_result,
     )
 
-
-_create_pr_for_execution_result = _operational_wiring.create_pr_for_execution_result
-
-
-_handoff_execution_to_review = _operational_wiring.handoff_execution_to_review
-
-
-_transition_claimed_session_to_review = _operational_wiring.transition_claimed_session_to_review
-
-
-_post_claimed_session_verdict_marker = _operational_wiring.post_claimed_session_verdict_marker
-
-
-_queue_claimed_session_for_review = _operational_wiring.queue_claimed_session_for_review
-
-
-_run_immediate_review_handoff = _operational_wiring.run_immediate_review_handoff
-
-
-_handle_non_review_execution_outcome = _operational_wiring.handle_non_review_execution_outcome
-
-
-_final_phase_for_claimed_session = _operational_wiring.final_phase_for_claimed_session
-
-
-_persist_claimed_session_completion = _operational_wiring.persist_claimed_session_completion
-
-
-_post_claimed_session_result_comment = _operational_wiring.post_claimed_session_result_comment
-
-
-_maybe_escalate_claimed_session_failure = _operational_wiring.maybe_escalate_claimed_session_failure
-
-
-_execute_claimed_session = _operational_wiring.execute_claimed_session
-
-
-_finalize_claimed_session = _operational_wiring.finalize_claimed_session
-
-
-_prepared_cycle_deps = _operational_wiring.prepared_cycle_deps
-
-
 # ---------------------------------------------------------------------------
 # Core: run_one_cycle
 # ---------------------------------------------------------------------------
-
-
-run_one_cycle = _runtime_wiring.run_one_cycle_from_shell
-
-
-_run_worker_cycle = _support_wiring.run_worker_cycle
 
 
 def _next_available_slots(
@@ -1511,14 +1152,6 @@ def _sleep_for_claim_suppression_if_needed(
         shell=sys.modules[__name__],
     )
 
-
-_prepare_multi_worker_launch_context = _support_wiring.prepare_multi_worker_launch_context
-
-
-_submit_multi_worker_task = _support_wiring.submit_multi_worker_task
-
-
-_dispatch_multi_worker_launches = _support_wiring.dispatch_multi_worker_launches
 
 
 def _run_multi_worker_daemon_loop(
