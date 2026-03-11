@@ -136,6 +136,9 @@ from startupai_controller.application.automation.ready_claim import (
 from startupai_controller.application.automation.auto_promote import (
     auto_promote_successors as _app_auto_promote_successors,
 )
+from startupai_controller.application.automation.admit_backlog import (
+    admit_backlog_items as _app_admit_backlog_items,
+)
 from startupai_controller.application.automation.ready_dependencies import (
     enforce_ready_dependency_guard as _app_enforce_ready_dependency_guard,
 )
@@ -2591,33 +2594,6 @@ def admit_backlog_items(
     gh_runner: Callable[..., str] | None = None,
 ) -> AdmissionDecision:
     """Autonomously admit governed Backlog items into Ready."""
-    if automation_config is None:
-        return AdmissionDecision(
-            ready_count=0,
-            ready_floor=0,
-            ready_cap=0,
-            needed=0,
-            scanned_backlog=0,
-        )
-
-    target_executor = _protected_queue_executor_target(automation_config)
-    floor, cap = admission_watermarks(
-        automation_config.global_concurrency,
-        floor_multiplier=automation_config.admission.ready_floor_multiplier,
-        cap_multiplier=automation_config.admission.ready_cap_multiplier,
-    )
-    if (
-        not automation_config.admission.enabled
-        or target_executor is None
-    ):
-        return AdmissionDecision(
-            ready_count=0,
-            ready_floor=floor,
-            ready_cap=cap,
-            needed=0,
-            scanned_backlog=0,
-        )
-
     if github_bundle is not None:
         review_state_port = github_bundle.review_state
         pr_port = github_bundle.pull_requests
@@ -2629,99 +2605,26 @@ def admit_backlog_items(
         board_port = None
         memo = github_memo or CycleGitHubMemo()
 
-    items = _load_admission_source_items(
-        automation_config,
-        review_state_port=review_state_port,
-        board_snapshot=board_snapshot,
-        gh_runner=gh_runner,
-    )
-    ready_count, backlog_items = _partition_admission_source_items(
-        items,
+    return _app_admit_backlog_items(
         config=config,
         automation_config=automation_config,
-        target_executor=target_executor,
-    )
-
-    needed = min(
-        max(0, floor - ready_count),
-        max(0, cap - ready_count),
-        automation_config.admission.max_batch_size,
-    )
-
-    provisional_candidates, skipped = _build_provisional_admission_candidates(
-        backlog_items,
-        config=config,
-        automation_config=automation_config,
-        dispatchable_repo_prefixes=dispatchable_repo_prefixes
-        or automation_config.execution_authority_repos,
+        project_owner=project_owner,
+        project_number=project_number,
+        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
         active_lease_issue_refs=active_lease_issue_refs,
-    )
-
-    if needed <= 0:
-        return AdmissionDecision(
-            ready_count=ready_count,
-            ready_floor=floor,
-            ready_cap=cap,
-            needed=needed,
-            scanned_backlog=len(backlog_items),
-            skipped=tuple(skipped),
-            deep_evaluation_performed=False,
-            deep_evaluation_truncated=False,
-        )
-
-    (
-        eligible,
-        resolved,
-        blocked,
-        partial_failure,
-        error,
-        deep_evaluation_truncated,
-    ) = _evaluate_admission_candidates(
-        provisional_candidates,
-        config=config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        needed=needed,
         dry_run=dry_run,
-        memo=memo,
-        skipped=skipped,
-        pr_port=pr_port,
+        board_snapshot=board_snapshot,
         review_state_port=review_state_port,
+        pr_port=pr_port,
         board_port=board_port,
+        memo=memo,
         gh_runner=gh_runner,
-    )
-    selected = eligible[:needed]
-    admitted, mutation_partial_failure, mutation_error = _apply_admitted_backlog_candidates(
-        selected,
-        executor=target_executor,
-        assignment_owner=automation_config.admission.assignment_owner,
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-    )
-    if mutation_partial_failure:
-        partial_failure = True
-        error = mutation_error
-
-    return AdmissionDecision(
-        ready_count=ready_count,
-        ready_floor=floor,
-        ready_cap=cap,
-        needed=needed,
-        scanned_backlog=len(backlog_items),
-        eligible=tuple(eligible),
-        admitted=tuple(admitted),
-        skipped=tuple(skipped),
-        resolved=tuple(resolved),
-        blocked=tuple(blocked),
-        partial_failure=partial_failure,
-        error=error,
-        deep_evaluation_performed=True,
-        deep_evaluation_truncated=deep_evaluation_truncated,
+        protected_queue_executor_target=_protected_queue_executor_target,
+        load_admission_source_items=_load_admission_source_items,
+        partition_admission_source_items=_partition_admission_source_items,
+        build_provisional_candidates=_build_provisional_admission_candidates,
+        evaluate_candidates=_evaluate_admission_candidates,
+        apply_candidates=_apply_admitted_backlog_candidates,
     )
 
 
