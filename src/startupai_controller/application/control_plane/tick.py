@@ -16,11 +16,9 @@ class TickDeps:
     apply_automation_runtime: Callable[..., None]
     current_main_workflows: Callable[..., tuple[Any, dict[str, Any], int]]
     build_github_port_bundle: Callable[..., Any]
+    ready_flow_port: Any
     replay_deferred_actions: Callable[..., tuple[int, ...]]
     drain_review_queue: Callable[..., tuple[Any, Any]]
-    route_protected_queue_executors: Callable[..., Any]
-    admit_backlog_items: Callable[..., Any]
-    admission_summary_payload: Callable[..., dict[str, Any]]
     persist_admission_summary: Callable[..., None]
     record_successful_github_mutation: Callable[..., None]
     record_successful_board_sync: Callable[..., None]
@@ -84,7 +82,7 @@ def run_tick(
         timings_ms["board_snapshot"] = int((time.monotonic() - phase_started) * 1000)
 
         phase_started = time.monotonic()
-        routing = deps.route_protected_queue_executors(
+        routing = deps.ready_flow_port.route_protected_queue_executors(
             critical_path_config,
             automation_config,
             config.project_owner,
@@ -136,7 +134,7 @@ def run_tick(
         deps.record_successful_github_mutation(db)
 
     phase_started = time.monotonic()
-    admission_decision = deps.admit_backlog_items(
+    admission_decision = deps.ready_flow_port.admit_backlog_items(
         critical_path_config,
         automation_config,
         config.project_owner,
@@ -152,7 +150,7 @@ def run_tick(
         github_memo=github_bundle.github_memo,
     )
     timings_ms["admission"] = int((time.monotonic() - phase_started) * 1000)
-    admission_summary = deps.admission_summary_payload(
+    admission_summary = deps.ready_flow_port.admission_summary_payload(
         admission_decision,
         enabled=automation_config.admission.enabled,
     )

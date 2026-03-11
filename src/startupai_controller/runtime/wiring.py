@@ -24,6 +24,7 @@ from startupai_controller.adapters.review_state import (
     clear_cycle_board_snapshot_cache,
 )
 from startupai_controller.adapters.local_process import LocalProcessAdapter
+from startupai_controller.adapters.ready_flow import BoardAutomationReadyFlowAdapter
 from startupai_controller.adapters.system_service import SystemServiceAdapter
 from startupai_controller.adapters.sqlite_store import (
     ConsumerDB,
@@ -35,6 +36,7 @@ from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
+from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.service_control import ServiceControlPort
 from startupai_controller.ports.session_store import SessionStorePort
@@ -144,6 +146,11 @@ def build_service_control_port(
 ) -> ServiceControlPort:
     """Build the local system-service adapter."""
     return SystemServiceAdapter(subprocess_runner=subprocess_runner)
+
+
+def build_ready_flow_port() -> ReadyFlowPort:
+    """Build the ready-flow adapter."""
+    return BoardAutomationReadyFlowAdapter()
 
 
 def clear_github_runtime_caches() -> None:

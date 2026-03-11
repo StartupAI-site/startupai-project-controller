@@ -16,11 +16,6 @@ from pathlib import Path
 
 
 from startupai_controller.application.control_plane.tick import TickDeps, run_tick
-from startupai_controller.board_automation import (
-    admission_summary_payload,
-    admit_backlog_items,
-    route_protected_queue_executors,
-)
 from startupai_controller.board_automation_config import (
     DEFAULT_AUTOMATION_CONFIG_PATH,
     DEFAULT_PROJECT_NUMBER,
@@ -54,6 +49,7 @@ from startupai_controller.consumer_workflow import default_repo_roots
 from startupai_controller.runtime.wiring import (
     begin_runtime_request_stats,
     build_github_port_bundle,
+    build_ready_flow_port,
     build_service_control_port,
     end_runtime_request_stats,
     open_consumer_db,
@@ -138,11 +134,9 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
                 apply_automation_runtime=_apply_automation_runtime,
                 current_main_workflows=_current_main_workflows,
                 build_github_port_bundle=build_github_port_bundle,
+                ready_flow_port=build_ready_flow_port(),
                 replay_deferred_actions=_replay_deferred_actions,
                 drain_review_queue=_drain_review_queue,
-                route_protected_queue_executors=route_protected_queue_executors,
-                admit_backlog_items=admit_backlog_items,
-                admission_summary_payload=admission_summary_payload,
                 persist_admission_summary=_persist_admission_summary,
                 record_successful_github_mutation=_record_successful_github_mutation,
                 record_successful_board_sync=_record_successful_board_sync,

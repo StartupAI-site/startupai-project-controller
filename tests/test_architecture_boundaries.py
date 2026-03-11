@@ -125,6 +125,9 @@ def test_board_control_plane_does_not_import_private_consumer_helpers() -> None:
     assert "startupai_controller.board_consumer" not in imported, (
         "board_control_plane.py still imports board_consumer.py at runtime"
     )
+    assert "startupai_controller.board_automation" not in imported, (
+        "board_control_plane.py still imports board_automation.py at runtime"
+    )
 
 
 def test_ports_do_not_import_adapters() -> None:
