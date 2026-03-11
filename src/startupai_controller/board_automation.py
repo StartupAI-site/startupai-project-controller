@@ -210,6 +210,14 @@ from startupai_controller.application.automation.execution_policy import (
     ExecutionPolicyPrContext as _ExecutionPolicyPrContext,
     load_execution_policy_pr_context as _app_load_execution_policy_pr_context,
 )
+from startupai_controller.automation_board_state_helpers import (
+    set_board_status as _helpers_set_board_status,
+    set_status_if_changed as _helpers_set_status_if_changed,
+    legacy_board_status_mutator as _helpers_legacy_board_status_mutator,
+    set_blocked_with_reason as _helpers_set_blocked_with_reason,
+    transition_issue_status as _helpers_transition_issue_status,
+    mark_issues_done as _helpers_mark_issues_done,
+)
 from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
     GitHubPortBundle,
@@ -594,36 +602,16 @@ def _set_board_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Compatibility helper that writes the Status field via BoardMutationPort."""
-    if board_port is None and gh_runner is not None:
-        from startupai_controller.promote_ready import (
-            _query_status_field_option as _legacy_query_status_field_option,
-            _set_board_status as _legacy_set_board_status,
-        )
-
-        field_id, option_id = _legacy_query_status_field_option(
-            project_id,
-            status,
-            gh_runner=gh_runner,
-        )
-        _legacy_set_board_status(
-            project_id,
-            item_id,
-            field_id,
-            option_id,
-            gh_runner=gh_runner,
-        )
-        return
-
-    _set_single_select_field(
+    _helpers_set_board_status(
         project_id,
         item_id,
-        "Status",
         status,
         board_port=board_port,
         project_owner=project_owner,
         project_number=project_number,
         config=config,
         gh_runner=gh_runner,
+        set_single_select_field_fn=_set_single_select_field,
     )
 
 
@@ -643,27 +631,22 @@ def _set_status_if_changed(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[bool, str]:
     """Legacy-compatible status transition helper for test seams."""
-    resolver = board_info_resolver or _query_issue_board_info
-    info = resolver(issue_ref, config, project_owner, project_number)
-    current_status = info.status
-    if current_status not in from_statuses:
-        return False, current_status
-    if not dry_run:
-        if board_mutator is not None:
-            board_mutator(info.project_id, info.item_id, to_status)
-        elif board_port is not None:
-            board_port.set_issue_status(issue_ref, to_status)
-        else:
-            _set_board_status(
-                info.project_id,
-                info.item_id,
-                to_status,
-                project_owner=project_owner,
-                project_number=project_number,
-                config=config,
-                gh_runner=gh_runner,
-            )
-    return True, current_status
+    return _helpers_set_status_if_changed(
+        issue_ref,
+        from_statuses,
+        to_status,
+        config,
+        project_owner,
+        project_number,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        query_issue_board_info_fn=_query_issue_board_info,
+        set_board_status_fn=_set_board_status,
+    )
 
 
 def _list_project_items(
@@ -724,27 +707,7 @@ def _set_blocked_with_reason(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set Status=Blocked and Blocked Reason on a board item."""
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    status_mutator = board_mutator
-    if status_mutator is None and board_info_resolver is not None:
-        status_mutator = _legacy_board_status_mutator(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    _app_set_blocked_with_reason(
+    _helpers_set_blocked_with_reason(
         issue_ref,
         reason,
         config,
@@ -754,8 +717,12 @@ def _set_blocked_with_reason(
         review_state_port=review_state_port,
         board_port=board_port,
         board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
+        board_mutator=board_mutator,
         gh_runner=gh_runner,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        legacy_board_status_mutator_fn=_legacy_board_status_mutator,
+        app_set_blocked_with_reason_fn=_app_set_blocked_with_reason,
     )
 
 
@@ -775,27 +742,7 @@ def _transition_issue_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[bool, str]:
     """Transition issue status through ports, with legacy fallback for tests."""
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    status_mutator = board_mutator
-    if status_mutator is None and board_info_resolver is not None:
-        status_mutator = _legacy_board_status_mutator(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    return _app_transition_issue_status(
+    return _helpers_transition_issue_status(
         issue_ref,
         from_statuses,
         to_status,
@@ -806,8 +753,12 @@ def _transition_issue_status(
         review_state_port=review_state_port,
         board_port=board_port,
         board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
+        board_mutator=board_mutator,
         gh_runner=gh_runner,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        legacy_board_status_mutator_fn=_legacy_board_status_mutator,
+        app_transition_issue_status_fn=_app_transition_issue_status,
     )
 
 
@@ -829,19 +780,13 @@ def _legacy_board_status_mutator(
     gh_runner: Callable[..., str] | None = None,
 ) -> Callable[..., None]:
     """Adapt legacy project-item status helpers to the application boundary."""
-
-    def mutate(project_id: str, item_id: str, status: str = "Blocked") -> None:
-        _set_board_status(
-            project_id,
-            item_id,
-            status,
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-        )
-
-    return mutate
+    return _helpers_legacy_board_status_mutator(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+        set_board_status_fn=_set_board_status,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -921,26 +866,18 @@ def mark_issues_done(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Mark linked issues as Done on the board. Returns list of refs marked Done."""
-    marked: list[str] = []
-
-    for issue in issues:
-        changed, old_status = _transition_issue_status(
-            issue.ref,
-            {"Review", "In Progress", "Blocked", "Ready", "Backlog"},
-            "Done",
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        if changed:
-            marked.append(issue.ref)
-
-    return marked
+    return _helpers_mark_issues_done(
+        issues,
+        config,
+        project_owner,
+        project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        transition_issue_status_fn=_transition_issue_status,
+    )
 
 
 # ---------------------------------------------------------------------------
