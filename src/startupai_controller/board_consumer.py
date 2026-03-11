@@ -96,8 +96,10 @@ from startupai_controller.application.consumer.preflight import (
 )
 from startupai_controller.application.consumer.launch import (
     ClaimLaunchDeps,
+    PrepareLaunchDeps,
     ResolveLaunchDeps,
     claim_launch_context as _claim_launch_context_use_case,
+    prepare_launch_candidate as _prepare_launch_candidate_use_case,
     resolve_launch_context_for_cycle as _resolve_launch_context_for_cycle_use_case,
 )
 from startupai_controller.application.consumer.execution import (
@@ -105,6 +107,10 @@ from startupai_controller.application.consumer.execution import (
     FinalizeClaimedSessionDeps,
     execute_claimed_session as _execute_claimed_session_use_case,
     finalize_claimed_session as _finalize_claimed_session_use_case,
+    ReviewHandoffDeps,
+    NonReviewOutcomeDeps,
+    handoff_execution_to_review as _handoff_execution_to_review_use_case,
+    handle_non_review_execution_outcome as _handle_non_review_execution_outcome_use_case,
 )
 from startupai_controller.application.consumer.recovery import (
     RecoveryDeps,
@@ -5145,108 +5151,32 @@ def _prepare_launch_candidate(
     worktree_port: WorktreePort | None = None,
 ) -> PreparedLaunchContext:
     """Prepare local launch state for an issue before board claim."""
-    cp_config = prepared.cp_config
-    auto_config = prepared.auto_config
-    store = session_store or build_session_store(db)
-    effective_pr_port = pr_port or build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=cp_config,
-        github_memo=prepared.github_memo,
-        gh_runner=gh_runner,
-    ).pull_requests
-    effective_issue_context_port = issue_context_port or effective_pr_port
-    effective_worktree_port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner,
-        gh_runner=gh_runner,
-    )
-    (
-        candidate_prefix,
-        owner,
-        repo,
-        number,
-        snapshot,
-        session_kind,
-        repair_pr_url,
-        repair_branch_name,
-    ) = _resolve_launch_candidate_metadata(
+    return _prepare_launch_candidate_use_case(
         issue_ref,
-        cp_config=cp_config,
-        auto_config=auto_config,
-        board_snapshot=prepared.board_snapshot,
-        pr_port=effective_pr_port,
-        gh_runner=gh_runner,
-    )
-    context, title = _resolve_launch_issue_context(
-        issue_ref,
-        owner=owner,
-        repo=repo,
-        number=number,
-        snapshot=snapshot,
-        config=config,
-        db=db,
-        issue_context_port=effective_issue_context_port,
-        gh_runner=gh_runner,
-    )
-
-    worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error = (
-        _setup_launch_worktree(
-            issue_ref,
-            title,
-            session_kind,
-            repair_branch_name,
-            config=config,
-            cp_config=cp_config,
-            db=db,
-            session_store=store,
-            worktree_port=effective_worktree_port,
-            subprocess_runner=subprocess_runner,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-    )
-
-    workflow_definition, effective_consumer_config = _resolve_launch_runtime(
-        candidate_prefix,
-        worktree_path,
         config=config,
         prepared=prepared,
-    )
-    _run_launch_workspace_hooks(
-        workflow_definition,
-        worktree_path=worktree_path,
-        issue_ref=issue_ref,
-        branch_name=branch_name,
-        worktree_port=effective_worktree_port,
+        db=db,
+        deps=PrepareLaunchDeps(
+            build_session_store=build_session_store,
+            build_github_port_bundle=build_github_port_bundle,
+            build_worktree_port=build_worktree_port,
+            resolve_launch_candidate_metadata=_resolve_launch_candidate_metadata,
+            resolve_launch_issue_context=_resolve_launch_issue_context,
+            setup_launch_worktree=_setup_launch_worktree,
+            resolve_launch_runtime=_resolve_launch_runtime,
+            run_launch_workspace_hooks=_run_launch_workspace_hooks,
+            build_dependency_summary=_build_dependency_summary,
+            assemble_prepared_launch_context=_assemble_prepared_launch_context,
+        ),
         subprocess_runner=subprocess_runner,
-    )
-
-    dependency_summary = _build_dependency_summary(
-        issue_ref,
-        cp_config,
-        config.project_owner,
-        config.project_number,
         status_resolver=status_resolver,
-    )
-    return _assemble_prepared_launch_context(
-        issue_ref,
-        candidate_prefix=candidate_prefix,
-        owner=owner,
-        repo=repo,
-        number=number,
-        title=title,
-        context=context,
-        session_kind=session_kind,
-        repair_pr_url=repair_pr_url,
-        repair_branch_name=repair_branch_name,
-        worktree_path=worktree_path,
-        branch_name=branch_name,
-        workflow_definition=workflow_definition,
-        effective_consumer_config=effective_consumer_config,
-        dependency_summary=dependency_summary,
-        branch_reconcile_state=branch_reconcile_state,
-        branch_reconcile_error=branch_reconcile_error,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        pr_port=pr_port,
+        issue_context_port=issue_context_port,
+        session_store=session_store,
+        worktree_port=worktree_port,
     )
 
 
@@ -6045,50 +5975,25 @@ def _handoff_execution_to_review(
     gh_runner: Callable[..., str] | None,
 ) -> ReviewQueueDrainSummary:
     """Transition a claimed session into Review and perform immediate rescue."""
-    cp_config = prepared.cp_config
-    auto_config = prepared.auto_config
-    candidate = launch_context.issue_ref
-
-    _transition_claimed_session_to_review(
-        db=db,
-        issue_ref=candidate,
-        session_id=session_id,
+    return _handoff_execution_to_review_use_case(
         config=config,
-        critical_path_config=cp_config,
+        db=db,
+        prepared=prepared,
+        deps=ReviewHandoffDeps(
+            build_session_store=build_session_store,
+            transition_claimed_session_to_review=_transition_claimed_session_to_review,
+            post_claimed_session_verdict_marker=_post_claimed_session_verdict_marker,
+            queue_claimed_session_for_review=_queue_claimed_session_for_review,
+            run_immediate_review_handoff=_run_immediate_review_handoff,
+            record_metric=_record_metric,
+        ),
+        launch_context=launch_context,
+        session_id=session_id,
+        pr_url=pr_url,
+        session_status=session_status,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-    )
-    _record_metric(db, config, "session_transition_review", issue_ref=candidate)
-
-    immediate_review_summary = ReviewQueueDrainSummary()
-    if session_status != "success":
-        return immediate_review_summary
-
-    handoff_store = build_session_store(db)
-    _post_claimed_session_verdict_marker(
-        db=db,
-        pr_url=pr_url,
-        session_id=session_id,
-        gh_runner=gh_runner,
-    )
-    queue_entry = _queue_claimed_session_for_review(
-        store=handoff_store,
-        issue_ref=candidate,
-        pr_url=pr_url,
-        session_id=session_id,
-    )
-    if queue_entry is None or auto_config is None:
-        return immediate_review_summary
-
-    return _run_immediate_review_handoff(
-        config=config,
-        critical_path_config=cp_config,
-        automation_config=auto_config,
-        store=handoff_store,
-        queue_entry=queue_entry,
-        gh_runner=gh_runner,
-        db=db,
     )
 
 
@@ -6259,68 +6164,35 @@ def _handle_non_review_execution_outcome(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[str, ResolutionEvaluation | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
-    cp_config = prepared.cp_config
-    candidate = launch_context.issue_ref
-    resolution_evaluation: ResolutionEvaluation | None = None
-    done_reason: str | None = None
-    updated_session_status = session_status
-
-    if session_status == "success" and not has_commits:
-        github_bundle = build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=cp_config,
-            github_memo=prepared.github_memo,
-            gh_runner=gh_runner,
-        )
-        resolution_evaluation = _verify_resolution_payload(
-            candidate,
-            codex_result.get("resolution") if codex_result else None,
-            config=launch_context.effective_consumer_config,
-            workflows=prepared.main_workflows,
-            pr_port=github_bundle.pull_requests,
-            subprocess_runner=subprocess_runner,
-            gh_runner=gh_runner,
-        )
-        done_reason = _apply_resolution_action(
-            candidate,
-            resolution_evaluation,
-            session_id=session_id,
-            db=db,
-            config=config,
-            critical_path_config=cp_config,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-        )
-        if done_reason == "already_resolved":
-            _record_metric(db, config, "session_transition_done", issue_ref=candidate)
-        return updated_session_status, resolution_evaluation, done_reason
-
-    try:
-        _return_issue_to_ready(
-            candidate,
-            cp_config,
-            config.project_owner,
-            config.project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        _record_successful_github_mutation(db)
-    except (GhQueryError, Exception) as err:
-        logger.error("Ready reset failed after non-PR session: %s", err)
-        _mark_degraded(db, f"ready-reset:{err}")
-        _queue_status_transition(
-            db,
-            candidate,
-            to_status="Ready",
-            from_statuses={"In Progress", "Review"},
-        )
-    if session_status == "failed" and not has_commits and codex_result is None:
-        updated_session_status = "aborted"
-    return updated_session_status, resolution_evaluation, done_reason
+    return _handle_non_review_execution_outcome_use_case(
+        config=config,
+        db=db,
+        prepared=prepared,
+        deps=NonReviewOutcomeDeps(
+            build_github_port_bundle=build_github_port_bundle,
+            verify_resolution_payload=_verify_resolution_payload,
+            apply_resolution_action=_apply_resolution_action,
+            return_issue_to_ready=_return_issue_to_ready,
+            record_successful_github_mutation=_record_successful_github_mutation,
+            mark_degraded=_mark_degraded,
+            queue_status_transition=_queue_status_transition,
+            record_metric=_record_metric,
+            log_ready_reset_failure=lambda err: logger.error(
+                "Ready reset failed after non-PR session: %s",
+                err,
+            ),
+        ),
+        launch_context=launch_context,
+        session_id=session_id,
+        session_status=session_status,
+        codex_result=codex_result,
+        has_commits=has_commits,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_poster=comment_poster,
+        subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+    )
 
 
 def _final_phase_for_claimed_session(

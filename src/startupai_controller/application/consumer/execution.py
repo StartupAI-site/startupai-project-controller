@@ -23,6 +23,33 @@ class ExecutionDeps:
     build_session_execution_outcome: Callable[..., Any]
 
 
+@dataclass(frozen=True)
+class ReviewHandoffDeps:
+    """Injected seams for claimed-session review handoff."""
+
+    build_session_store: Callable[[Any], Any]
+    transition_claimed_session_to_review: Callable[..., None]
+    post_claimed_session_verdict_marker: Callable[..., None]
+    queue_claimed_session_for_review: Callable[..., Any | None]
+    run_immediate_review_handoff: Callable[..., ReviewQueueDrainSummary]
+    record_metric: Callable[..., None]
+
+
+@dataclass(frozen=True)
+class NonReviewOutcomeDeps:
+    """Injected seams for non-review execution outcomes."""
+
+    build_github_port_bundle: Callable[..., Any]
+    verify_resolution_payload: Callable[..., Any]
+    apply_resolution_action: Callable[..., str | None]
+    return_issue_to_ready: Callable[..., None]
+    record_successful_github_mutation: Callable[..., None]
+    mark_degraded: Callable[..., None]
+    queue_status_transition: Callable[..., None]
+    record_metric: Callable[..., None]
+    log_ready_reset_failure: Callable[[Exception], None]
+
+
 def execute_claimed_session(
     *,
     config: Any,
@@ -140,6 +167,150 @@ def execute_claimed_session(
         resolution_evaluation=resolution_evaluation,
         done_reason=done_reason,
     )
+
+
+def handoff_execution_to_review(
+    *,
+    config: Any,
+    db: Any,
+    prepared: Any,
+    deps: ReviewHandoffDeps,
+    launch_context: Any,
+    session_id: str,
+    pr_url: str,
+    session_status: str,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> ReviewQueueDrainSummary:
+    """Transition a claimed session into Review and perform immediate rescue."""
+    cp_config = prepared.cp_config
+    auto_config = prepared.auto_config
+    candidate = launch_context.issue_ref
+
+    deps.transition_claimed_session_to_review(
+        db=db,
+        issue_ref=candidate,
+        session_id=session_id,
+        config=config,
+        critical_path_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    deps.record_metric(db, config, "session_transition_review", issue_ref=candidate)
+
+    immediate_review_summary = ReviewQueueDrainSummary()
+    if session_status != "success":
+        return immediate_review_summary
+
+    handoff_store = deps.build_session_store(db)
+    deps.post_claimed_session_verdict_marker(
+        db=db,
+        pr_url=pr_url,
+        session_id=session_id,
+        gh_runner=gh_runner,
+    )
+    queue_entry = deps.queue_claimed_session_for_review(
+        store=handoff_store,
+        issue_ref=candidate,
+        pr_url=pr_url,
+        session_id=session_id,
+    )
+    if queue_entry is None or auto_config is None:
+        return immediate_review_summary
+
+    return deps.run_immediate_review_handoff(
+        config=config,
+        critical_path_config=cp_config,
+        automation_config=auto_config,
+        store=handoff_store,
+        queue_entry=queue_entry,
+        gh_runner=gh_runner,
+        db=db,
+    )
+
+
+def handle_non_review_execution_outcome(
+    *,
+    config: Any,
+    db: Any,
+    prepared: Any,
+    deps: NonReviewOutcomeDeps,
+    launch_context: Any,
+    session_id: str,
+    session_status: str,
+    codex_result: dict[str, Any] | None,
+    has_commits: bool,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    comment_poster: Callable[..., None] | None,
+    subprocess_runner: Callable[..., Any] | None,
+    gh_runner: Callable[..., str] | None,
+) -> tuple[str, Any | None, str | None]:
+    """Handle non-review outcomes for a claimed session."""
+    cp_config = prepared.cp_config
+    candidate = launch_context.issue_ref
+    resolution_evaluation = None
+    done_reason: str | None = None
+    updated_session_status = session_status
+
+    if session_status == "success" and not has_commits:
+        github_bundle = deps.build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner,
+        )
+        resolution_evaluation = deps.verify_resolution_payload(
+            candidate,
+            codex_result.get("resolution") if codex_result else None,
+            config=launch_context.effective_consumer_config,
+            workflows=prepared.main_workflows,
+            pr_port=github_bundle.pull_requests,
+            subprocess_runner=subprocess_runner,
+            gh_runner=gh_runner,
+        )
+        done_reason = deps.apply_resolution_action(
+            candidate,
+            resolution_evaluation,
+            session_id=session_id,
+            db=db,
+            config=config,
+            critical_path_config=cp_config,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+        if done_reason == "already_resolved":
+            deps.record_metric(db, config, "session_transition_done", issue_ref=candidate)
+        return updated_session_status, resolution_evaluation, done_reason
+
+    try:
+        deps.return_issue_to_ready(
+            candidate,
+            cp_config,
+            config.project_owner,
+            config.project_number,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+        deps.record_successful_github_mutation(db)
+    except Exception as err:
+        deps.log_ready_reset_failure(err)
+        deps.mark_degraded(db, f"ready-reset:{err}")
+        deps.queue_status_transition(
+            db,
+            candidate,
+            to_status="Ready",
+            from_statuses={"In Progress", "Review"},
+        )
+    if session_status == "failed" and not has_commits and codex_result is None:
+        updated_session_status = "aborted"
+    return updated_session_status, resolution_evaluation, done_reason
 
 
 @dataclass(frozen=True)
