@@ -49,6 +49,7 @@ import startupai_controller.consumer_preflight_wiring as _preflight_wiring
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
+import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
     load_automation_config,
@@ -56,7 +57,6 @@ from startupai_controller.board_automation_config import (
 from startupai_controller.board_graph import (
     _ready_snapshot_rank,
     _resolve_issue_coordinates,
-    admission_watermarks,
 )
 from startupai_controller.consumer_config import (
     ConsumerConfig,
@@ -84,7 +84,6 @@ from startupai_controller.consumer_types import (
 )
 from startupai_controller.consumer_context_helpers import (
     fetch_issue_context as _fetch_issue_context_helper,
-    hydrate_issue_context as _hydrate_issue_context_helper,
     issue_context_cache_is_fresh as _issue_context_cache_is_fresh_helper,
     snapshot_for_issue as _snapshot_for_issue_helper,
 )
@@ -137,7 +136,6 @@ from startupai_controller.application.consumer.recovery import (
 from startupai_controller.application.consumer.daemon import (
     log_completed_worker_results as _log_completed_worker_results_use_case,
     next_available_slots as _next_available_slots_use_case,
-    run_worker_cycle as _run_worker_cycle_use_case,
 )
 from startupai_controller.consumer_workflow import (
     DEFAULT_WORKFLOW_FILENAME,
@@ -349,35 +347,7 @@ def _claim_suppression_state(
     }
 
 
-def _activate_claim_suppression(
-    db: ConsumerDB,
-    config: ConsumerConfig,
-    *,
-    scope: str,
-    error: Exception,
-    now: datetime | None = None,
-) -> datetime:
-    """Persist a rate-limit-driven claim suppression window."""
-    current = now or datetime.now(timezone.utc)
-    reset_epoch = getattr(error, "rate_limit_reset_at", None)
-    if isinstance(reset_epoch, int) and reset_epoch > 0:
-        until = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
-    else:
-        until = current + timedelta(seconds=config.rate_limit_cooldown_seconds)
-    reason = f"{gh_reason_code(error)}:{error}"
-    db.set_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL, until.isoformat())
-    db.set_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_REASON, reason)
-    db.set_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE, scope)
-    _record_control_timestamp(db, CONTROL_KEY_LAST_RATE_LIMIT_AT, now=current)
-    _mark_degraded(db, f"rate_limit_suppressed:{scope}:{reason}")
-    _record_metric(
-        db,
-        config,
-        "claim_suppressed",
-        payload={"scope": scope, "reason": reason, "until": until.isoformat()},
-        now=current,
-    )
-    return until
+_activate_claim_suppression = _support_wiring.activate_claim_suppression
 
 
 def _maybe_activate_claim_suppression(
@@ -397,39 +367,7 @@ def _maybe_activate_claim_suppression(
     return True
 
 
-def _default_admission_summary(
-    automation_config: BoardAutomationConfig | None,
-) -> dict[str, Any]:
-    """Return a stable empty admission summary when none is persisted yet."""
-    if automation_config is None:
-        floor = 0
-        cap = 0
-        enabled = False
-    else:
-        floor, cap = admission_watermarks(
-            automation_config.global_concurrency,
-            floor_multiplier=automation_config.admission.ready_floor_multiplier,
-            cap_multiplier=automation_config.admission.ready_cap_multiplier,
-        )
-        enabled = automation_config.admission.enabled
-    return {
-        "enabled": enabled,
-        "ready_count": 0,
-        "ready_floor": floor,
-        "ready_cap": cap,
-        "needed": 0,
-        "scanned_backlog": 0,
-        "eligible_count": 0,
-        "admitted": [],
-        "resolved": [],
-        "blocked": [],
-        "skip_reason_counts": {},
-        "top_candidates": [],
-        "top_skipped": [],
-        "partial_failure": False,
-        "error": None,
-        "controller_owned_admission_rejections": 0,
-    }
+_default_admission_summary = _support_wiring.default_admission_summary
 
 
 def _load_admission_summary(
@@ -530,32 +468,7 @@ def _next_retry_count(
     return max(previous.retry_count, 1) + 1
 
 
-def _complete_session(
-    db: ConsumerDB,
-    session_id: str,
-    issue_ref: str,
-    *,
-    status: str,
-    failure_reason: str | None = None,
-    completed_at: str | None = None,
-    **fields: Any,
-) -> int:
-    """Persist a terminal session update and return its retry count."""
-    retry_count = _next_retry_count(
-        db,
-        issue_ref,
-        current_session_id=session_id,
-        failure_reason=failure_reason,
-    )
-    db.update_session(
-        session_id,
-        status=status,
-        completed_at=completed_at or datetime.now(timezone.utc).isoformat(),
-        failure_reason=failure_reason,
-        retry_count=retry_count,
-        **fields,
-    )
-    return retry_count
+_complete_session = _support_wiring.complete_session
 
 
 def _retry_backoff_active(
@@ -657,36 +570,7 @@ def _pr_is_merged(
     )
 
 
-def _verify_resolution_payload(
-    issue_ref: str,
-    resolution: dict[str, Any] | None,
-    *,
-    config: ConsumerConfig,
-    workflows: dict[str, WorkflowDefinition],
-    pr_port: PullRequestPort | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> ResolutionEvaluation:
-    """Verify a structured resolution payload against canonical main."""
-    return _resolution_helpers.verify_resolution_payload(
-        issue_ref,
-        resolution,
-        config=config,
-        workflows=workflows,
-        pr_port=pr_port,
-        subprocess_runner=subprocess_runner,
-        gh_runner=gh_runner,
-        build_resolution_evaluation=ResolutionEvaluation,
-        normalize_resolution_payload=normalize_resolution_payload,
-        resolution_has_meaningful_signal=resolution_has_meaningful_signal,
-        resolution_allows_autoclose=resolution_allows_autoclose,
-        non_auto_close_resolution_kinds=NON_AUTO_CLOSE_RESOLUTION_KINDS,
-        repo_root_for_issue_ref_fn=_repo_root_for_issue_ref,
-        resolution_validation_command_fn=_resolution_validation_command,
-        resolution_evidence_payload_fn=_resolution_evidence_payload,
-        resolution_is_strong_fn=_resolution_is_strong,
-        resolution_blocked_reason_fn=_resolution_blocked_reason,
-    )
+_verify_resolution_payload = _support_wiring.verify_resolution_payload
 
 
 def _resolution_validation_command(
@@ -706,27 +590,7 @@ def _resolution_validation_command(
     )
 
 
-def _resolution_evidence_payload(
-    repo_root: Path,
-    normalized: dict[str, Any],
-    validation_command: str,
-    *,
-    pr_port: PullRequestPort | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> dict[str, Any]:
-    """Collect deterministic evidence for resolution verification."""
-    return _resolution_helpers.resolution_evidence_payload(
-        repo_root,
-        normalized,
-        validation_command,
-        pr_port=pr_port,
-        subprocess_runner=subprocess_runner,
-        gh_runner=gh_runner,
-        verify_code_refs_on_main_fn=_verify_code_refs_on_main,
-        commit_reachable_from_origin_main_fn=_commit_reachable_from_origin_main,
-        pr_is_merged_fn=_pr_is_merged,
-    )
+_resolution_evidence_payload = _support_wiring.resolution_evidence_payload
 
 
 def _resolution_is_strong(
@@ -976,35 +840,7 @@ def _issue_context_cache_is_fresh(
     )
 
 
-def _hydrate_issue_context(
-    issue_ref: str,
-    *,
-    owner: str,
-    repo: str,
-    number: int,
-    snapshot: _ProjectItemSnapshot | None,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    issue_context_port: IssueContextPort | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Return locally ready issue context, refreshing the cache when needed."""
-    return _hydrate_issue_context_helper(
-        issue_ref,
-        owner=owner,
-        repo=repo,
-        number=number,
-        snapshot=snapshot,
-        config=config,
-        db=db,
-        fetch_issue_context=_fetch_issue_context,
-        issue_context_cache_is_fresh=_issue_context_cache_is_fresh,
-        record_metric=_record_metric,
-        issue_context_port=issue_context_port,
-        gh_runner=gh_runner,
-        now=now,
-    )
+_hydrate_issue_context = _support_wiring.hydrate_issue_context
 
 
 def _list_repo_worktrees(
@@ -1181,29 +1017,7 @@ _post_pr_codex_verdict = _codex_comment_wiring.post_pr_codex_verdict
 _backfill_review_verdicts = _codex_comment_wiring.backfill_review_verdicts
 
 
-def _group_review_queue_entries_by_pr(
-    entries: list[ReviewQueueEntry],
-) -> list[tuple[tuple[str, int], tuple[ReviewQueueEntry, ...]]]:
-    """Group review queue rows by PR while preserving earliest-due ordering."""
-    groups: dict[tuple[str, int], list[ReviewQueueEntry]] = {}
-    for entry in entries:
-        groups.setdefault((entry.pr_repo, entry.pr_number), []).append(entry)
-    return sorted(
-        (
-            key,
-            tuple(
-                sorted(
-                    grouped,
-                    key=lambda item: (
-                        item.next_attempt_at,
-                        item.enqueued_at,
-                        item.issue_ref,
-                    ),
-                )
-            ),
-        )
-        for key, grouped in groups.items()
-    )
+_group_review_queue_entries_by_pr = _review_queue_helpers.group_review_queue_entries_by_pr
 
 
 def _repark_unchanged_review_queue_entries(
@@ -1333,29 +1147,7 @@ def _review_queue_retry_seconds_for_partial_failure(
     )
 
 
-def _queue_review_item(
-    store: SessionStorePort,
-    issue_ref: str,
-    pr_url: str,
-    *,
-    session_id: str | None = None,
-    now: datetime | None = None,
-) -> ReviewQueueEntry | None:
-    """Persist one review item for bounded follow-up processing."""
-    parsed = _parse_pr_url(pr_url)
-    if parsed is None:
-        return None
-    owner, repo, pr_number = parsed
-    store.enqueue_review_item(
-        issue_ref,
-        pr_url=pr_url,
-        pr_repo=f"{owner}/{repo}",
-        pr_number=pr_number,
-        source_session_id=session_id,
-        next_attempt_at=(now or datetime.now(timezone.utc)).isoformat(),
-        now=now,
-    )
-    return store.get_review_queue_item(issue_ref)
+_queue_review_item = _review_queue_helpers.queue_review_item
 
 
 # ---------------------------------------------------------------------------
@@ -1364,28 +1156,7 @@ def _queue_review_item(
 # ---------------------------------------------------------------------------
 
 
-def _apply_review_queue_result(
-    store: SessionStorePort,
-    entry: ReviewQueueEntry,
-    result: Any,
-    *,
-    now: datetime | None = None,
-    retry_seconds: int | None = None,
-    last_state_digest: str | None = None,
-) -> bool:
-    """Persist the outcome of processing one review-queue entry.
-
-    Returns True when blocked-streak escalation is needed (caller handles).
-    Requeued results are NOT handled here — see _drain_review_queue().
-    """
-    return _review_queue_helpers.apply_review_queue_result(
-        store,
-        entry,
-        result,
-        now=now,
-        retry_seconds=retry_seconds,
-        last_state_digest=last_state_digest,
-    )
+_apply_review_queue_result = _review_queue_helpers.apply_review_queue_result
 
 
 def _apply_review_queue_partial_failure(
@@ -1407,30 +1178,7 @@ def _apply_review_queue_partial_failure(
     )
 
 
-def _update_board_snapshot_statuses(
-    board_snapshot: CycleBoardSnapshot,
-    critical_path_config: CriticalPathConfig,
-    status_updates: dict[str, str],
-) -> CycleBoardSnapshot:
-    """Return a new snapshot with the requested issue status overrides."""
-    if not status_updates:
-        return board_snapshot
-    items: list[_ProjectItemSnapshot] = []
-    for snapshot in board_snapshot.items:
-        issue_ref = _snapshot_to_issue_ref(
-            snapshot.issue_ref, critical_path_config.issue_prefixes
-        )
-        if issue_ref is None or issue_ref not in status_updates:
-            items.append(snapshot)
-            continue
-        items.append(replace(snapshot, status=status_updates[issue_ref]))
-    by_status: dict[str, list[_ProjectItemSnapshot]] = {}
-    for snapshot in items:
-        by_status.setdefault(snapshot.status, []).append(snapshot)
-    return CycleBoardSnapshot(
-        items=tuple(items),
-        by_status={status: tuple(group) for status, group in by_status.items()},
-    )
+_update_board_snapshot_statuses = _support_wiring.update_board_snapshot_statuses
 
 
 _prepare_review_queue_batch = _review_queue_wiring.prepare_review_queue_batch_from_shell
@@ -2001,28 +1749,7 @@ _prepared_cycle_deps = _operational_wiring.prepared_cycle_deps
 run_one_cycle = _runtime_wiring.run_one_cycle_from_shell
 
 
-def _run_worker_cycle(
-    config: ConsumerConfig,
-    *,
-    target_issue: str,
-    slot_id: int,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext | None = None,
-    dry_run: bool = False,
-    di_kwargs: dict[str, Any] | None = None,
-) -> CycleResult:
-    """Execute one issue in an isolated worker DB connection."""
-    return _run_worker_cycle_use_case(
-        config,
-        target_issue=target_issue,
-        slot_id=slot_id,
-        prepared=prepared,
-        launch_context=launch_context,
-        dry_run=dry_run,
-        di_kwargs=di_kwargs,
-        open_consumer_db=open_consumer_db,
-        run_one_cycle=run_one_cycle,
-    )
+_run_worker_cycle = _support_wiring.run_worker_cycle
 
 
 def _next_available_slots(
@@ -2094,82 +1821,13 @@ def _sleep_for_claim_suppression_if_needed(
     )
 
 
-def _prepare_multi_worker_launch_context(
-    candidate: str,
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    dry_run: bool,
-    di_kwargs: dict[str, Any],
-) -> tuple[PreparedLaunchContext | None, bool]:
-    """Prepare launch context for one candidate.
-
-    Returns `(launch_context, stop_dispatch)`.
-    """
-    return _runtime_wiring.prepare_multi_worker_launch_context(
-        candidate,
-        config=config,
-        db=db,
-        prepared=prepared,
-        dry_run=dry_run,
-        di_kwargs=di_kwargs,
-        shell=sys.modules[__name__],
-    )
+_prepare_multi_worker_launch_context = _support_wiring.prepare_multi_worker_launch_context
 
 
-def _submit_multi_worker_task(
-    executor: ThreadPoolExecutor,
-    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
-    *,
-    config: ConsumerConfig,
-    candidate: str,
-    slot_id: int,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext | None,
-    dry_run: bool,
-    di_kwargs: dict[str, Any],
-) -> None:
-    """Submit one prepared candidate to a worker slot."""
-    _runtime_wiring.submit_multi_worker_task(
-        executor,
-        active_tasks,
-        config=config,
-        candidate=candidate,
-        slot_id=slot_id,
-        prepared=prepared,
-        launch_context=launch_context,
-        dry_run=dry_run,
-        di_kwargs=di_kwargs,
-        shell=sys.modules[__name__],
-    )
+_submit_multi_worker_task = _support_wiring.submit_multi_worker_task
 
 
-def _dispatch_multi_worker_launches(
-    executor: ThreadPoolExecutor,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    *,
-    prepared: PreparedCycleContext,
-    available_slots: list[int],
-    active_issue_refs: set[str],
-    active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
-    dry_run: bool,
-    di_kwargs: dict[str, Any],
-) -> int:
-    """Launch as many ready candidates as the current hydration budget allows."""
-    return _runtime_wiring.dispatch_multi_worker_launches(
-        executor,
-        config,
-        db,
-        prepared=prepared,
-        available_slots=available_slots,
-        active_issue_refs=active_issue_refs,
-        active_tasks=active_tasks,
-        dry_run=dry_run,
-        di_kwargs=di_kwargs,
-        shell=sys.modules[__name__],
-    )
+_dispatch_multi_worker_launches = _support_wiring.dispatch_multi_worker_launches
 
 
 def _run_multi_worker_daemon_loop(
