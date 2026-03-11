@@ -95,6 +95,7 @@ from startupai_controller.consumer_worktree_helpers import (
 import startupai_controller.consumer_claim_helpers as _claim_helpers
 import startupai_controller.consumer_claim_wiring as _claim_wiring
 import startupai_controller.consumer_cycle_wiring as _cycle_wiring
+import startupai_controller.consumer_operational_wiring as _operational_wiring
 import startupai_controller.consumer_recovery_helpers as _recovery_helpers
 import startupai_controller.consumer_review_queue_wiring as _review_queue_wiring
 import startupai_controller.consumer_runtime_wiring as _runtime_wiring
@@ -2367,171 +2368,19 @@ def _return_issue_to_ready(
     )
 
 
-def _build_reconciliation_wiring_deps() -> ReconciliationWiringDeps:
-    """Build the wiring deps for board-truth reconciliation."""
-    return ReconciliationWiringDeps(
-        board_state_reconcile_active_repair=_board_state_helpers.reconcile_active_repair_review_items,
-        board_state_reconcile_single=_board_state_helpers.reconcile_single_in_progress_item,
-        board_state_reconcile_stale=_board_state_helpers.reconcile_stale_in_progress_items,
-        transition_issue_to_in_progress=_transition_issue_to_in_progress,
-        return_issue_to_ready=_return_issue_to_ready,
-        transition_issue_to_review=_transition_issue_to_review,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        classify_open_pr_candidates=_classify_open_pr_candidates,
-        reconcile_in_progress_decision=reconcile_in_progress_decision,
-        snapshot_to_issue_ref=_snapshot_to_issue_ref,
-        build_session_store=build_session_store,
-        build_github_port_bundle=build_github_port_bundle,
-    )
+_build_reconciliation_wiring_deps = _operational_wiring.build_reconciliation_wiring_deps
 
 
-def _reconcile_active_repair_review_items(
-    consumer_config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    *,
-    active_repair_issue_refs: set[str],
-    review_state_port: ReviewStatePort,
-    board_port: BoardMutationPort,
-    board_snapshot: CycleBoardSnapshot | None,
-    issue_ref_for_snapshot: Callable[[_ProjectItemSnapshot | IssueSnapshot], str | None],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    dry_run: bool,
-) -> list[str]:
-    """Return active repair items that should move from Review back to In Progress."""
-    from startupai_controller.application.consumer.reconciliation import (
-        reconcile_active_repair_review_items as _use_case,
-    )
-    return _use_case(
-        consumer_config,
-        critical_path_config,
-        deps=_build_reconciliation_wiring_deps(),
-        active_repair_issue_refs=active_repair_issue_refs,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_snapshot=board_snapshot,
-        issue_ref_for_snapshot=issue_ref_for_snapshot,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
+_reconcile_active_repair_review_items = _operational_wiring.reconcile_active_repair_review_items
 
 
-def _reconcile_single_in_progress_item(
-    issue_ref: str,
-    *,
-    consumer_config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    store: SessionStorePort,
-    pr_port: PullRequestPort,
-    review_state_port: ReviewStatePort,
-    board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    dry_run: bool,
-) -> str:
-    """Reconcile one stale In Progress item and return its target lane."""
-    from startupai_controller.application.consumer.reconciliation import (
-        reconcile_single_in_progress_item as _use_case,
-    )
-    return _use_case(
-        issue_ref,
-        deps=_build_reconciliation_wiring_deps(),
-        consumer_config=consumer_config,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        store=store,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
+_reconcile_single_in_progress_item = _operational_wiring.reconcile_single_in_progress_item
 
 
-def _reconcile_stale_in_progress_items(
-    consumer_config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    *,
-    store: SessionStorePort,
-    pr_port: PullRequestPort,
-    review_state_port: ReviewStatePort,
-    board_port: BoardMutationPort,
-    board_snapshot: CycleBoardSnapshot | None,
-    issue_ref_for_snapshot: Callable[[_ProjectItemSnapshot | IssueSnapshot], str | None],
-    active_issue_refs: set[str],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    dry_run: bool,
-) -> tuple[list[str], list[str], list[str]]:
-    """Reconcile stale In Progress items back to their truthful lanes."""
-    from startupai_controller.application.consumer.reconciliation import (
-        reconcile_stale_in_progress_items as _use_case,
-    )
-    return _use_case(
-        consumer_config,
-        critical_path_config,
-        automation_config,
-        deps=_build_reconciliation_wiring_deps(),
-        store=store,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_snapshot=board_snapshot,
-        issue_ref_for_snapshot=issue_ref_for_snapshot,
-        active_issue_refs=active_issue_refs,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
+_reconcile_stale_in_progress_items = _operational_wiring.reconcile_stale_in_progress_items
 
 
-def _recover_interrupted_sessions(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    *,
-    automation_config: BoardAutomationConfig | None = None,
-    pr_port: PullRequestPort | None = None,
-    review_state_port: ReviewStatePort | None = None,
-    board_port: BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> list[RecoveredLease]:
-    """Recover leases left behind by a previous interrupted daemon process."""
-    return _recovery_helpers.recover_interrupted_sessions(
-        config,
-        db,
-        automation_config=automation_config,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        load_config=load_config,
-        config_error_type=ConfigError,
-        logger=logger,
-        recovery_use_case=_recover_interrupted_sessions_use_case,
-        gh_query_error_type=GhQueryError,
-        build_github_port_bundle=build_github_port_bundle,
-        load_automation_config=load_automation_config,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        classify_open_pr_candidates=_classify_open_pr_candidates,
-        return_issue_to_ready=_return_issue_to_ready,
-        transition_issue_to_review=_transition_issue_to_review,
-        set_blocked_with_reason=_set_blocked_with_reason,
-    )
+_recover_interrupted_sessions = _operational_wiring.recover_interrupted_sessions
 
 
 def _build_init_cycle_runtime_deps() -> InitializeCycleRuntimeDeps:
@@ -2912,69 +2761,10 @@ def _next_available_slot(db: ConsumerDB, limit: int) -> int | None:
     return None
 
 
-def _reconcile_board_truth(
-    consumer_config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig | None,
-    db: ConsumerDB,
-    *,
-    session_store: SessionStorePort | None = None,
-    pr_port: PullRequestPort | None = None,
-    review_state_port: ReviewStatePort | None = None,
-    board_port: BoardMutationPort | None = None,
-    dry_run: bool = False,
-    board_snapshot: CycleBoardSnapshot | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> ReconciliationResult:
-    """Make board `In Progress` truthful against local consumer state."""
-    return _wire_reconcile_board_truth_use_case(
-        consumer_config,
-        critical_path_config,
-        automation_config,
-        db,
-        deps=_build_reconciliation_wiring_deps(),
-        session_store=session_store,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        dry_run=dry_run,
-        board_snapshot=board_snapshot,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+_reconcile_board_truth = _operational_wiring.reconcile_board_truth
 
 
-def _block_prelaunch_issue(
-    issue_ref: str,
-    blocked_reason: str,
-    *,
-    config: ConsumerConfig,
-    cp_config: CriticalPathConfig,
-    db: ConsumerDB,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Move a launch-unready issue to Blocked before claim."""
-    _execution_outcome_wiring.block_prelaunch_issue(
-        issue_ref,
-        blocked_reason,
-        config=config,
-        cp_config=cp_config,
-        db=db,
-        gh_query_error_type=GhQueryError,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        record_successful_github_mutation=_record_successful_github_mutation,
-        mark_degraded=_mark_degraded,
-        queue_status_transition=_queue_status_transition,
-        logger=logger,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+_block_prelaunch_issue = _operational_wiring.block_prelaunch_issue
 
 
 # ---------------------------------------------------------------------------
@@ -3003,196 +2793,25 @@ _assemble_prepared_launch_context = _cycle_wiring.assemble_prepared_launch_conte
 _prepare_launch_candidate = _cycle_wiring.prepare_launch_candidate
 
 
-def _select_launch_candidate_for_cycle(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    target_issue: str | None,
-    status_resolver: Callable[..., str] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]:
-    """Select a launch candidate and validate its immediate launchability."""
-    return _selection_retry_wiring.select_launch_candidate_for_cycle(
-        config=config,
-        db=db,
-        prepared=prepared,
-        target_issue=target_issue,
-        status_resolver=status_resolver,
-        gh_runner=gh_runner,
-        cycle_result_factory=CycleResult,
-        selected_launch_candidate_factory=SelectedLaunchCandidate,
-        select_candidate_for_cycle=_select_candidate_for_cycle,
-        parse_issue_ref=parse_issue_ref,
-        effective_retry_backoff=_effective_retry_backoff,
-        retry_backoff_active=_retry_backoff_active,
-        maybe_activate_claim_suppression=_maybe_activate_claim_suppression,
-        mark_degraded=_mark_degraded,
-        gh_reason_code=gh_reason_code,
-        gh_query_error_type=GhQueryError,
-        logger=logger,
-    )
+_select_launch_candidate_for_cycle = _operational_wiring.select_launch_candidate_for_cycle
 
 
-def _prepare_selected_launch_candidate(
-    *,
-    selected_candidate: SelectedLaunchCandidate,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
-    """Prepare the selected candidate into launch-ready local context."""
-    return _claim_wiring.prepare_selected_launch_candidate(
-        selected_candidate=selected_candidate,
-        config=config,
-        db=db,
-        prepared=prepared,
-        subprocess_runner=subprocess_runner,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        record_metric=_record_metric,
-        prepare_launch_candidate=_prepare_launch_candidate,
-        handle_selected_launch_query_error=_handle_selected_launch_query_error,
-        handle_selected_launch_workflow_config_error=_handle_selected_launch_workflow_config_error,
-        handle_selected_launch_worktree_error=_handle_selected_launch_worktree_error,
-        handle_selected_launch_runtime_error=_handle_selected_launch_runtime_error,
-        workflow_config_error_type=WorkflowConfigError,
-        worktree_prepare_error_type=WorktreePrepareError,
-        gh_query_error_type=GhQueryError,
-    )
+_prepare_selected_launch_candidate = _operational_wiring.prepare_selected_launch_candidate
 
 
-def _handle_selected_launch_query_error(
-    *,
-    candidate: str,
-    err: GhQueryError,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-) -> tuple[None, CycleResult]:
-    """Handle GitHub/query failures during selected launch preparation."""
-    return _claim_wiring.handle_selected_launch_query_error(
-        candidate=candidate,
-        err=err,
-        config=config,
-        db=db,
-        record_metric=_record_metric,
-        maybe_activate_claim_suppression=_maybe_activate_claim_suppression,
-        mark_degraded=_mark_degraded,
-        gh_reason_code=gh_reason_code,
-        cycle_result_factory=CycleResult,
-    )
+_handle_selected_launch_query_error = _operational_wiring.handle_selected_launch_query_error
 
 
-def _handle_selected_launch_workflow_config_error(
-    *,
-    candidate: str,
-    err: WorkflowConfigError,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    cp_config: CriticalPathConfig,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[None, CycleResult]:
-    """Handle invalid workflow configuration during launch preparation."""
-    return _claim_wiring.handle_selected_launch_workflow_config_error(
-        candidate=candidate,
-        err=err,
-        config=config,
-        db=db,
-        cp_config=cp_config,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        block_prelaunch_issue=_block_prelaunch_issue,
-        record_metric=_record_metric,
-        cycle_result_factory=CycleResult,
-    )
+_handle_selected_launch_workflow_config_error = _operational_wiring.handle_selected_launch_workflow_config_error
 
 
-def _handle_selected_launch_worktree_error(
-    *,
-    candidate: str,
-    err: WorktreePrepareError,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-) -> tuple[None, CycleResult]:
-    """Handle worktree preparation failures for a selected launch candidate."""
-    return _claim_wiring.handle_selected_launch_worktree_error(
-        candidate=candidate,
-        err=err,
-        config=config,
-        db=db,
-        record_metric=_record_metric,
-        cycle_result_factory=CycleResult,
-    )
+_handle_selected_launch_worktree_error = _operational_wiring.handle_selected_launch_worktree_error
 
 
-def _handle_selected_launch_runtime_error(
-    *,
-    candidate: str,
-    err: RuntimeError,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    cp_config: CriticalPathConfig,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[None, CycleResult]:
-    """Handle workflow-hook runtime failures during launch preparation."""
-    return _claim_wiring.handle_selected_launch_runtime_error(
-        candidate=candidate,
-        err=err,
-        config=config,
-        db=db,
-        cp_config=cp_config,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        block_prelaunch_issue=_block_prelaunch_issue,
-        record_metric=_record_metric,
-        cycle_result_factory=CycleResult,
-    )
+_handle_selected_launch_runtime_error = _operational_wiring.handle_selected_launch_runtime_error
 
 
-def _resolve_launch_context_for_cycle(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext | None,
-    target_issue: str | None,
-    dry_run: bool,
-    status_resolver: Callable[..., str] | None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
-    """Resolve or prepare launch-ready work for this cycle."""
-    return _cycle_wiring.resolve_launch_context_for_cycle(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        target_issue=target_issue,
-        dry_run=dry_run,
-        status_resolver=status_resolver,
-        subprocess_runner=subprocess_runner,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        select_launch_candidate_for_cycle=_select_launch_candidate_for_cycle,
-        prepare_selected_launch_candidate=_prepare_selected_launch_candidate,
-        logger=logger,
-    )
+_resolve_launch_context_for_cycle = _operational_wiring.resolve_launch_context_for_cycle
 
 
 @dataclass(frozen=True)
@@ -3203,251 +2822,31 @@ class PendingClaimContext:
     effective_max_retries: int
 
 
-def _open_pending_claim_session(
-    *,
-    db: ConsumerDB,
-    launch_context: PreparedLaunchContext,
-    executor: str,
-    slot_id: int,
-) -> tuple[PendingClaimContext | None, CycleResult | None]:
-    """Create the session record and acquire the lease for a launch-ready issue."""
-    return _claim_wiring.open_pending_claim_session(
-        db=db,
-        launch_context=launch_context,
-        executor=executor,
-        slot_id=slot_id,
-        complete_session=_complete_session,
-        pending_claim_context_factory=PendingClaimContext,
-        cycle_result_factory=CycleResult,
-    )
+_open_pending_claim_session = _operational_wiring.open_pending_claim_session
 
 
-def _enforce_claim_retry_ceiling(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    launch_context: PreparedLaunchContext,
-    pending_claim: PendingClaimContext,
-    cp_config: CriticalPathConfig,
-    board_info_resolver: Callable | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> CycleResult | None:
-    """Abort and escalate if the issue already exhausted its retry ceiling."""
-    return _claim_wiring.enforce_claim_retry_ceiling(
-        config=config,
-        db=db,
-        launch_context=launch_context,
-        pending_claim=pending_claim,
-        cp_config=cp_config,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        complete_session=_complete_session,
-        escalate_to_claude=_escalate_to_claude,
-        cycle_result_factory=CycleResult,
-        logger=logger,
-    )
+_enforce_claim_retry_ceiling = _operational_wiring.enforce_claim_retry_ceiling
 
 
-def _attempt_launch_context_claim(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext,
-    pending_claim: PendingClaimContext,
-    slot_id: int,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[ClaimReadyResult | None, CycleResult | None]:
-    """Claim board ownership for a launch-ready issue."""
-    return _claim_wiring.attempt_launch_context_claim(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        pending_claim=pending_claim,
-        slot_id=slot_id,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        claim_launch_ready_issue=_claim_launch_ready_issue,
-        handle_launch_claim_api_failure=_handle_launch_claim_api_failure,
-        handle_launch_claim_unexpected_failure=_handle_launch_claim_unexpected_failure,
-        handle_launch_claim_rejection=_handle_launch_claim_rejection,
-        record_metric=_record_metric,
-        gh_query_error_type=GhQueryError,
-    )
+_attempt_launch_context_claim = _operational_wiring.attempt_launch_context_claim
 
 
-def _claim_launch_ready_issue(
-    candidate: str,
-    *,
-    config: ConsumerConfig,
-    prepared: PreparedCycleContext,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> ClaimReadyResult:
-    """Execute the actual board claim for a launch-ready issue."""
-    return _claim_wiring.claim_launch_ready_issue(
-        candidate,
-        config=config,
-        prepared=prepared,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        claim_ready_issue=claim_ready_issue,
-    )
+_claim_launch_ready_issue = _operational_wiring.claim_launch_ready_issue
 
 
-def _handle_launch_claim_api_failure(
-    candidate: str,
-    err: GhQueryError,
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    pending_claim: PendingClaimContext,
-) -> tuple[None, CycleResult]:
-    """Handle a GitHub/API failure while claiming a launch-ready issue."""
-    return _claim_wiring.handle_launch_claim_api_failure(
-        candidate,
-        err,
-        config=config,
-        db=db,
-        pending_claim=pending_claim,
-        maybe_activate_claim_suppression=_maybe_activate_claim_suppression,
-        mark_degraded=_mark_degraded,
-        gh_reason_code=gh_reason_code,
-        complete_session=_complete_session,
-        record_metric=_record_metric,
-        cycle_result_factory=CycleResult,
-        logger=logger,
-    )
+_handle_launch_claim_api_failure = _operational_wiring.handle_launch_claim_api_failure
 
 
-def _handle_launch_claim_unexpected_failure(
-    candidate: str,
-    err: Exception,
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    pending_claim: PendingClaimContext,
-) -> tuple[None, CycleResult]:
-    """Handle an unexpected local failure while claiming a launch-ready issue."""
-    return _claim_wiring.handle_launch_claim_unexpected_failure(
-        candidate,
-        err,
-        config=config,
-        db=db,
-        pending_claim=pending_claim,
-        complete_session=_complete_session,
-        record_metric=_record_metric,
-        cycle_result_factory=CycleResult,
-        logger=logger,
-    )
+_handle_launch_claim_unexpected_failure = _operational_wiring.handle_launch_claim_unexpected_failure
 
 
-def _handle_launch_claim_rejection(
-    candidate: str,
-    claim_result: ClaimReadyResult,
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    pending_claim: PendingClaimContext,
-) -> tuple[None, CycleResult]:
-    """Handle a non-exception claim rejection for a launch-ready issue."""
-    return _claim_wiring.handle_launch_claim_rejection(
-        candidate,
-        claim_result,
-        config=config,
-        db=db,
-        pending_claim=pending_claim,
-        complete_session=_complete_session,
-        record_metric=_record_metric,
-        cycle_result_factory=CycleResult,
-    )
+_handle_launch_claim_rejection = _operational_wiring.handle_launch_claim_rejection
 
 
-def _mark_claimed_session_running(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    launch_context: PreparedLaunchContext,
-    pending_claim: PendingClaimContext,
-    slot_id: int,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    cp_config: CriticalPathConfig,
-    gh_runner: Callable[..., str] | None,
-) -> ClaimedSessionContext:
-    """Persist the durable-start state and post the claim marker."""
-    return _claim_wiring.mark_claimed_session_running(
-        config=config,
-        db=db,
-        launch_context=launch_context,
-        pending_claim=pending_claim,
-        slot_id=slot_id,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        cp_config=cp_config,
-        gh_runner=gh_runner,
-        record_successful_github_mutation=_record_successful_github_mutation,
-        record_metric=_record_metric,
-        post_consumer_claim_comment=_post_consumer_claim_comment,
-        claimed_session_context_factory=ClaimedSessionContext,
-        logger=logger,
-    )
+_mark_claimed_session_running = _operational_wiring.mark_claimed_session_running
 
 
-def _claim_launch_context(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext,
-    slot_id: int,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
-    """Claim board ownership and start a durable running session."""
-    return _cycle_wiring.claim_launch_context(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        slot_id=slot_id,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        open_pending_claim_session=_open_pending_claim_session,
-        enforce_claim_retry_ceiling=_enforce_claim_retry_ceiling,
-        attempt_launch_context_claim=_attempt_launch_context_claim,
-        mark_claimed_session_running=_mark_claimed_session_running,
-    )
+_claim_launch_context = _operational_wiring.claim_launch_context
 
 
 def _session_status_from_codex_result(
@@ -3461,377 +2860,46 @@ def _session_status_from_codex_result(
     )
 
 
-def _create_pr_for_execution_result(
-    *,
-    config: ConsumerConfig,
-    launch_context: PreparedLaunchContext,
-    claimed_context: ClaimedSessionContext,
-    codex_result: dict[str, Any] | None,
-    session_status: str,
-    failure_reason: str | None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
-    gh_runner: Callable[..., str] | None,
-) -> PrCreationOutcome:
-    """Reuse or create a PR from claimed-session output."""
-    return _execution_outcome_wiring.create_pr_for_execution_result(
-        config=config,
-        launch_context=launch_context,
-        claimed_context=claimed_context,
-        codex_result=codex_result,
-        session_status=session_status,
-        failure_reason=failure_reason,
-        subprocess_runner=subprocess_runner,
-        gh_runner=gh_runner,
-        has_commits_on_branch=_has_commits_on_branch,
-        create_or_update_pr=_create_or_update_pr,
-        pr_creation_outcome_factory=PrCreationOutcome,
-        logger=logger,
-    )
+_create_pr_for_execution_result = _operational_wiring.create_pr_for_execution_result
 
 
-def _handoff_execution_to_review(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext,
-    session_id: str,
-    pr_url: str,
-    session_status: str,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> ReviewQueueDrainSummary:
-    """Transition a claimed session into Review and perform immediate rescue."""
-    return _cycle_wiring.handoff_execution_to_review(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        session_id=session_id,
-        pr_url=pr_url,
-        session_status=session_status,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        build_session_store=build_session_store,
-        transition_claimed_session_to_review=_transition_claimed_session_to_review,
-        post_claimed_session_verdict_marker=_post_claimed_session_verdict_marker,
-        queue_claimed_session_for_review=_queue_claimed_session_for_review,
-        run_immediate_review_handoff=_run_immediate_review_handoff,
-        record_metric=_record_metric,
-    )
+_handoff_execution_to_review = _operational_wiring.handoff_execution_to_review
 
 
-def _transition_claimed_session_to_review(
-    *,
-    db: ConsumerDB,
-    issue_ref: str,
-    session_id: str,
-    config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Move one claimed issue into Review or queue the transition on failure."""
-    _execution_outcome_wiring.transition_claimed_session_to_review(
-        db=db,
-        issue_ref=issue_ref,
-        session_id=session_id,
-        config=config,
-        critical_path_config=critical_path_config,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        transition_issue_to_review=_transition_issue_to_review,
-        record_successful_github_mutation=_record_successful_github_mutation,
-        mark_degraded=_mark_degraded,
-        queue_status_transition=_queue_status_transition,
-        logger=logger,
-    )
+_transition_claimed_session_to_review = _operational_wiring.transition_claimed_session_to_review
 
 
-def _post_claimed_session_verdict_marker(
-    *,
-    db: ConsumerDB,
-    pr_url: str,
-    session_id: str,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Post the codex verdict marker for a newly handed-off review PR."""
-    _execution_outcome_wiring.post_claimed_session_verdict_marker(
-        db=db,
-        pr_url=pr_url,
-        session_id=session_id,
-        gh_runner=gh_runner,
-        post_pr_codex_verdict=_post_pr_codex_verdict,
-        record_successful_github_mutation=_record_successful_github_mutation,
-        mark_degraded=_mark_degraded,
-        queue_verdict_marker=_queue_verdict_marker,
-        logger=logger,
-    )
+_post_claimed_session_verdict_marker = _operational_wiring.post_claimed_session_verdict_marker
 
 
-def _queue_claimed_session_for_review(
-    *,
-    store: SessionStorePort,
-    issue_ref: str,
-    pr_url: str,
-    session_id: str,
-) -> ReviewQueueEntry | None:
-    """Queue one claimed session for immediate review handling."""
-    return _execution_outcome_wiring.queue_claimed_session_for_review(
-        store=store,
-        issue_ref=issue_ref,
-        pr_url=pr_url,
-        session_id=session_id,
-        queue_review_item=_queue_review_item,
-    )
+_queue_claimed_session_for_review = _operational_wiring.queue_claimed_session_for_review
 
 
-def _run_immediate_review_handoff(
-    *,
-    config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    store: SessionStorePort,
-    queue_entry: ReviewQueueEntry,
-    gh_runner: Callable[..., str] | None,
-    db: ConsumerDB,
-) -> ReviewQueueDrainSummary:
-    """Run immediate rescue for the just-opened review PR."""
-    return _execution_outcome_wiring.run_immediate_review_handoff(
-        config=config,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        store=store,
-        queue_entry=queue_entry,
-        gh_runner=gh_runner,
-        db=db,
-        build_github_port_bundle=build_github_port_bundle,
-        github_memo_factory=CycleGitHubMemo,
-        build_review_snapshots_for_queue_entries=_build_review_snapshots_for_queue_entries,
-        review_rescue=review_rescue,
-        apply_review_queue_result=_apply_review_queue_result,
-        mark_degraded=_mark_degraded,
-        gh_reason_code=gh_reason_code,
-        summary_factory=ReviewQueueDrainSummary,
-        logger=logger,
-    )
+_run_immediate_review_handoff = _operational_wiring.run_immediate_review_handoff
 
 
-def _handle_non_review_execution_outcome(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext,
-    session_id: str,
-    session_status: str,
-    codex_result: dict[str, Any] | None,
-    has_commits: bool,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    comment_poster: Callable[..., None] | None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[str, ResolutionEvaluation | None, str | None]:
-    """Handle non-review outcomes for a claimed session."""
-    return _execution_outcome_wiring.handle_non_review_execution_outcome(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        session_id=session_id,
-        session_status=session_status,
-        codex_result=codex_result,
-        has_commits=has_commits,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_poster=comment_poster,
-        subprocess_runner=subprocess_runner,
-        gh_runner=gh_runner,
-        build_github_port_bundle=build_github_port_bundle,
-        verify_resolution_payload=_verify_resolution_payload,
-        apply_resolution_action=_apply_resolution_action,
-        return_issue_to_ready=_return_issue_to_ready,
-        record_successful_github_mutation=_record_successful_github_mutation,
-        mark_degraded=_mark_degraded,
-        queue_status_transition=_queue_status_transition,
-        record_metric=_record_metric,
-        logger=logger,
-    )
+_handle_non_review_execution_outcome = _operational_wiring.handle_non_review_execution_outcome
 
 
-def _final_phase_for_claimed_session(
-    *,
-    launch_context: PreparedLaunchContext,
-    execution_outcome: SessionExecutionOutcome,
-) -> str:
-    """Determine the final persisted phase for a claimed session."""
-    return _execution_outcome_wiring.final_phase_for_claimed_session(
-        launch_context=launch_context,
-        execution_outcome=execution_outcome,
-    )
+_final_phase_for_claimed_session = _operational_wiring.final_phase_for_claimed_session
 
 
-def _persist_claimed_session_completion(
-    *,
-    db: ConsumerDB,
-    session_id: str,
-    issue_ref: str,
-    execution_outcome: SessionExecutionOutcome,
-    final_phase: str,
-) -> None:
-    """Persist the final session record for a claimed execution outcome."""
-    _execution_outcome_wiring.persist_claimed_session_completion(
-        db=db,
-        session_id=session_id,
-        issue_ref=issue_ref,
-        execution_outcome=execution_outcome,
-        final_phase=final_phase,
-        complete_session=_complete_session,
-    )
+_persist_claimed_session_completion = _operational_wiring.persist_claimed_session_completion
 
 
-def _post_claimed_session_result_comment(
-    *,
-    issue_ref: str,
-    session_id: str,
-    codex_result: dict[str, Any] | None,
-    cp_config: CriticalPathConfig,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Post the session result comment when Codex produced structured output."""
-    _execution_outcome_wiring.post_claimed_session_result_comment(
-        issue_ref=issue_ref,
-        session_id=session_id,
-        codex_result=codex_result,
-        cp_config=cp_config,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        post_result_comment=_post_result_comment,
-        logger=logger,
-    )
+_post_claimed_session_result_comment = _operational_wiring.post_claimed_session_result_comment
 
 
-def _maybe_escalate_claimed_session_failure(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    issue_ref: str,
-    effective_max_retries: int,
-    session_status: str,
-    codex_result: dict[str, Any] | None,
-    cp_config: CriticalPathConfig,
-    board_info_resolver: Callable | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Escalate terminal failed/timeout sessions once retry ceiling is reached."""
-    _execution_outcome_wiring.maybe_escalate_claimed_session_failure(
-        config=config,
-        db=db,
-        issue_ref=issue_ref,
-        effective_max_retries=effective_max_retries,
-        session_status=session_status,
-        codex_result=codex_result,
-        cp_config=cp_config,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        escalate_to_claude=_escalate_to_claude,
-        logger=logger,
-    )
+_maybe_escalate_claimed_session_failure = _operational_wiring.maybe_escalate_claimed_session_failure
 
 
-def _execute_claimed_session(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext,
-    claimed_context: ClaimedSessionContext,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
-    file_reader: Callable[[Path], str] | None,
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> SessionExecutionOutcome:
-    """Execute Codex for a claimed session and apply immediate board handoff."""
-    return _execution_outcome_wiring.execute_claimed_session(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        claimed_context=claimed_context,
-        subprocess_runner=subprocess_runner,
-        file_reader=file_reader,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        assemble_codex_prompt=_assemble_codex_prompt,
-        run_codex_session=_run_codex_session,
-        parse_codex_result=_parse_codex_result,
-        session_status_from_codex_result=_session_status_from_codex_result,
-        create_pr_for_execution_result=_create_pr_for_execution_result,
-        handoff_execution_to_review=_handoff_execution_to_review,
-        handle_non_review_execution_outcome=_handle_non_review_execution_outcome,
-    )
+_execute_claimed_session = _operational_wiring.execute_claimed_session
 
 
-def _finalize_claimed_session(
-    *,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    launch_context: PreparedLaunchContext,
-    claimed_context: ClaimedSessionContext,
-    execution_outcome: SessionExecutionOutcome,
-    board_info_resolver: Callable | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> CycleResult:
-    """Persist final session state and return the cycle result."""
-    return _execution_outcome_wiring.finalize_claimed_session(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        claimed_context=claimed_context,
-        execution_outcome=execution_outcome,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        final_phase_for_claimed_session=_final_phase_for_claimed_session,
-        persist_claimed_session_completion=_persist_claimed_session_completion,
-        post_claimed_session_result_comment=_post_claimed_session_result_comment,
-        maybe_escalate_claimed_session_failure=_maybe_escalate_claimed_session_failure,
-    )
+_finalize_claimed_session = _operational_wiring.finalize_claimed_session
 
 
-def _prepared_cycle_deps() -> PreparedCycleDeps:
-    """Bind board_consumer helpers for the extracted prepared-cycle slice."""
-    return _cycle_wiring.prepared_cycle_deps(
-        claim_suppression_state=_claim_suppression_state,
-        next_available_slot=_next_available_slot,
-        resolve_launch_context_for_cycle=_resolve_launch_context_for_cycle,
-        claim_launch_context=_claim_launch_context,
-        execute_claimed_session=_execute_claimed_session,
-        finalize_claimed_session=_finalize_claimed_session,
-    )
+_prepared_cycle_deps = _operational_wiring.prepared_cycle_deps
 
 
 # ---------------------------------------------------------------------------
