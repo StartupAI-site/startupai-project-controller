@@ -107,6 +107,7 @@ from startupai_controller.consumer_review_handoff_helpers import (
     transition_claimed_session_to_review as _transition_claimed_session_to_review_helper,
 )
 import startupai_controller.consumer_claim_helpers as _claim_helpers
+import startupai_controller.consumer_claim_wiring as _claim_wiring
 import startupai_controller.consumer_cycle_wiring as _cycle_wiring
 import startupai_controller.consumer_recovery_helpers as _recovery_helpers
 import startupai_controller.consumer_review_queue_wiring as _review_queue_wiring
@@ -3536,13 +3537,7 @@ def _prepare_selected_launch_candidate(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Prepare the selected candidate into launch-ready local context."""
-    _record_metric(
-        db,
-        config,
-        "candidate_selected",
-        issue_ref=selected_candidate.issue_ref,
-    )
-    return _claim_helpers.prepare_selected_launch_candidate(
+    return _claim_wiring.prepare_selected_launch_candidate(
         selected_candidate=selected_candidate,
         config=config,
         db=db,
@@ -3552,6 +3547,7 @@ def _prepare_selected_launch_candidate(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
+        record_metric=_record_metric,
         prepare_launch_candidate=_prepare_launch_candidate,
         handle_selected_launch_query_error=_handle_selected_launch_query_error,
         handle_selected_launch_workflow_config_error=_handle_selected_launch_workflow_config_error,
@@ -3571,7 +3567,7 @@ def _handle_selected_launch_query_error(
     db: ConsumerDB,
 ) -> tuple[None, CycleResult]:
     """Handle GitHub/query failures during selected launch preparation."""
-    return _claim_helpers.handle_selected_launch_query_error(
+    return _claim_wiring.handle_selected_launch_query_error(
         candidate=candidate,
         err=err,
         config=config,
@@ -3596,7 +3592,7 @@ def _handle_selected_launch_workflow_config_error(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[None, CycleResult]:
     """Handle invalid workflow configuration during launch preparation."""
-    return _claim_helpers.handle_selected_launch_workflow_config_error(
+    return _claim_wiring.handle_selected_launch_workflow_config_error(
         candidate=candidate,
         err=err,
         config=config,
@@ -3619,7 +3615,7 @@ def _handle_selected_launch_worktree_error(
     db: ConsumerDB,
 ) -> tuple[None, CycleResult]:
     """Handle worktree preparation failures for a selected launch candidate."""
-    return _claim_helpers.handle_selected_launch_worktree_error(
+    return _claim_wiring.handle_selected_launch_worktree_error(
         candidate=candidate,
         err=err,
         config=config,
@@ -3641,7 +3637,7 @@ def _handle_selected_launch_runtime_error(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[None, CycleResult]:
     """Handle workflow-hook runtime failures during launch preparation."""
-    return _claim_helpers.handle_selected_launch_runtime_error(
+    return _claim_wiring.handle_selected_launch_runtime_error(
         candidate=candidate,
         err=err,
         config=config,
@@ -3705,7 +3701,7 @@ def _open_pending_claim_session(
     slot_id: int,
 ) -> tuple[PendingClaimContext | None, CycleResult | None]:
     """Create the session record and acquire the lease for a launch-ready issue."""
-    return _claim_helpers.open_pending_claim_session(
+    return _claim_wiring.open_pending_claim_session(
         db=db,
         launch_context=launch_context,
         executor=executor,
@@ -3729,7 +3725,7 @@ def _enforce_claim_retry_ceiling(
     gh_runner: Callable[..., str] | None,
 ) -> CycleResult | None:
     """Abort and escalate if the issue already exhausted its retry ceiling."""
-    return _claim_helpers.enforce_claim_retry_ceiling(
+    return _claim_wiring.enforce_claim_retry_ceiling(
         config=config,
         db=db,
         launch_context=launch_context,
@@ -3762,7 +3758,7 @@ def _attempt_launch_context_claim(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[ClaimReadyResult | None, CycleResult | None]:
     """Claim board ownership for a launch-ready issue."""
-    return _claim_helpers.attempt_launch_context_claim(
+    return _claim_wiring.attempt_launch_context_claim(
         config=config,
         db=db,
         prepared=prepared,
@@ -3797,21 +3793,17 @@ def _claim_launch_ready_issue(
     gh_runner: Callable[..., str] | None,
 ) -> ClaimReadyResult:
     """Execute the actual board claim for a launch-ready issue."""
-    return claim_ready_issue(
-        prepared.cp_config,
-        config.project_owner,
-        config.project_number,
-        ready_flow_port=prepared.ready_flow_port,
-        executor=config.executor,
-        issue_ref=candidate,
-        all_prefixes=True,
-        automation_config=prepared.auto_config,
+    return _claim_wiring.claim_launch_ready_issue(
+        candidate,
+        config=config,
+        prepared=prepared,
+        status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        status_resolver=status_resolver,
+        claim_ready_issue=claim_ready_issue,
     )
 
 
@@ -3824,7 +3816,7 @@ def _handle_launch_claim_api_failure(
     pending_claim: PendingClaimContext,
 ) -> tuple[None, CycleResult]:
     """Handle a GitHub/API failure while claiming a launch-ready issue."""
-    return _claim_helpers.handle_launch_claim_api_failure(
+    return _claim_wiring.handle_launch_claim_api_failure(
         candidate,
         err,
         config=config,
@@ -3849,7 +3841,7 @@ def _handle_launch_claim_unexpected_failure(
     pending_claim: PendingClaimContext,
 ) -> tuple[None, CycleResult]:
     """Handle an unexpected local failure while claiming a launch-ready issue."""
-    return _claim_helpers.handle_launch_claim_unexpected_failure(
+    return _claim_wiring.handle_launch_claim_unexpected_failure(
         candidate,
         err,
         config=config,
@@ -3871,7 +3863,7 @@ def _handle_launch_claim_rejection(
     pending_claim: PendingClaimContext,
 ) -> tuple[None, CycleResult]:
     """Handle a non-exception claim rejection for a launch-ready issue."""
-    return _claim_helpers.handle_launch_claim_rejection(
+    return _claim_wiring.handle_launch_claim_rejection(
         candidate,
         claim_result,
         config=config,
@@ -3896,7 +3888,7 @@ def _mark_claimed_session_running(
     gh_runner: Callable[..., str] | None,
 ) -> ClaimedSessionContext:
     """Persist the durable-start state and post the claim marker."""
-    return _claim_helpers.mark_claimed_session_running(
+    return _claim_wiring.mark_claimed_session_running(
         config=config,
         db=db,
         launch_context=launch_context,
