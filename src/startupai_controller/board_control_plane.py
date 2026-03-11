@@ -35,8 +35,6 @@ from startupai_controller.board_consumer import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SCHEMA_PATH,
     DEFAULT_WORKFLOW_STATE_PATH,
-    _replay_deferred_actions,
-    _drain_review_queue,
 )
 from startupai_controller.control_plane_runtime import (
     _apply_automation_runtime,
@@ -47,6 +45,10 @@ from startupai_controller.control_plane_runtime import (
     _persist_admission_summary,
     _record_successful_board_sync,
     _record_successful_github_mutation,
+)
+from startupai_controller.control_plane_rescue import (
+    _drain_review_queue,
+    _replay_deferred_actions,
 )
 from startupai_controller.consumer_workflow import default_repo_roots
 from startupai_controller.runtime.wiring import (
