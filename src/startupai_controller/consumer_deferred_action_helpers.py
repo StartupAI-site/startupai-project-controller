@@ -7,6 +7,13 @@ from typing import Any, Callable
 from startupai_controller.validate_critical_path_promotion import GhQueryError
 
 
+def _shell_module():
+    """Import the consumer shell lazily to avoid import cycles."""
+    from startupai_controller import board_consumer
+
+    return board_consumer
+
+
 def replay_deferred_status_action(
     *,
     payload: dict[str, Any],
@@ -311,3 +318,73 @@ def replay_deferred_actions(
     if replayed:
         clear_degraded(db)
     return tuple(replayed)
+
+
+def replay_deferred_action_from_shell(
+    *,
+    action: Any,
+    config: Any,
+    critical_path_config: Any,
+    pr_port: Any | None,
+    review_state_port: Any | None,
+    board_port: Any | None,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Execute one deferred action using live shell seams."""
+    shell = _shell_module()
+    replay_deferred_action(
+        action=action,
+        config=config,
+        critical_path_config=critical_path_config,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        set_blocked_with_reason=shell._set_blocked_with_reason,
+        transition_issue_to_review=shell._transition_issue_to_review,
+        transition_issue_to_in_progress=shell._transition_issue_to_in_progress,
+        return_issue_to_ready=shell._return_issue_to_ready,
+        post_pr_codex_verdict=shell._post_pr_codex_verdict,
+        resolve_issue_coordinates=shell._resolve_issue_coordinates,
+        runtime_comment_poster=shell._runtime_comment_poster,
+        runtime_issue_closer=shell._runtime_issue_closer,
+        runtime_failed_check_rerun=shell._runtime_failed_check_rerun,
+        runtime_automerge_enabler=shell._runtime_automerge_enabler,
+    )
+
+
+def replay_deferred_status_action_from_shell(
+    *,
+    payload: dict[str, Any],
+    config: Any,
+    critical_path_config: Any,
+    review_state_port: Any | None,
+    board_port: Any | None,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+) -> None:
+    """Replay one deferred status transition using live shell seams."""
+    shell = _shell_module()
+    replay_deferred_status_action(
+        payload=payload,
+        config=config,
+        critical_path_config=critical_path_config,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        set_blocked_with_reason=shell._set_blocked_with_reason,
+        transition_issue_to_review=shell._transition_issue_to_review,
+        transition_issue_to_in_progress=shell._transition_issue_to_in_progress,
+        return_issue_to_ready=shell._return_issue_to_ready,
+    )

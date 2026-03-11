@@ -26,6 +26,13 @@ from startupai_controller.application.consumer.status import (
 )
 
 
+def _shell_module():
+    """Import the consumer shell lazily to avoid import cycles."""
+    from startupai_controller import board_consumer
+
+    return board_consumer
+
+
 @dataclass(frozen=True)
 class DaemonRuntimeWiringDeps:
     """Shell-facing seams for daemon/status wrapper wiring."""
@@ -243,6 +250,59 @@ def run_one_cycle(
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
+    )
+
+
+def run_one_cycle_from_shell(
+    config: Any,
+    db: Any,
+    *,
+    dry_run: bool = False,
+    target_issue: str | None = None,
+    prepared: Any | None = None,
+    launch_context: Any | None = None,
+    slot_id_override: int | None = None,
+    skip_control_plane: bool = False,
+    gh_runner: Callable[..., str] | None = None,
+    subprocess_runner: Callable[..., Any] | None = None,
+    file_reader: Callable[..., Any] | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+) -> Any:
+    """Execute one poll-claim-execute cycle through live board_consumer deps."""
+    shell = _shell_module()
+    return run_one_cycle(
+        config=config,
+        db=db,
+        dry_run=dry_run,
+        target_issue=target_issue,
+        prepared=prepared,
+        launch_context=launch_context,
+        slot_id_override=slot_id_override,
+        skip_control_plane=skip_control_plane,
+        gh_runner=gh_runner,
+        subprocess_runner=subprocess_runner,
+        file_reader=file_reader,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        prepare_cycle=shell._prepare_cycle,
+        config_error_type=shell.ConfigError,
+        workflow_config_error_type=shell.WorkflowConfigError,
+        gh_query_error_type=shell.GhQueryError,
+        mark_degraded=shell._mark_degraded,
+        gh_reason_code=shell.gh_reason_code,
+        cycle_result_factory=shell.CycleResult,
+        build_gh_runner_port=shell.build_gh_runner_port,
+        build_process_runner_port=shell.build_process_runner_port,
+        run_prepared_cycle=shell.run_prepared_cycle,
+        prepared_cycle_deps=shell._prepared_cycle_deps(),
+        logger=shell.logger,
     )
 
 
