@@ -26,11 +26,10 @@ Exit codes: 0 success, 2 blocked/no-op, 3 config error, 4 API error.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import field
 from datetime import datetime, timedelta, timezone
 import json
 import os
-from pathlib import Path
 import re
 import sys
 from typing import TYPE_CHECKING, Callable
@@ -55,12 +54,10 @@ from startupai_controller.validate_critical_path_promotion import (
     direct_successors,
     evaluate_ready_promotion,
     in_any_critical_path,
-    load_config,
     parse_issue_ref,
 )
 from startupai_controller.board_graph import (
     _issue_sort_key,
-    _resolve_issue_coordinates,
     _admission_candidate_rank,
     _count_wip_by_executor,
     _count_wip_by_executor_lane,
@@ -72,7 +69,6 @@ from startupai_controller.board_automation_config import (
     AdmissionConfig,
     BoardAutomationConfig,
     DEFAULT_AUTOMATION_CONFIG_PATH,
-    DEFAULT_CONFIG_PATH,
     DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
     DEFAULT_PROJECT_NUMBER,
     DEFAULT_PROJECT_OWNER,
@@ -206,6 +202,21 @@ from startupai_controller.runtime.wiring import (
     GitHubRuntimeMemo as CycleGitHubMemo,
 )
 from startupai_controller.automation_port_helpers import (
+    BoardInfo as BoardInfo,
+    _query_issue_board_info as _query_issue_board_info,
+    _comment_exists as _comment_exists,
+    list_issue_comment_bodies as list_issue_comment_bodies,
+    _list_project_items_by_status as _list_project_items_by_status,
+    _post_comment as _post_comment,
+    _query_latest_marker_timestamp as _query_latest_marker_timestamp,
+    _query_project_item_field as _query_project_item_field,
+    _set_single_select_field as _set_single_select_field,
+    _set_text_field as _set_text_field,
+    _list_project_items as _list_project_items,
+    _is_copilot_coding_agent_actor as _is_copilot_coding_agent_actor,
+    _issue_ref_to_repo_parts as _issue_ref_to_repo_parts,
+    _new_handoff_job_id as _new_handoff_job_id,
+    _workflow_mutations_enabled as _workflow_mutations_enabled,
     _query_issue_updated_at,
     _query_open_pr_updated_at,
     _query_latest_wip_activity_timestamp,
@@ -224,18 +235,11 @@ from startupai_controller.automation_port_helpers import (
     rerun_actions_run,
 )
 
-# ---------------------------------------------------------------------------
-# Port wiring helpers
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class BoardInfo:
-    """Minimal board identity/status needed for local compatibility helpers."""
-
-    status: str
-    item_id: str
-    project_id: str
+# BoardInfo, I/O helpers, and small utilities now live in automation_port_helpers.py
+# and are re-exported via the import block above.
+#
+# Port factories remain here so that tests patching ``build_github_port_bundle``
+# on this module continue to intercept the port-creation call path.
 
 
 def _ensure_github_bundle(
@@ -302,33 +306,22 @@ def _default_board_mutation_port(
     ).board_mutations
 
 
-def _query_issue_board_info(
-    issue_ref: str,
-    config: CriticalPathConfig,
+def _default_issue_context_port(
     project_owner: str,
     project_number: int,
+    config: CriticalPathConfig,
     *,
-    review_state_port: _ReviewStatePort | None = None,
+    github_memo: CycleGitHubMemo | None = None,
     gh_runner: Callable[..., str] | None = None,
-) -> BoardInfo:
-    """Compatibility helper that resolves board item info through ReviewStatePort."""
-    port = review_state_port or _default_review_state_port(
+) -> _IssueContextPort:
+    """Construct a default IssueContextPort adapter from context params."""
+    return build_github_port_bundle(
         project_owner,
         project_number,
-        config,
+        config=config,
+        github_memo=github_memo,
         gh_runner=gh_runner,
-    )
-    snapshot = next(
-        (item for item in port.build_board_snapshot().items if item.issue_ref == issue_ref),
-        None,
-    )
-    if snapshot is None:
-        return BoardInfo(status="NOT_ON_BOARD", item_id="", project_id="")
-    return BoardInfo(
-        status=snapshot.status or "UNKNOWN",
-        item_id=snapshot.item_id,
-        project_id=snapshot.project_id,
-    )
+    ).issue_context
 
 
 def promote_to_ready(
@@ -358,218 +351,6 @@ def promote_to_ready(
         query_issue_board_info_fn=_query_issue_board_info,
         default_board_mutation_port_fn=_default_board_mutation_port,
     )
-
-
-def _comment_exists(
-    owner: str,
-    repo: str,
-    number: int,
-    marker: str,
-    *,
-    review_state_port: _ReviewStatePort | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> bool:
-    """Compatibility helper that checks marker presence through ReviewStatePort."""
-    port = review_state_port or build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).review_state
-    return port.comment_exists(f"{owner}/{repo}", number, marker)
-
-
-def list_issue_comment_bodies(
-    owner: str,
-    repo: str,
-    number: int,
-    *,
-    review_state_port: _ReviewStatePort | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[str, ...]:
-    """Compatibility helper that loads issue comment bodies through ReviewStatePort."""
-    port = review_state_port or build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).review_state
-    return port.list_issue_comment_bodies(f"{owner}/{repo}", number)
-
-
-def _list_project_items_by_status(
-    status: str,
-    project_owner: str,
-    project_number: int,
-    *,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> list[_ProjectItemSnapshot]:
-    """Compatibility helper that reads board status groups through ReviewStatePort."""
-    port = build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).review_state
-    return list(port.build_board_snapshot().items_with_status(status))
-
-
-def _default_issue_context_port(
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    *,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> _IssueContextPort:
-    """Construct a default IssueContextPort adapter from context params."""
-    return build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
-    ).issue_context
-
-
-def _is_copilot_coding_agent_actor(login: str) -> bool:
-    """Return whether a login belongs to the Copilot coding agent."""
-    normalized = login.strip().lower()
-    if not normalized:
-        return False
-    return normalized in {
-        "app/copilot-swe-agent",
-        "copilot-swe-agent[bot]",
-        "copilot",
-    }
-
-
-def _issue_ref_to_repo_parts(
-    issue_ref: str,
-    config: CriticalPathConfig,
-) -> tuple[str, str, int]:
-    """Resolve one issue ref into owner/repo/number coordinates."""
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-    return owner, repo, number
-
-
-def _post_comment(
-    owner: str,
-    repo: str,
-    number: int,
-    body: str,
-    *,
-    board_port: _BoardMutationPort | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Post one issue/PR comment through the board-mutation port."""
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config or load_config(Path(DEFAULT_CONFIG_PATH)),
-        gh_runner=gh_runner,
-    )
-    board_port.post_issue_comment(f"{owner}/{repo}", number, body)
-
-
-def _query_latest_marker_timestamp(
-    owner: str,
-    repo: str,
-    number: int,
-    marker: str,
-    *,
-    review_state_port: _ReviewStatePort | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> datetime | None:
-    """Return the latest timestamp for comments containing one marker."""
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config or load_config(Path(DEFAULT_CONFIG_PATH)),
-        gh_runner=gh_runner,
-    )
-    return review_state_port.latest_matching_comment_timestamp(
-        f"{owner}/{repo}",
-        number,
-        (marker,),
-    )
-
-
-def _query_project_item_field(
-    issue_ref: str,
-    field_name: str,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    review_state_port: _ReviewStatePort | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> str:
-    """Read one project field value through ReviewStatePort."""
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    return review_state_port.project_field_value(issue_ref, field_name)
-
-
-def _set_single_select_field(
-    project_id: str,
-    item_id: str,
-    field_name: str,
-    option_name: str,
-    *,
-    board_port: _BoardMutationPort | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Compatibility helper that writes one single-select project field via BoardMutationPort."""
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config or load_config(Path(DEFAULT_CONFIG_PATH)),
-        gh_runner=gh_runner,
-    )
-    board_port.set_project_single_select(project_id, item_id, field_name, option_name)
-
-
-def _set_text_field(
-    project_id: str,
-    item_id: str,
-    field_name: str,
-    value: str,
-    *,
-    board_port: _BoardMutationPort | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Compatibility helper that writes one text project field via BoardMutationPort."""
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config or load_config(Path(DEFAULT_CONFIG_PATH)),
-        gh_runner=gh_runner,
-    )
-    board_port.set_project_text_field(project_id, item_id, field_name, value)
 
 
 def _set_board_status(
@@ -629,49 +410,6 @@ def _set_status_if_changed(
         query_issue_board_info_fn=_query_issue_board_info,
         set_board_status_fn=_set_board_status,
     )
-
-
-def _list_project_items(
-    project_owner: str,
-    project_number: int,
-    *,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    board_snapshot: CycleBoardSnapshot | None = None,
-) -> list[_ProjectItemSnapshot]:
-    """Return the full board snapshot items through ReviewStatePort."""
-    if board_snapshot is not None:
-        return list(board_snapshot.items)
-    review_state_port = _default_review_state_port(
-        project_owner,
-        project_number,
-        config or load_config(Path(DEFAULT_CONFIG_PATH)),
-        gh_runner=gh_runner,
-    )
-    return list(review_state_port.build_board_snapshot().items)
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-
-def _new_handoff_job_id(issue_ref: str, target: str) -> str:
-    """Generate a deterministic handoff job ID."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    safe_ref = issue_ref.replace("#", "-")
-    safe_target = target.replace("#", "-")
-    return f"{safe_ref}-to-{safe_target}-{ts}"
-
-
-def _workflow_mutations_enabled(
-    automation_config: BoardAutomationConfig,
-    workflow_name: str,
-) -> bool:
-    """Return whether a deprecated workflow is still allowed to mutate state."""
-    if automation_config.execution_authority_mode != "single_machine":
-        return True
-    return automation_config.deprecated_workflow_mutations.get(workflow_name, False)
 
 
 def _set_blocked_with_reason(

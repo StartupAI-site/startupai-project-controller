@@ -5,14 +5,15 @@ provided, then delegate to a single port method.  They are used by shell
 wiring in ``board_automation`` and passed as injected ``_fn`` callables to
 application/wiring modules.
 
-The module deliberately duplicates the four small port-factory helpers
-(``_default_pr_port``, etc.) rather than importing them from
-``board_automation`` to avoid circular imports.
+The port-factory helpers (``_default_pr_port``, etc.) are the canonical
+copies.  ``board_automation.py`` re-exports them for backward
+compatibility.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -28,14 +29,21 @@ else:
     _ReviewStatePort = None
 
 from startupai_controller.board_automation_config import (
+    BoardAutomationConfig,
     DEFAULT_CONFIG_PATH,
     DEFAULT_PROJECT_NUMBER,
     DEFAULT_PROJECT_OWNER,
 )
 from startupai_controller.board_graph import _resolve_issue_coordinates
-from startupai_controller.domain.models import LinkedIssue, OpenPullRequest
+from startupai_controller.domain.models import (
+    CycleBoardSnapshot,
+    LinkedIssue,
+    OpenPullRequest,
+    ProjectItemSnapshot as _ProjectItemSnapshot,
+)
 from startupai_controller.domain.repair_policy import parse_pr_url as _parse_pr_url
 from startupai_controller.runtime.wiring import (
+    GitHubPortBundle,
     GitHubRuntimeMemo as CycleGitHubMemo,
     build_github_port_bundle,
 )
@@ -45,8 +53,41 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 
 # ---------------------------------------------------------------------------
-# Port-factory helpers (local copies to avoid circular imports)
+# BoardInfo dataclass — shared board identity/status
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BoardInfo:
+    """Minimal board identity/status needed for local compatibility helpers."""
+
+    status: str
+    item_id: str
+    project_id: str
+
+
+# ---------------------------------------------------------------------------
+# Port-factory helpers
+# ---------------------------------------------------------------------------
+
+
+def _ensure_github_bundle(
+    github_bundle: GitHubPortBundle | None,
+    *,
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    github_memo: CycleGitHubMemo | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> GitHubPortBundle:
+    """Return the per-command/per-cycle GitHub bundle for runtime paths."""
+    return github_bundle or build_github_port_bundle(
+        project_owner,
+        project_number,
+        config=config,
+        github_memo=github_memo,
+        gh_runner=gh_runner,
+    )
 
 
 def _default_pr_port(
@@ -523,3 +564,274 @@ def rerun_actions_run(
         gh_runner=gh_runner,
     )
     pr_port.rerun_failed_check(pr_repo, "", run_id)
+
+
+# ---------------------------------------------------------------------------
+# Board query / mutation helpers (extracted from board_automation.py)
+# ---------------------------------------------------------------------------
+
+
+def _query_issue_board_info(
+    issue_ref: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    review_state_port: _ReviewStatePort | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> BoardInfo:
+    """Compatibility helper that resolves board item info through ReviewStatePort."""
+    port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    snapshot = next(
+        (item for item in port.build_board_snapshot().items if item.issue_ref == issue_ref),
+        None,
+    )
+    if snapshot is None:
+        return BoardInfo(status="NOT_ON_BOARD", item_id="", project_id="")
+    return BoardInfo(
+        status=snapshot.status or "UNKNOWN",
+        item_id=snapshot.item_id,
+        project_id=snapshot.project_id,
+    )
+
+
+def _comment_exists(
+    owner: str,
+    repo: str,
+    number: int,
+    marker: str,
+    *,
+    review_state_port: _ReviewStatePort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> bool:
+    """Compatibility helper that checks marker presence through ReviewStatePort."""
+    port = review_state_port or build_github_port_bundle(
+        project_owner,
+        project_number,
+        config=config,
+        gh_runner=gh_runner,
+    ).review_state
+    return port.comment_exists(f"{owner}/{repo}", number, marker)
+
+
+def list_issue_comment_bodies(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    review_state_port: _ReviewStatePort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> tuple[str, ...]:
+    """Compatibility helper that loads issue comment bodies through ReviewStatePort."""
+    port = review_state_port or build_github_port_bundle(
+        project_owner,
+        project_number,
+        config=config,
+        gh_runner=gh_runner,
+    ).review_state
+    return port.list_issue_comment_bodies(f"{owner}/{repo}", number)
+
+
+def _list_project_items_by_status(
+    status: str,
+    project_owner: str,
+    project_number: int,
+    *,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> list[_ProjectItemSnapshot]:
+    """Compatibility helper that reads board status groups through ReviewStatePort."""
+    port = build_github_port_bundle(
+        project_owner,
+        project_number,
+        config=config,
+        gh_runner=gh_runner,
+    ).review_state
+    return list(port.build_board_snapshot().items_with_status(status))
+
+
+def _post_comment(
+    owner: str,
+    repo: str,
+    number: int,
+    body: str,
+    *,
+    board_port: _BoardMutationPort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Post one issue/PR comment through the board-mutation port."""
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config or load_config(Path(DEFAULT_CONFIG_PATH)),
+        gh_runner=gh_runner,
+    )
+    board_port.post_issue_comment(f"{owner}/{repo}", number, body)
+
+
+def _query_latest_marker_timestamp(
+    owner: str,
+    repo: str,
+    number: int,
+    marker: str,
+    *,
+    review_state_port: _ReviewStatePort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> datetime | None:
+    """Return the latest timestamp for comments containing one marker."""
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config or load_config(Path(DEFAULT_CONFIG_PATH)),
+        gh_runner=gh_runner,
+    )
+    return review_state_port.latest_matching_comment_timestamp(
+        f"{owner}/{repo}",
+        number,
+        (marker,),
+    )
+
+
+def _query_project_item_field(
+    issue_ref: str,
+    field_name: str,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    review_state_port: _ReviewStatePort | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Read one project field value through ReviewStatePort."""
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    return review_state_port.project_field_value(issue_ref, field_name)
+
+
+def _set_single_select_field(
+    project_id: str,
+    item_id: str,
+    field_name: str,
+    option_name: str,
+    *,
+    board_port: _BoardMutationPort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility helper that writes one single-select project field via BoardMutationPort."""
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config or load_config(Path(DEFAULT_CONFIG_PATH)),
+        gh_runner=gh_runner,
+    )
+    board_port.set_project_single_select(project_id, item_id, field_name, option_name)
+
+
+def _set_text_field(
+    project_id: str,
+    item_id: str,
+    field_name: str,
+    value: str,
+    *,
+    board_port: _BoardMutationPort | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Compatibility helper that writes one text project field via BoardMutationPort."""
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config or load_config(Path(DEFAULT_CONFIG_PATH)),
+        gh_runner=gh_runner,
+    )
+    board_port.set_project_text_field(project_id, item_id, field_name, value)
+
+
+def _list_project_items(
+    project_owner: str,
+    project_number: int,
+    *,
+    config: CriticalPathConfig | None = None,
+    gh_runner: Callable[..., str] | None = None,
+    board_snapshot: CycleBoardSnapshot | None = None,
+) -> list[_ProjectItemSnapshot]:
+    """Return the full board snapshot items through ReviewStatePort."""
+    if board_snapshot is not None:
+        return list(board_snapshot.items)
+    review_state_port = _default_review_state_port(
+        project_owner,
+        project_number,
+        config or load_config(Path(DEFAULT_CONFIG_PATH)),
+        gh_runner=gh_runner,
+    )
+    return list(review_state_port.build_board_snapshot().items)
+
+
+# ---------------------------------------------------------------------------
+# Small utilities (extracted from board_automation.py)
+# ---------------------------------------------------------------------------
+
+
+def _is_copilot_coding_agent_actor(login: str) -> bool:
+    """Return whether a login belongs to the Copilot coding agent."""
+    normalized = login.strip().lower()
+    if not normalized:
+        return False
+    return normalized in {
+        "app/copilot-swe-agent",
+        "copilot-swe-agent[bot]",
+        "copilot",
+    }
+
+
+def _issue_ref_to_repo_parts(
+    issue_ref: str,
+    config: CriticalPathConfig,
+) -> tuple[str, str, int]:
+    """Resolve one issue ref into owner/repo/number coordinates."""
+    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
+    return owner, repo, number
+
+
+def _new_handoff_job_id(issue_ref: str, target: str) -> str:
+    """Generate a deterministic handoff job ID."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_ref = issue_ref.replace("#", "-")
+    safe_target = target.replace("#", "-")
+    return f"{safe_ref}-to-{safe_target}-{ts}"
+
+
+def _workflow_mutations_enabled(
+    automation_config: BoardAutomationConfig,
+    workflow_name: str,
+) -> bool:
+    """Return whether a deprecated workflow is still allowed to mutate state."""
+    if automation_config.execution_authority_mode != "single_machine":
+        return True
+    return automation_config.deprecated_workflow_mutations.get(workflow_name, False)
