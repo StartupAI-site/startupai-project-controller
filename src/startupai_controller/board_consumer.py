@@ -151,6 +151,10 @@ from startupai_controller.application.consumer.preflight_runtime import (
     run_admission_phase as _run_admission_phase_use_case,
     prepare_cycle as _prepare_cycle_use_case,
 )
+from startupai_controller.application.consumer.reconciliation import (
+    ReconciliationWiringDeps,
+    wire_reconcile_board_truth as _wire_reconcile_board_truth_use_case,
+)
 from startupai_controller.application.consumer.launch import (
     ClaimLaunchDeps,
     PrepareLaunchDeps,
@@ -2830,6 +2834,25 @@ def _return_issue_to_ready(
     )
 
 
+def _build_reconciliation_wiring_deps() -> ReconciliationWiringDeps:
+    """Build the wiring deps for board-truth reconciliation."""
+    return ReconciliationWiringDeps(
+        board_state_reconcile_active_repair=_board_state_helpers.reconcile_active_repair_review_items,
+        board_state_reconcile_single=_board_state_helpers.reconcile_single_in_progress_item,
+        board_state_reconcile_stale=_board_state_helpers.reconcile_stale_in_progress_items,
+        transition_issue_to_in_progress=_transition_issue_to_in_progress,
+        return_issue_to_ready=_return_issue_to_ready,
+        transition_issue_to_review=_transition_issue_to_review,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        classify_open_pr_candidates=_classify_open_pr_candidates,
+        reconcile_in_progress_decision=reconcile_in_progress_decision,
+        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+        build_session_store=build_session_store,
+        build_github_port_bundle=build_github_port_bundle,
+    )
+
+
 def _reconcile_active_repair_review_items(
     consumer_config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
@@ -2845,9 +2868,13 @@ def _reconcile_active_repair_review_items(
     dry_run: bool,
 ) -> list[str]:
     """Return active repair items that should move from Review back to In Progress."""
-    return _board_state_helpers.reconcile_active_repair_review_items(
+    from startupai_controller.application.consumer.reconciliation import (
+        reconcile_active_repair_review_items as _use_case,
+    )
+    return _use_case(
         consumer_config,
         critical_path_config,
+        deps=_build_reconciliation_wiring_deps(),
         active_repair_issue_refs=active_repair_issue_refs,
         review_state_port=review_state_port,
         board_port=board_port,
@@ -2857,7 +2884,6 @@ def _reconcile_active_repair_review_items(
         board_mutator=board_mutator,
         gh_runner=gh_runner,
         dry_run=dry_run,
-        transition_issue_to_in_progress=_transition_issue_to_in_progress,
     )
 
 
@@ -2877,8 +2903,12 @@ def _reconcile_single_in_progress_item(
     dry_run: bool,
 ) -> str:
     """Reconcile one stale In Progress item and return its target lane."""
-    return _board_state_helpers.reconcile_single_in_progress_item(
+    from startupai_controller.application.consumer.reconciliation import (
+        reconcile_single_in_progress_item as _use_case,
+    )
+    return _use_case(
         issue_ref,
+        deps=_build_reconciliation_wiring_deps(),
         consumer_config=consumer_config,
         critical_path_config=critical_path_config,
         automation_config=automation_config,
@@ -2890,12 +2920,6 @@ def _reconcile_single_in_progress_item(
         board_mutator=board_mutator,
         gh_runner=gh_runner,
         dry_run=dry_run,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        classify_open_pr_candidates=_classify_open_pr_candidates,
-        reconcile_in_progress_decision=reconcile_in_progress_decision,
-        return_issue_to_ready=_return_issue_to_ready,
-        transition_issue_to_review=_transition_issue_to_review,
-        set_blocked_with_reason=_set_blocked_with_reason,
     )
 
 
@@ -2917,10 +2941,14 @@ def _reconcile_stale_in_progress_items(
     dry_run: bool,
 ) -> tuple[list[str], list[str], list[str]]:
     """Reconcile stale In Progress items back to their truthful lanes."""
-    return _board_state_helpers.reconcile_stale_in_progress_items(
+    from startupai_controller.application.consumer.reconciliation import (
+        reconcile_stale_in_progress_items as _use_case,
+    )
+    return _use_case(
         consumer_config,
         critical_path_config,
         automation_config,
+        deps=_build_reconciliation_wiring_deps(),
         store=store,
         pr_port=pr_port,
         review_state_port=review_state_port,
@@ -2932,7 +2960,6 @@ def _reconcile_stale_in_progress_items(
         board_mutator=board_mutator,
         gh_runner=gh_runner,
         dry_run=dry_run,
-        reconcile_single_in_progress_item=_reconcile_single_in_progress_item,
     )
 
 
@@ -3411,36 +3438,21 @@ def _reconcile_board_truth(
     gh_runner: Callable[..., str] | None = None,
 ) -> ReconciliationResult:
     """Make board `In Progress` truthful against local consumer state."""
-    def _issue_ref_for_snapshot(
-        snapshot: _ProjectItemSnapshot | IssueSnapshot,
-    ) -> str | None:
-        if isinstance(snapshot, IssueSnapshot):
-            return snapshot.issue_ref
-        return _snapshot_to_issue_ref(
-            snapshot.issue_ref, critical_path_config.issue_prefixes
-        )
-
-    return _reconcile_board_truth_use_case(
+    return _wire_reconcile_board_truth_use_case(
         consumer_config,
         critical_path_config,
         automation_config,
         db,
-        deps=ReconciliationDeps(
-            build_session_store=build_session_store,
-            build_github_port_bundle=build_github_port_bundle,
-            issue_ref_for_snapshot=_issue_ref_for_snapshot,
-            reconcile_active_repair_review_items=_reconcile_active_repair_review_items,
-            reconcile_stale_in_progress_items=_reconcile_stale_in_progress_items,
-        ),
+        deps=_build_reconciliation_wiring_deps(),
         session_store=session_store,
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        dry_run=dry_run,
         board_snapshot=board_snapshot,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        dry_run=dry_run,
     )
 
 
