@@ -21,7 +21,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -87,18 +86,11 @@ from startupai_controller.consumer_context_helpers import (
     issue_context_cache_is_fresh as _issue_context_cache_is_fresh_helper,
     snapshot_for_issue as _snapshot_for_issue_helper,
 )
+import startupai_controller.consumer_comment_pr_wiring as _comment_pr_wiring
 from startupai_controller.consumer_worktree_helpers import (
     list_repo_worktrees as _list_repo_worktrees_helper,
     worktree_is_clean as _worktree_is_clean_helper,
     worktree_ownership_is_safe as _worktree_ownership_is_safe_helper,
-)
-from startupai_controller.consumer_comment_pr_helpers import (
-    backfill_review_verdicts as _backfill_review_verdicts_helper,
-    classify_open_pr_candidates as _classify_open_pr_candidates_helper,
-    list_open_pr_candidates as _list_open_pr_candidates_helper,
-    post_consumer_claim_comment as _post_consumer_claim_comment_helper,
-    post_pr_codex_verdict as _post_pr_codex_verdict_helper,
-    post_result_comment as _post_result_comment_helper,
 )
 import startupai_controller.consumer_claim_helpers as _claim_helpers
 import startupai_controller.consumer_claim_wiring as _claim_wiring
@@ -1220,46 +1212,7 @@ def _assemble_codex_prompt(
 
 def _extract_acceptance_criteria(body: str) -> str:
     """Extract acceptance criteria section from issue body."""
-    from startupai_controller.domain.repair_policy import extract_acceptance_criteria
-    return extract_acceptance_criteria(body)
-
-
-def _deterministic_branch_pattern(issue_ref: str) -> re.Pattern[str]:
-    """Return the canonical issue branch pattern for PR adoption."""
-    from startupai_controller.domain.repair_policy import deterministic_branch_pattern
-    parsed = parse_issue_ref(issue_ref)
-    return deterministic_branch_pattern(parsed.number)
-
-
-def _repo_to_prefix_for_repo(repo: str) -> str:
-    """Best-effort repo name to board prefix mapping."""
-    from startupai_controller.domain.repair_policy import repo_to_prefix_for_repo
-    return repo_to_prefix_for_repo(repo)
-
-
-def _consumer_provenance_marker(
-    *,
-    session_id: str,
-    issue_ref: str,
-    repo_prefix: str,
-    branch_name: str,
-    executor: str,
-) -> str:
-    """Build a machine-readable provenance marker for issues and PRs."""
-    from startupai_controller.domain.repair_policy import consumer_provenance_marker
-    return consumer_provenance_marker(
-        session_id=session_id,
-        issue_ref=issue_ref,
-        repo_prefix=repo_prefix,
-        branch_name=branch_name,
-        executor=executor,
-    )
-
-
-def _parse_consumer_provenance(text: str) -> dict[str, str] | None:
-    """Parse the consumer provenance marker from text."""
-    from startupai_controller.domain.repair_policy import parse_consumer_provenance
-    return parse_consumer_provenance(text)
+    return _comment_pr_wiring.extract_acceptance_criteria(body)
 
 
 # ---------------------------------------------------------------------------
@@ -1372,7 +1325,7 @@ def _create_or_update_pr(
         gh_runner=gh_runner,
         run_gh=_run_gh,
         build_pr_body_fn=_build_pr_body,
-        repo_to_prefix_for_repo=_repo_to_prefix_for_repo,
+        repo_to_prefix_for_repo=_comment_pr_wiring.repo_to_prefix_for_repo,
         parse_issue_ref=parse_issue_ref,
     )
 
@@ -1394,7 +1347,7 @@ def _build_pr_body(
         session_id=session_id,
         repo_prefix=repo_prefix,
         branch_name=branch_name,
-        consumer_provenance_marker=_consumer_provenance_marker,
+        consumer_provenance_marker=_comment_pr_wiring.consumer_provenance_marker,
     )
 
 
@@ -1403,16 +1356,10 @@ def _default_review_comment_checker(
     gh_runner: Callable[..., str] | None = None,
 ) -> Callable[[str, str, int, str], bool]:
     """Build the default marker-check helper through ReviewStatePort."""
-    review_state_port = build_github_port_bundle(
-        "",
-        0,
+    return _comment_pr_wiring.default_review_comment_checker(
+        build_github_port_bundle=build_github_port_bundle,
         gh_runner=gh_runner,
-    ).review_state
-
-    def checker(owner: str, repo: str, number: int, marker: str, *, gh_runner=None) -> bool:
-        return review_state_port.comment_exists(f"{owner}/{repo}", number, marker)
-
-    return checker
+    )
 
 
 def _runtime_comment_poster(
@@ -1424,8 +1371,14 @@ def _runtime_comment_poster(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post an issue comment through the runtime port boundary."""
-    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
-    bundle.board_mutations.post_issue_comment(f"{owner}/{repo}", number, body)
+    _comment_pr_wiring.runtime_comment_poster(
+        owner,
+        repo,
+        number,
+        body,
+        build_github_port_bundle=build_github_port_bundle,
+        gh_runner=gh_runner,
+    )
 
 
 def _runtime_issue_closer(
@@ -1436,8 +1389,13 @@ def _runtime_issue_closer(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Close an issue through the runtime port boundary."""
-    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
-    bundle.board_mutations.close_issue(f"{owner}/{repo}", number)
+    _comment_pr_wiring.runtime_issue_closer(
+        owner,
+        repo,
+        number,
+        build_github_port_bundle=build_github_port_bundle,
+        gh_runner=gh_runner,
+    )
 
 
 def _runtime_automerge_enabler(
@@ -1447,8 +1405,12 @@ def _runtime_automerge_enabler(
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Enable auto-merge through the runtime port boundary."""
-    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
-    return bundle.pull_requests.enable_automerge(pr_repo, pr_number)
+    return _comment_pr_wiring.runtime_automerge_enabler(
+        pr_repo,
+        pr_number,
+        build_github_port_bundle=build_github_port_bundle,
+        gh_runner=gh_runner,
+    )
 
 
 def _runtime_failed_check_rerun(
@@ -1458,9 +1420,13 @@ def _runtime_failed_check_rerun(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Re-run a failed check through the runtime port boundary."""
-    bundle = build_github_port_bundle("", 0, gh_runner=gh_runner)
-    if not bundle.pull_requests.rerun_failed_check(pr_repo, "", run_id):
-        raise GhQueryError(f"Failed rerunning check for {pr_repo} run {run_id}")
+    _comment_pr_wiring.runtime_failed_check_rerun(
+        pr_repo,
+        run_id,
+        build_github_port_bundle=build_github_port_bundle,
+        gh_query_error_cls=GhQueryError,
+        gh_runner=gh_runner,
+    )
 
 
 def _post_consumer_claim_comment(
@@ -1476,7 +1442,7 @@ def _post_consumer_claim_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post a deterministic claim provenance marker on the issue."""
-    _post_consumer_claim_comment_helper(
+    _comment_pr_wiring.post_consumer_claim_comment(
         issue_ref,
         session_id,
         repo_prefix,
@@ -1484,9 +1450,9 @@ def _post_consumer_claim_comment(
         executor,
         config,
         resolve_issue_coordinates=_resolve_issue_coordinates,
-        consumer_provenance_marker=_consumer_provenance_marker,
-        default_review_comment_checker=_default_review_comment_checker,
-        runtime_comment_poster=_runtime_comment_poster,
+        consumer_provenance_marker_fn=_comment_pr_wiring.consumer_provenance_marker,
+        default_review_comment_checker_fn=_default_review_comment_checker,
+        runtime_comment_poster_fn=_runtime_comment_poster,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
@@ -1505,13 +1471,13 @@ def _list_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequestMatch]:
     """Return open PRs that reference an issue number in the repository."""
-    return _list_open_pr_candidates_helper(
+    return _comment_pr_wiring.list_open_pr_candidates(
         owner,
         repo,
         issue_number,
         build_github_port_bundle=build_github_port_bundle,
         open_pr_match_factory=OpenPullRequestMatch,
-        parse_consumer_provenance=_parse_consumer_provenance,
+        parse_consumer_provenance_fn=_comment_pr_wiring.parse_consumer_provenance,
         pr_port=pr_port,
         gh_runner=gh_runner,
     )
@@ -1529,13 +1495,13 @@ def _classify_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, OpenPullRequestMatch | None, str]:
     """Classify open PRs for an issue as adoptable, ambiguous, non-local, or none."""
-    return _classify_open_pr_candidates_helper(
+    return _comment_pr_wiring.classify_open_pr_candidates(
         issue_ref,
         owner,
         repo,
         issue_number,
         automation_config,
-        list_open_pr_candidates=_list_open_pr_candidates,
+        list_open_pr_candidates_fn=_list_open_pr_candidates,
         classify_pr_candidates_pure=_classify_pr_candidates_pure,
         expected_branch=expected_branch,
         pr_port=pr_port,
@@ -1559,7 +1525,7 @@ def _post_result_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post a machine-marker result comment on the issue."""
-    _post_result_comment_helper(
+    _comment_pr_wiring.post_result_comment(
         issue_ref,
         result,
         session_id,
@@ -1567,8 +1533,8 @@ def _post_result_comment(
         marker_for=_marker_for,
         resolve_issue_coordinates=_resolve_issue_coordinates,
         normalize_resolution_payload=normalize_resolution_payload,
-        default_review_comment_checker=_default_review_comment_checker,
-        runtime_comment_poster=_runtime_comment_poster,
+        default_review_comment_checker_fn=_default_review_comment_checker,
+        runtime_comment_poster_fn=_runtime_comment_poster,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
@@ -1589,14 +1555,14 @@ def _post_pr_codex_verdict(
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Post the machine-readable codex pass verdict required for auto-merge."""
-    return _post_pr_codex_verdict_helper(
+    return _comment_pr_wiring.post_pr_codex_verdict(
         pr_url,
         session_id,
         parse_pr_url=_parse_pr_url,
         verdict_marker_text=_verdict_marker_text,
-        default_review_comment_checker=_default_review_comment_checker,
+        default_review_comment_checker_fn=_default_review_comment_checker,
         verdict_comment_body=_verdict_comment_body,
-        runtime_comment_poster=_runtime_comment_poster,
+        runtime_comment_poster_fn=_runtime_comment_poster,
         gh_query_error_cls=GhQueryError,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
@@ -1619,9 +1585,9 @@ def _backfill_review_verdicts(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Re-post missing codex verdict markers for successful review sessions."""
-    return _backfill_review_verdicts_helper(
+    return _comment_pr_wiring.backfill_review_verdicts(
         db,
-        post_pr_codex_verdict=_post_pr_codex_verdict,
+        post_pr_codex_verdict_fn=_post_pr_codex_verdict,
         log_warning=lambda issue_ref, session_id, err: logger.warning(
             "Review verdict backfill failed for %s (%s): %s",
             issue_ref,
