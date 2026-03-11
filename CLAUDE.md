@@ -10,10 +10,10 @@
 
 The controller manages the [StartupAI Alpha → Launch](https://github.com/orgs/StartupAI-site/projects/1) project board. It provides:
 
-1. **Board Automation** (`board_automation.py`) — CLI/compatibility shell for workflow-driven board mutations. Ready/review/execution flows now delegate into `application/automation/`.
-2. **Board Consumer** (`board_consumer.py`) — Daemon entry shell around the extracted consumer cycle in `application/consumer/`.
+1. **Board Automation** (`board_automation.py`) — CLI/parser shell plus port-factory seam. Operational ready/review/execution/state/admission behavior now delegates through `automation_*_wiring.py`, `automation_cli_handlers.py`, and `application/automation/`.
+2. **Board Consumer** (`board_consumer.py`) — Daemon entry shell over `application/consumer/` plus focused `consumer_*_wiring.py` bridge modules. It no longer imports `board_automation.py`.
 3. **Control Plane** (`board_control_plane.py`) — Sync/recovery shell around `application/control_plane/`.
-4. **Supporting layers** — `application/`, `domain/`, `ports/`, `adapters/`, `runtime/`, plus legacy compatibility shells such as `board_io.py`, `consumer_db.py`, and GitHub-facing compatibility modules.
+4. **Supporting layers** — `application/`, `domain/`, `ports/`, `adapters/`, `runtime/`, plus remaining compatibility shells such as `board_io.py`, `consumer_db.py`, and GitHub-facing compatibility modules.
 
 Runtime wiring is assembled through `src/startupai_controller/runtime/wiring.py`.
 Coordinators should depend on `domain/`, `ports/`, and runtime wiring only.
@@ -40,13 +40,13 @@ This repo is a control plane. Reliability matters more than cleverness.
 
 ## Directory Structure
 ```
-src/startupai_controller/   # 69 Python modules across application/domain/ports/adapters/runtime
+src/startupai_controller/   # 125 Python modules across shells/application/domain/ports/adapters/runtime
 config/                      # Config and schema files
 ├── board-automation-config.json
 ├── critical-paths.json
 ├── project-field-sync-config.json
 └── codex_session_result.schema.json
-tests/                       # 25 test files (771 tests)
+tests/                       # 26 test files (842 tests)
 docs/adr/                    # Architecture decisions
 systemd/                     # systemd user unit
 ```

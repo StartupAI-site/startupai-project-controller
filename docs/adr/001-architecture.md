@@ -110,9 +110,9 @@ entry shells):
 
 | Area | Modules |
 |------|---------|
-| Consumer | `application/consumer/cycle.py` |
+| Consumer | `application/consumer/cycle.py`, `preflight.py`, `preflight_runtime.py`, `reconciliation.py`, `recovery.py`, `daemon.py`, `status.py` |
 | Control plane | `application/control_plane/tick.py` |
-| Automation | `application/automation/admit_backlog.py`, `auto_promote.py`, `ready_claim.py`, `ready_dependencies.py`, `review_sync.py`, `review_rescue.py`, `codex_gate.py`, `audit_in_progress.py`, `dispatch_agent.py`, `rebalance.py`, `execution_policy.py` |
+| Automation | `application/automation/admit_backlog.py`, `admission_helpers.py`, `auto_promote.py`, `ready_claim.py`, `ready_dependencies.py`, `ready_wiring.py`, `review_sync.py`, `review_rescue.py`, `review_wiring.py`, `codex_gate.py`, `audit_in_progress.py`, `dispatch_agent.py`, `rebalance.py`, `execution_policy.py` |
 
 **Domain modules** (pure policy, independently testable):
 
@@ -165,9 +165,8 @@ boundary.
 - `board_graph.py` -- typed input only, no adapter/shim reads
 
 **Transitional state**: Runtime orchestrators no longer import `board_io.py`,
-`consumer_db.py`, `github_http.py`, or adapter helpers directly. The remaining
-transitional surfaces are concentrated in the still-large entry shells and
-compatibility layers:
+`consumer_db.py`, `github_http.py`, or adapter helpers directly. The entry
+shells are materially thinner than the original extraction baseline:
 
 - `GitHubCliAdapter` remains as a compatibility facade while runtime ownership
   is split across capability adapters (smaller than before, not yet deleted).
@@ -177,16 +176,20 @@ compatibility layers:
   `SqliteSessionStore`; not yet fully decomposed by capability.
 - Adapter-internal types (`CodexReviewVerdict`, `PullRequestViewPayload`,
   `MetricEvent`, `RecoveredLease`) remain owned by adapter/mechanism modules.
-- `board_consumer.py` is smaller on its claimed-session path but still retains
-  meaningful orchestration and mechanism debt outside the extracted slice.
-- `board_automation.py` now delegates the ready/review/execution use cases to
-  `application/automation/`, but still hosts legacy helpers and non-extracted
-  commands.
+- `board_consumer.py` no longer imports `board_automation.py`; consumer launch,
+  review, daemon, recovery, reconciliation, codex, and support lanes now
+  delegate through focused `consumer_*_wiring.py` / helper modules plus
+  `application/consumer/*`.
+- `board_automation.py` is primarily port factories, shell-facing re-exports,
+  and CLI/parser glue; ready/review/execution/state/admission/CLI lanes now live
+  in `automation_*_wiring.py`, `automation_cli_handlers.py`, and
+  `application/automation/*`.
+- Remaining shell weight is concentrated in compatibility wrappers kept for
+  stable monkeypatch/test surfaces and port-factory seams.
 
-**Deferred work**: Remaining port extensions (MetricsPort, DeferredActionPort,
-ContextCachePort) and compatibility shell removal are tracked as follow-up.
-Further consumer decomposition and compatibility shell retirement remain
-follow-up work.
+**Deferred work**: Remaining port-factory cleanup, compatibility shell removal,
+and deeper persistence decomposition (`consumer_db.py` behind
+`SqliteSessionStore`) are tracked as follow-up work.
 
 ### 4. Cross-Repo Relationship
 
@@ -231,6 +234,9 @@ follow-up work.
 - Lighter startupai-crew focused on its actual purpose.
 - Significant automation/control-plane behavior now lives in dedicated
   application use-case modules instead of entry-shell command bodies.
+- Entrypoints no longer depend on each other at runtime; `board_consumer.py`
+  now reaches automation behavior through neutral bridge modules instead of
+  importing `board_automation.py`.
 
 ### Tradeoffs
 
@@ -241,6 +247,6 @@ follow-up work.
 - Provenance remains mandatory for protected coding PRs.
 - Missing or invalid repo workflows disable dispatch for that repo.
 - Ambiguous PR states bias toward `Blocked` (safer but noisier).
-- Compatibility shells (`board_io.py`, `GitHubCliAdapter`) remain until
-  legacy callers are retired.
+- Compatibility shells (`board_io.py`, `GitHubCliAdapter`) and test-oriented
+  wrapper seams remain until legacy callers and monkeypatch paths are retired.
 - The future long-lived runner remains deferred behind an interface boundary.
