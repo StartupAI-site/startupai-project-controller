@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import re
 
+from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
+from startupai_controller.adapters.pull_requests import GitHubPullRequestAdapter
+from startupai_controller.adapters.review_state import GitHubReviewStateAdapter
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "startupai_controller"
@@ -15,6 +19,7 @@ ORCHESTRATOR_MODULES = (
     SRC_ROOT / "board_control_plane.py",
 )
 GRAPH_MODULE = SRC_ROOT / "board_graph.py"
+APPLICATION_ROOT = SRC_ROOT / "application"
 DOMAIN_ROOT = SRC_ROOT / "domain"
 PORTS_ROOT = SRC_ROOT / "ports"
 
@@ -26,6 +31,16 @@ SHIM_MODULES = {
 ADAPTER_PREFIX = "startupai_controller.adapters"
 PORTS_PREFIX = "startupai_controller.ports"
 RUNTIME_PREFIX = "startupai_controller.runtime"
+ENTRYPOINT_MODULES = {
+    "startupai_controller.board_consumer",
+    "startupai_controller.board_automation",
+    "startupai_controller.board_control_plane",
+}
+DIRECT_MECHANISM_MODULES = {"sqlite3", "subprocess"}
+THIN_ENTRY_MODULES = (
+    SRC_ROOT / "board_automation.py",
+    SRC_ROOT / "board_control_plane.py",
+)
 
 def _is_type_checking_test(node: ast.expr) -> bool:
     return isinstance(node, ast.Name) and node.id == "TYPE_CHECKING"
@@ -57,6 +72,18 @@ def _runtime_imported_modules(path: Path) -> set[str]:
     collector = _RuntimeImportCollector()
     collector.visit(tree)
     return collector.imports
+
+
+def _controller_runtime_imports(path: Path) -> set[str]:
+    return {
+        module
+        for module in _runtime_imported_modules(path)
+        if module.startswith("startupai_controller")
+    }
+
+
+def _source_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def test_orchestrators_use_canonical_runtime_boundaries() -> None:
@@ -99,6 +126,139 @@ def test_domain_has_no_port_adapter_or_shim_imports() -> None:
         assert offending == [], f"{path.name} imports outer layers: {offending}"
 
 
+def test_application_has_no_entrypoint_adapter_or_shim_imports() -> None:
+    for path in APPLICATION_ROOT.rglob("*.py"):
+        imported = _runtime_imported_modules(path)
+        offending = sorted(
+            module
+            for module in imported
+            if module in SHIM_MODULES
+            or module.startswith(ADAPTER_PREFIX)
+            or module.startswith(RUNTIME_PREFIX)
+            or module in ENTRYPOINT_MODULES
+            or module in {"sqlite3", "subprocess"}
+        )
+        assert offending == [], f"{path.name} imports outer layers: {offending}"
+
+
+def test_board_control_plane_does_not_import_private_consumer_helpers() -> None:
+    imported = _runtime_imported_modules(SRC_ROOT / "board_control_plane.py")
+    assert "startupai_controller.board_consumer" not in imported, (
+        "board_control_plane.py still imports board_consumer.py at runtime"
+    )
+    assert "startupai_controller.board_automation" not in imported, (
+        "board_control_plane.py still imports board_automation.py at runtime"
+    )
+
+
+def test_board_control_plane_imports_stay_within_control_plane_stack() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "board_control_plane.py")
+    offending = sorted(
+        module
+        for module in imported
+        if module not in {
+            "startupai_controller.board_automation_config",
+            "startupai_controller.consumer_config",
+            "startupai_controller.consumer_workflow",
+            "startupai_controller.runtime.wiring",
+            "startupai_controller.validate_critical_path_promotion",
+        }
+        and not module.startswith("startupai_controller.application.control_plane.")
+        and not module.startswith("startupai_controller.control_plane_")
+    )
+    assert offending == [], (
+        "board_control_plane.py imports modules outside the control-plane shell stack: "
+        f"{offending}"
+    )
+
+
+def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "board_automation.py")
+    offending = sorted(
+        module
+        for module in imported
+        if module in {
+            "startupai_controller.board_consumer",
+            "startupai_controller.board_control_plane",
+        }
+        or module.startswith("startupai_controller.application.consumer.")
+        or module.startswith("startupai_controller.consumer_")
+        or module.startswith("startupai_controller.control_plane_")
+    )
+    assert offending == [], (
+        "board_automation.py crosses into other shell stacks at runtime: "
+        f"{offending}"
+    )
+
+
+def test_board_consumer_endgame_shell_avoids_lower_level_execution_mechanisms() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "board_consumer.py")
+    assert "startupai_controller.board_automation" not in imported, (
+        "board_consumer.py still imports board_automation.py at runtime"
+    )
+    offending = sorted(
+        module
+        for module in imported
+        if module in {
+            "startupai_controller.application.consumer.execution",
+            "startupai_controller.application.consumer.launch",
+            "startupai_controller.consumer_review_handoff_helpers",
+        }
+    )
+    assert offending == [], (
+        "board_consumer.py bypasses outer execution/launch wiring modules: "
+        f"{offending}"
+    )
+
+
+def test_only_board_consumer_cli_imports_the_consumer_shell() -> None:
+    direct_importers: list[str] = []
+    direct_import_patterns = (
+        re.compile(r"\bfrom startupai_controller\.board_consumer import\b"),
+        re.compile(r"\bfrom startupai_controller import board_consumer(?:\s|$|,)"),
+    )
+    for path in sorted(SRC_ROOT.glob("*.py")):
+        if path.name == "board_consumer.py":
+            continue
+        source = _source_text(path)
+        if any(pattern.search(source) for pattern in direct_import_patterns):
+            direct_importers.append(path.name)
+    assert direct_importers == ["board_consumer_cli.py"], (
+        "board_consumer.py should only be imported directly by its CLI shell: "
+        f"{direct_importers}"
+    )
+
+
+def test_consumer_stack_has_no_compat_or_shell_service_locator_patterns() -> None:
+    offending_compat_imports: list[str] = []
+    offending_service_locator_usage: list[str] = []
+    for path in sorted(SRC_ROOT.glob("consumer*.py")):
+        source = _source_text(path)
+        if "board_consumer_compat" in source:
+            offending_compat_imports.append(path.name)
+        if "_shell_module(" in source or "shell=sys.modules[__name__]" in source:
+            offending_service_locator_usage.append(path.name)
+    assert offending_compat_imports == [], (
+        "consumer modules still depend on board_consumer_compat: "
+        f"{offending_compat_imports}"
+    )
+    assert offending_service_locator_usage == [], (
+        "consumer modules still use shell service-locator patterns: "
+        f"{offending_service_locator_usage}"
+    )
+
+
+def test_thin_entrypoints_do_not_import_direct_mechanism_modules() -> None:
+    for path in THIN_ENTRY_MODULES:
+        imported = _runtime_imported_modules(path)
+        offending = sorted(
+            module for module in imported if module in DIRECT_MECHANISM_MODULES
+        )
+        assert offending == [], (
+            f"{path.name} imports direct mechanism modules: {offending}"
+        )
+
+
 def test_ports_do_not_import_adapters() -> None:
     for path in PORTS_ROOT.glob("*.py"):
         imported = _runtime_imported_modules(path)
@@ -106,3 +266,8 @@ def test_ports_do_not_import_adapters() -> None:
             module for module in imported if module.startswith(ADAPTER_PREFIX)
         )
         assert offending == [], f"{path.name} imports adapters: {offending}"
+
+
+def test_capability_adapters_do_not_inherit_each_other() -> None:
+    assert not issubclass(GitHubReviewStateAdapter, GitHubBoardMutationAdapter)
+    assert not issubclass(GitHubPullRequestAdapter, GitHubReviewStateAdapter)

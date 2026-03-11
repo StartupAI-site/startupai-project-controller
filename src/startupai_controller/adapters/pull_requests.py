@@ -11,6 +11,7 @@ import re
 import time
 from typing import Any
 
+from startupai_controller.adapters.github_base import GitHubAdapterBase
 from startupai_controller.domain.models import (
     CheckObservation,
     IssueContext,
@@ -973,7 +974,7 @@ def review_state_digest_from_payload(payload: PullRequestViewPayload) -> str:
     return review_state_digest_from_probe(_pull_request_state_probe_from_payload(payload))
 
 
-class GitHubPullRequestAdapter(GitHubReviewStateAdapter):
+class GitHubPullRequestAdapter(GitHubAdapterBase):
     """Adapter wrapping PR/review GitHub CLI interactions behind port protocols."""
 
     def _pull_request_list_items(self, payload: object) -> list[_PullRequestListItem]:
@@ -1465,6 +1466,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
             for number in numbers
             if (pr_repo, number) in self._github_memo.review_state_probes
         }
+
+    def _comment_exists(self, owner: str, repo: str, number: int, marker: str) -> bool:
+        """Delegate marker checks to the review-state comment helper."""
+        return _comment_exists(
+            owner,
+            repo,
+            number,
+            marker,
+            gh_runner=self._gh_runner,
+        )
 
     def _post_issue_comment(self, owner: str, repo: str, number: int, body: str) -> None:
         """Post a comment on a GitHub issue or PR and update the memo cache."""

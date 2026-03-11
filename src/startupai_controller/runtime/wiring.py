@@ -12,8 +12,10 @@ from typing import Callable
 import subprocess
 
 from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
-from startupai_controller.adapters.pull_requests import CycleGitHubMemo
-from startupai_controller.adapters.github_cli import GitHubCliAdapter
+from startupai_controller.adapters.pull_requests import (
+    CycleGitHubMemo,
+    GitHubPullRequestAdapter,
+)
 from startupai_controller.adapters.github_http_adapter import (
     begin_request_stats,
     end_request_stats,
@@ -24,6 +26,8 @@ from startupai_controller.adapters.review_state import (
     clear_cycle_board_snapshot_cache,
 )
 from startupai_controller.adapters.local_process import LocalProcessAdapter
+from startupai_controller.adapters.ready_flow import BoardAutomationReadyFlowAdapter
+from startupai_controller.adapters.system_service import SystemServiceAdapter
 from startupai_controller.adapters.sqlite_store import (
     ConsumerDB,
     MetricEvent,
@@ -33,7 +37,10 @@ from startupai_controller.adapters.sqlite_store import (
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
+from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.service_control import ServiceControlPort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
@@ -63,7 +70,7 @@ def build_github_port_bundle(
 ) -> GitHubPortBundle:
     """Build the per-command/per-cycle GitHub adapter bundle."""
     memo = github_memo or CycleGitHubMemo()
-    pr_adapter = GitHubCliAdapter(
+    pr_adapter = GitHubPullRequestAdapter(
         project_owner=project_owner,
         project_number=project_number,
         config=config,
@@ -113,6 +120,39 @@ def build_worktree_port(
         gh_runner=gh_runner,
         subprocess_runner=subprocess_runner,
     )
+
+
+def build_process_runner_port(
+    *,
+    gh_runner: Callable[..., str] | None = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> ProcessRunnerPort:
+    """Build the local process runner port."""
+    return LocalProcessAdapter(
+        gh_runner=gh_runner,
+        subprocess_runner=subprocess_runner,
+    )
+
+
+def build_gh_runner_port(
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> GhRunnerPort:
+    """Build the local gh runner port."""
+    return LocalProcessAdapter(gh_runner=gh_runner)
+
+
+def build_service_control_port(
+    *,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> ServiceControlPort:
+    """Build the local system-service adapter."""
+    return SystemServiceAdapter(subprocess_runner=subprocess_runner)
+
+
+def build_ready_flow_port() -> ReadyFlowPort:
+    """Build the ready-flow adapter."""
+    return BoardAutomationReadyFlowAdapter()
 
 
 def clear_github_runtime_caches() -> None:

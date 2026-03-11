@@ -3888,6 +3888,7 @@ def test_rebalance_wip_uses_ports_for_ready_demote_and_comment(
     """Lane overflow demotion can flow through ports."""
     config = _load(tmp_path)
     policy = _automation_config()
+    now = automation.datetime.now(automation.timezone.utc)
     board_calls: list[tuple[str, str]] = []
     review_state_port = _fake_review_state_port(
         snapshots_by_status={
@@ -3921,9 +3922,9 @@ def test_rebalance_wip_uses_ports_for_ready_demote_and_comment(
         automation,
         "_query_latest_wip_activity_timestamp",
         lambda ref, *a, **k: (
-            automation.datetime(2026, 3, 10, 12, 0, tzinfo=automation.timezone.utc)
+            now - automation.timedelta(hours=1)
             if ref == "crew#88"
-            else automation.datetime(2026, 3, 10, 11, 0, tzinfo=automation.timezone.utc)
+            else now - automation.timedelta(hours=2)
         ),
     )
     monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
@@ -4425,3 +4426,846 @@ def test_automerge_review_returns_blocked_for_pending(
     )
     assert code == 2
     assert "pending verification" in msg
+
+
+# ---------------------------------------------------------------------------
+# Characterization: _set_blocked_with_reason
+# ---------------------------------------------------------------------------
+
+
+class TestSetBlockedWithReasonCharacterization:
+    """Lock behavior of the _set_blocked_with_reason shell wrapper.
+
+    These tests exercise the board_automation.py wrapper which resolves ports
+    and adapts legacy seams before delegating to the application layer.
+    """
+
+    def test_port_path_sets_status_and_reason(self, tmp_path: Path) -> None:
+        """Port path: sets Blocked status then writes Blocked Reason."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        automation._set_blocked_with_reason(
+            "crew#84",
+            "dependency-unmet",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={"crew#84": "Ready"},
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert board_calls == [
+            ("crew#84", "Blocked"),
+            ("crew#84", "Blocked Reason=dependency-unmet"),
+        ]
+
+    def test_port_path_skips_status_write_when_already_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        """When already Blocked, only writes the reason field."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        automation._set_blocked_with_reason(
+            "crew#84",
+            "new-reason",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={"crew#84": "Blocked"},
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert board_calls == [
+            ("crew#84", "Blocked Reason=new-reason"),
+        ]
+
+    def test_port_path_dry_run_no_mutations(self, tmp_path: Path) -> None:
+        """Dry run on port path performs no mutations."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        automation._set_blocked_with_reason(
+            "crew#84",
+            "dependency-unmet",
+            config,
+            "StartupAI-site",
+            1,
+            dry_run=True,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={"crew#84": "Ready"},
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert board_calls == []
+
+    def test_port_path_not_on_board_raises(self, tmp_path: Path) -> None:
+        """Port path raises GhQueryError for issues not on the board."""
+        config = _load(tmp_path)
+        from startupai_controller.validate_critical_path_promotion import GhQueryError
+
+        with pytest.raises(GhQueryError, match="not on the project board"):
+            automation._set_blocked_with_reason(
+                "crew#84",
+                "dependency-unmet",
+                config,
+                "StartupAI-site",
+                1,
+                review_state_port=_fake_review_state_port(
+                    status_by_issue={},
+                ),
+                board_port=_fake_board_port([]),
+            )
+
+    def test_legacy_path_uses_board_info_resolver(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Legacy path: board_info_resolver is called to resolve item identity.
+
+        When board_info_resolver is set but board_mutator is not, the shell wrapper
+        auto-creates a _legacy_board_status_mutator that delegates to _set_board_status.
+        """
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+        resolver_calls: list[str] = []
+        set_board_calls: list[tuple] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            resolver_calls.append(issue_ref)
+            return automation.BoardInfo(
+                status="In Progress",
+                item_id="ITEM_123",
+                project_id="PROJ_456",
+            )
+
+        # Mock _set_board_status to intercept the auto-created legacy mutator
+        monkeypatch.setattr(
+            automation,
+            "_set_board_status",
+            lambda project_id, item_id, status, **kw: set_board_calls.append(
+                (project_id, item_id, status)
+            ),
+        )
+
+        automation._set_blocked_with_reason(
+            "crew#84",
+            "stale-timeout",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port(board_calls),
+            board_info_resolver=fake_resolver,
+        )
+
+        assert resolver_calls == ["crew#84"]
+        # Legacy mutator auto-created -> calls _set_board_status
+        assert set_board_calls == [("PROJ_456", "ITEM_123", "Blocked")]
+        # Blocked Reason still written through board_port
+        assert ("crew#84", "Blocked Reason=stale-timeout") in board_calls
+
+    def test_legacy_path_board_mutator_called_instead_of_port(
+        self, tmp_path: Path
+    ) -> None:
+        """When board_mutator is provided, it is called instead of board_port for status."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+        mutator_calls: list[tuple[str, str]] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Ready",
+                item_id="ITEM_123",
+                project_id="PROJ_456",
+            )
+
+        def fake_mutator(project_id, item_id):
+            mutator_calls.append((project_id, item_id))
+
+        automation._set_blocked_with_reason(
+            "crew#84",
+            "manual-block",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port(board_calls),
+            board_info_resolver=fake_resolver,
+            board_mutator=fake_mutator,
+        )
+
+        # board_mutator called with project_id/item_id
+        assert mutator_calls == [("PROJ_456", "ITEM_123")]
+        # board_port still used for Blocked Reason field
+        assert ("crew#84", "Blocked Reason=manual-block") in board_calls
+
+    def test_legacy_path_not_on_board_raises(self, tmp_path: Path) -> None:
+        """Legacy path raises GhQueryError when resolver returns NOT_ON_BOARD."""
+        config = _load(tmp_path)
+        from startupai_controller.validate_critical_path_promotion import GhQueryError
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="NOT_ON_BOARD", item_id="", project_id=""
+            )
+
+        with pytest.raises(GhQueryError, match="not on the project board"):
+            automation._set_blocked_with_reason(
+                "crew#84",
+                "test",
+                config,
+                "StartupAI-site",
+                1,
+                review_state_port=_fake_review_state_port(),
+                board_port=_fake_board_port([]),
+                board_info_resolver=fake_resolver,
+            )
+
+    def test_legacy_path_dry_run_no_mutations(self, tmp_path: Path) -> None:
+        """Legacy path dry run resolves info but performs no mutations."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Ready", item_id="ITEM_123", project_id="PROJ_456"
+            )
+
+        automation._set_blocked_with_reason(
+            "crew#84",
+            "test",
+            config,
+            "StartupAI-site",
+            1,
+            dry_run=True,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port(board_calls),
+            board_info_resolver=fake_resolver,
+        )
+
+        assert board_calls == []
+
+    def test_shell_wrapper_resolves_ports_from_defaults(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The board_automation shell wrapper resolves ports when none are given."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+        built_bundles: list[str] = []
+
+        fake_board_port = _fake_board_port(board_calls)
+        fake_review_port = _fake_review_state_port(
+            status_by_issue={"crew#84": "Ready"},
+        )
+        fake_bundle = SimpleNamespace(
+            review_state=fake_review_port,
+            board_mutations=fake_board_port,
+        )
+
+        monkeypatch.setattr(
+            automation,
+            "build_github_port_bundle",
+            lambda *a, **k: (built_bundles.append("built"), fake_bundle)[1],
+        )
+
+        automation._set_blocked_with_reason(
+            "crew#84",
+            "auto-resolved",
+            config,
+            "StartupAI-site",
+            1,
+        )
+
+        assert len(built_bundles) >= 1
+        assert ("crew#84", "Blocked") in board_calls
+        assert ("crew#84", "Blocked Reason=auto-resolved") in board_calls
+
+
+# ---------------------------------------------------------------------------
+# Characterization: _transition_issue_status
+# ---------------------------------------------------------------------------
+
+
+class TestTransitionIssueStatusCharacterization:
+    """Lock behavior of the _transition_issue_status shell wrapper."""
+
+    def test_port_path_transitions_matching_status(self, tmp_path: Path) -> None:
+        """Port path transitions when current status is in from_statuses."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"Ready", "In Progress"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={"crew#84": "In Progress"},
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert changed is True
+        assert old_status == "In Progress"
+        assert board_calls == [("crew#84", "Done")]
+
+    def test_port_path_rejects_non_matching_status(self, tmp_path: Path) -> None:
+        """Port path returns False when current status not in from_statuses."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"Ready"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={"crew#84": "Blocked"},
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert changed is False
+        assert old_status == "Blocked"
+        assert board_calls == []
+
+    def test_port_path_not_on_board_returns_false(self, tmp_path: Path) -> None:
+        """Port path returns NOT_ON_BOARD when issue is not on board."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#99",
+            {"Ready", "In Progress"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(status_by_issue={}),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert changed is False
+        assert old_status == "NOT_ON_BOARD"
+        assert board_calls == []
+
+    def test_port_path_dry_run_no_mutations(self, tmp_path: Path) -> None:
+        """Port path dry run returns True but performs no mutations."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"In Progress"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            dry_run=True,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={"crew#84": "In Progress"},
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert changed is True
+        assert old_status == "In Progress"
+        assert board_calls == []
+
+    def test_legacy_path_uses_board_info_resolver(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Legacy path: board_info_resolver is called to resolve item identity.
+
+        When board_info_resolver is set but board_mutator is not, the shell wrapper
+        auto-creates a _legacy_board_status_mutator that delegates to _set_board_status.
+        """
+        config = _load(tmp_path)
+        resolver_calls: list[str] = []
+        set_board_calls: list[tuple] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            resolver_calls.append(issue_ref)
+            return automation.BoardInfo(
+                status="Ready",
+                item_id="ITEM_123",
+                project_id="PROJ_456",
+            )
+
+        # Mock _set_board_status to intercept the auto-created legacy mutator
+        monkeypatch.setattr(
+            automation,
+            "_set_board_status",
+            lambda project_id, item_id, status, **kw: set_board_calls.append(
+                (project_id, item_id, status)
+            ),
+        )
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"Ready"},
+            "In Progress",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port([]),
+            board_info_resolver=fake_resolver,
+        )
+
+        assert resolver_calls == ["crew#84"]
+        assert changed is True
+        assert old_status == "Ready"
+        # Legacy mutator auto-created -> calls _set_board_status
+        assert set_board_calls == [("PROJ_456", "ITEM_123", "In Progress")]
+
+    def test_legacy_path_board_mutator_called(self, tmp_path: Path) -> None:
+        """Legacy path: board_mutator is called instead of board_port."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+        mutator_calls: list[tuple[str, str, str]] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="In Progress",
+                item_id="ITEM_123",
+                project_id="PROJ_456",
+            )
+
+        def fake_mutator(project_id, item_id, status):
+            mutator_calls.append((project_id, item_id, status))
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"In Progress"},
+            "Review",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port(board_calls),
+            board_info_resolver=fake_resolver,
+            board_mutator=fake_mutator,
+        )
+
+        assert changed is True
+        assert old_status == "In Progress"
+        assert mutator_calls == [("PROJ_456", "ITEM_123", "Review")]
+        assert board_calls == []  # board_port not used when mutator is present
+
+    def test_legacy_path_dry_run_no_mutations(self, tmp_path: Path) -> None:
+        """Legacy path dry run returns True but no mutations happen."""
+        config = _load(tmp_path)
+        mutator_calls: list[tuple[str, str, str]] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Ready", item_id="ITEM_123", project_id="PROJ_456"
+            )
+
+        def fake_mutator(project_id, item_id, status):
+            mutator_calls.append((project_id, item_id, status))
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"Ready"},
+            "In Progress",
+            config,
+            "StartupAI-site",
+            1,
+            dry_run=True,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port([]),
+            board_info_resolver=fake_resolver,
+            board_mutator=fake_mutator,
+        )
+
+        assert changed is True
+        assert old_status == "Ready"
+        assert mutator_calls == []
+
+    def test_legacy_path_status_mismatch_returns_false(
+        self, tmp_path: Path
+    ) -> None:
+        """Legacy path returns False when resolved status not in from_statuses."""
+        config = _load(tmp_path)
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Done", item_id="ITEM_123", project_id="PROJ_456"
+            )
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"Ready", "In Progress"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port([]),
+            board_info_resolver=fake_resolver,
+        )
+
+        assert changed is False
+        assert old_status == "Done"
+
+    def test_shell_wrapper_resolves_ports_from_defaults(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Shell wrapper auto-resolves ports when none provided."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+        built_bundles: list[str] = []
+
+        fake_board_port = _fake_board_port(board_calls)
+        fake_review_port = _fake_review_state_port(
+            status_by_issue={"crew#84": "Ready"},
+        )
+        fake_bundle = SimpleNamespace(
+            review_state=fake_review_port,
+            board_mutations=fake_board_port,
+        )
+
+        monkeypatch.setattr(
+            automation,
+            "build_github_port_bundle",
+            lambda *a, **k: (built_bundles.append("built"), fake_bundle)[1],
+        )
+
+        changed, old_status = automation._transition_issue_status(
+            "crew#84",
+            {"Ready"},
+            "In Progress",
+            config,
+            "StartupAI-site",
+            1,
+        )
+
+        assert len(built_bundles) >= 1
+        assert changed is True
+        assert old_status == "Ready"
+
+
+# ---------------------------------------------------------------------------
+# Characterization: _legacy_board_status_mutator
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyBoardStatusMutatorCharacterization:
+    """Lock behavior of the _legacy_board_status_mutator closure factory."""
+
+    def test_returns_callable_that_delegates_to_set_board_status(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The returned closure calls _set_board_status with correct arguments."""
+        config = _load(tmp_path)
+        set_board_calls: list[tuple] = []
+
+        monkeypatch.setattr(
+            automation,
+            "_set_board_status",
+            lambda project_id, item_id, status, **kw: set_board_calls.append(
+                (project_id, item_id, status)
+            ),
+        )
+
+        mutator = automation._legacy_board_status_mutator(
+            "StartupAI-site", 1, config
+        )
+
+        mutator("PROJ_123", "ITEM_456", "In Progress")
+
+        assert set_board_calls == [("PROJ_123", "ITEM_456", "In Progress")]
+
+    def test_default_status_is_blocked(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Calling mutator without explicit status defaults to Blocked."""
+        config = _load(tmp_path)
+        set_board_calls: list[tuple] = []
+
+        monkeypatch.setattr(
+            automation,
+            "_set_board_status",
+            lambda project_id, item_id, status, **kw: set_board_calls.append(
+                (project_id, item_id, status)
+            ),
+        )
+
+        mutator = automation._legacy_board_status_mutator(
+            "StartupAI-site", 1, config
+        )
+
+        mutator("PROJ_123", "ITEM_456")
+
+        assert set_board_calls == [("PROJ_123", "ITEM_456", "Blocked")]
+
+
+# ---------------------------------------------------------------------------
+# Characterization: mark_issues_done (highest-risk caller of _transition_issue_status)
+# ---------------------------------------------------------------------------
+
+
+class TestMarkIssuesDoneCharacterization:
+    """Lock behavior of mark_issues_done as key caller of _transition_issue_status."""
+
+    def test_marks_multiple_issues_done(self, tmp_path: Path) -> None:
+        """Multiple linked issues are transitioned to Done."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        issues = [
+            LinkedIssue(
+                owner="StartupAI-site",
+                repo="startupai-crew",
+                number=84,
+                ref="crew#84",
+            ),
+            LinkedIssue(
+                owner="StartupAI-site",
+                repo="startupai-crew",
+                number=85,
+                ref="crew#85",
+            ),
+        ]
+
+        marked = mark_issues_done(
+            issues,
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={
+                    "crew#84": "Review",
+                    "crew#85": "In Progress",
+                },
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert set(marked) == {"crew#84", "crew#85"}
+        assert ("crew#84", "Done") in board_calls
+        assert ("crew#85", "Done") in board_calls
+
+    def test_skips_already_done_issues(self, tmp_path: Path) -> None:
+        """Issues already in Done are not re-transitioned."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        issues = [
+            LinkedIssue(
+                owner="StartupAI-site",
+                repo="startupai-crew",
+                number=84,
+                ref="crew#84",
+            ),
+        ]
+
+        marked = mark_issues_done(
+            issues,
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(
+                status_by_issue={"crew#84": "Done"},
+            ),
+            board_port=_fake_board_port(board_calls),
+        )
+
+        assert marked == []
+        assert board_calls == []
+
+    def test_transitions_from_all_valid_source_statuses(
+        self, tmp_path: Path
+    ) -> None:
+        """mark_issues_done accepts transitions from Review, In Progress, Blocked, Ready, and Backlog."""
+        for source_status in ("Review", "In Progress", "Blocked", "Ready", "Backlog"):
+            config = _load(tmp_path)
+            board_calls: list[tuple[str, str]] = []
+
+            issues = [
+                LinkedIssue(
+                    owner="StartupAI-site",
+                    repo="startupai-crew",
+                    number=84,
+                    ref="crew#84",
+                ),
+            ]
+
+            marked = mark_issues_done(
+                issues,
+                config,
+                "StartupAI-site",
+                1,
+                review_state_port=_fake_review_state_port(
+                    status_by_issue={"crew#84": source_status},
+                ),
+                board_port=_fake_board_port(board_calls),
+            )
+
+            assert marked == ["crew#84"], f"Failed for source status: {source_status}"
+            assert ("crew#84", "Done") in board_calls, f"Failed for: {source_status}"
+
+    def test_empty_issues_list_returns_empty(self, tmp_path: Path) -> None:
+        """Empty issue list produces no transitions."""
+        config = _load(tmp_path)
+
+        marked = mark_issues_done(
+            [],
+            config,
+            "StartupAI-site",
+            1,
+            review_state_port=_fake_review_state_port(),
+            board_port=_fake_board_port([]),
+        )
+
+        assert marked == []
+
+
+# ---------------------------------------------------------------------------
+# Characterization: _set_status_if_changed
+# ---------------------------------------------------------------------------
+
+
+class TestSetStatusIfChangedCharacterization:
+    """Lock behavior of _set_status_if_changed legacy-compatible helper."""
+
+    def test_transitions_when_status_matches(self, tmp_path: Path) -> None:
+        """Returns (True, old_status) and writes new status."""
+        config = _load(tmp_path)
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="In Progress", item_id="ITEM_1", project_id="PROJ_1"
+            )
+
+        board_calls: list[tuple[str, str]] = []
+
+        changed, old_status = automation._set_status_if_changed(
+            "crew#84",
+            {"In Progress"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            board_port=_fake_board_port(board_calls),
+            board_info_resolver=fake_resolver,
+        )
+
+        assert changed is True
+        assert old_status == "In Progress"
+        assert ("crew#84", "Done") in board_calls
+
+    def test_no_transition_when_status_doesnt_match(
+        self, tmp_path: Path
+    ) -> None:
+        """Returns (False, old_status) when current status not in from_statuses."""
+        config = _load(tmp_path)
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Blocked", item_id="ITEM_1", project_id="PROJ_1"
+            )
+
+        changed, old_status = automation._set_status_if_changed(
+            "crew#84",
+            {"In Progress"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            board_info_resolver=fake_resolver,
+        )
+
+        assert changed is False
+        assert old_status == "Blocked"
+
+    def test_dry_run_no_mutations(self, tmp_path: Path) -> None:
+        """Dry run returns True but makes no board writes."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Review", item_id="ITEM_1", project_id="PROJ_1"
+            )
+
+        changed, old_status = automation._set_status_if_changed(
+            "crew#84",
+            {"Review"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            dry_run=True,
+            board_port=_fake_board_port(board_calls),
+            board_info_resolver=fake_resolver,
+        )
+
+        assert changed is True
+        assert old_status == "Review"
+        assert board_calls == []
+
+    def test_uses_board_mutator_when_provided(self, tmp_path: Path) -> None:
+        """board_mutator is called instead of board_port when provided."""
+        config = _load(tmp_path)
+        mutator_calls: list[tuple[str, str, str]] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Ready", item_id="ITEM_1", project_id="PROJ_1"
+            )
+
+        def fake_mutator(project_id, item_id, status):
+            mutator_calls.append((project_id, item_id, status))
+
+        changed, old_status = automation._set_status_if_changed(
+            "crew#84",
+            {"Ready"},
+            "In Progress",
+            config,
+            "StartupAI-site",
+            1,
+            board_info_resolver=fake_resolver,
+            board_mutator=fake_mutator,
+        )
+
+        assert changed is True
+        assert old_status == "Ready"
+        assert mutator_calls == [("PROJ_1", "ITEM_1", "In Progress")]
+
+    def test_uses_board_port_when_no_mutator(self, tmp_path: Path) -> None:
+        """board_port.set_issue_status is called when board_mutator is None."""
+        config = _load(tmp_path)
+        board_calls: list[tuple[str, str]] = []
+
+        def fake_resolver(issue_ref, _config, _owner, _number):
+            return automation.BoardInfo(
+                status="Review", item_id="ITEM_1", project_id="PROJ_1"
+            )
+
+        changed, old_status = automation._set_status_if_changed(
+            "crew#84",
+            {"Review"},
+            "Done",
+            config,
+            "StartupAI-site",
+            1,
+            board_port=_fake_board_port(board_calls),
+            board_info_resolver=fake_resolver,
+        )
+
+        assert changed is True
+        assert old_status == "Review"
+        assert ("crew#84", "Done") in board_calls

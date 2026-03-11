@@ -146,43 +146,37 @@ def test_tick_skips_review_rescue_when_no_review_items(
     )
     monkeypatch.setattr(
         control_plane,
-        "route_protected_queue_executors",
-        lambda *_args, **_kwargs: ExecutorRoutingDecision(
-            routed=["crew#19"],
-            unchanged=["crew#32"],
-            skipped=[("app#109", "repo-not-governed")],
+        "build_ready_flow_port",
+        lambda: SimpleNamespace(
+            route_protected_queue_executors=lambda *_args, **_kwargs: ExecutorRoutingDecision(
+                routed=["crew#19"],
+                unchanged=["crew#32"],
+                skipped=[("app#109", "repo-not-governed")],
+            ),
+            admit_backlog_items=lambda *_args, **_kwargs: AdmissionDecision(
+                ready_count=1,
+                ready_floor=4,
+                ready_cap=6,
+                needed=2,
+                scanned_backlog=3,
+            ),
+            admission_summary_payload=lambda *_args, **_kwargs: {
+                "enabled": True,
+                "ready_count": 1,
+                "ready_floor": 4,
+                "ready_cap": 6,
+                "needed": 2,
+                "scanned_backlog": 3,
+                "eligible_count": 0,
+                "admitted": [],
+                "skip_reason_counts": {},
+                "top_candidates": [],
+                "top_skipped": [],
+                "partial_failure": False,
+                "error": None,
+                "controller_owned_admission_rejections": 0,
+            },
         ),
-    )
-    monkeypatch.setattr(
-        control_plane,
-        "admit_backlog_items",
-        lambda *_args, **_kwargs: AdmissionDecision(
-            ready_count=1,
-            ready_floor=4,
-            ready_cap=6,
-            needed=2,
-            scanned_backlog=3,
-        ),
-    )
-    monkeypatch.setattr(
-        control_plane,
-        "admission_summary_payload",
-        lambda *_args, **_kwargs: {
-            "enabled": True,
-            "ready_count": 1,
-            "ready_floor": 4,
-            "ready_cap": 6,
-            "needed": 2,
-            "scanned_backlog": 3,
-            "eligible_count": 0,
-            "admitted": [],
-            "skip_reason_counts": {},
-            "top_candidates": [],
-            "top_skipped": [],
-            "partial_failure": False,
-            "error": None,
-            "controller_owned_admission_rejections": 0,
-        },
     )
     monkeypatch.setattr(control_plane, "_persist_admission_summary", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -211,7 +205,11 @@ def test_tick_skips_review_rescue_when_no_review_items(
     )
     monkeypatch.setattr(control_plane, "_record_successful_board_sync", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(control_plane, "_clear_degraded", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(control_plane, "_consumer_service_active", lambda: True)
+    monkeypatch.setattr(
+        control_plane,
+        "build_service_control_port",
+        lambda: SimpleNamespace(is_active=lambda _service_name, user=True: True),
+    )
     monkeypatch.setattr(
         control_plane,
         "_control_plane_health_summary",
