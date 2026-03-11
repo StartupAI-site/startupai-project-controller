@@ -94,6 +94,18 @@ from startupai_controller.application.consumer.preflight import (
     execute_prepare_cycle_phases as _execute_prepare_cycle_phases_use_case,
     reconcile_board_truth as _reconcile_board_truth_use_case,
 )
+from startupai_controller.application.consumer.launch import (
+    ClaimLaunchDeps,
+    ResolveLaunchDeps,
+    claim_launch_context as _claim_launch_context_use_case,
+    resolve_launch_context_for_cycle as _resolve_launch_context_for_cycle_use_case,
+)
+from startupai_controller.application.consumer.execution import (
+    ExecutionDeps,
+    FinalizeClaimedSessionDeps,
+    execute_claimed_session as _execute_claimed_session_use_case,
+    finalize_claimed_session as _finalize_claimed_session_use_case,
+)
 from startupai_controller.application.consumer.recovery import (
     RecoveryDeps,
     recover_interrupted_sessions as _recover_interrupted_sessions_use_case,
@@ -5531,41 +5543,26 @@ def _resolve_launch_context_for_cycle(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
-    if launch_context is not None:
-        return launch_context, None
-
-    selected_candidate, cycle_result = _select_launch_candidate_for_cycle(
+    return _resolve_launch_context_for_cycle_use_case(
         config=config,
         db=db,
         prepared=prepared,
+        deps=ResolveLaunchDeps(
+            select_launch_candidate_for_cycle=_select_launch_candidate_for_cycle,
+            prepare_selected_launch_candidate=_prepare_selected_launch_candidate,
+        ),
+        launch_context=launch_context,
         target_issue=target_issue,
+        dry_run=dry_run,
         status_resolver=status_resolver,
-        gh_runner=gh_runner,
-    )
-    if cycle_result is not None:
-        return None, cycle_result
-
-    if dry_run:
-        logger.info(
-            "[dry-run] Would prepare, claim, and execute: %s",
-            selected_candidate.issue_ref,
-        )
-        return None, CycleResult(
-            action="claimed",
-            issue_ref=selected_candidate.issue_ref,
-            reason="dry-run",
-        )
-
-    return _prepare_selected_launch_candidate(
-        selected_candidate=selected_candidate,
-        config=config,
-        db=db,
-        prepared=prepared,
         subprocess_runner=subprocess_runner,
-        status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
+        log_dry_run=lambda issue_ref: logger.info(
+            "[dry-run] Would prepare, claim, and execute: %s",
+            issue_ref,
+        ),
     )
 
 
@@ -5949,37 +5946,17 @@ def _claim_launch_context(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
-    cp_config = prepared.cp_config
-    candidate = launch_context.issue_ref
-    pending_claim, cycle_result = _open_pending_claim_session(
-        db=db,
-        launch_context=launch_context,
-        executor=config.executor,
-        slot_id=slot_id,
-    )
-    if cycle_result is not None:
-        return None, cycle_result
-
-    retry_ceiling_result = _enforce_claim_retry_ceiling(
-        config=config,
-        db=db,
-        launch_context=launch_context,
-        pending_claim=pending_claim,
-        cp_config=cp_config,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-    )
-    if retry_ceiling_result is not None:
-        return None, retry_ceiling_result
-
-    _claim_result, cycle_result = _attempt_launch_context_claim(
+    return _claim_launch_context_use_case(
         config=config,
         db=db,
         prepared=prepared,
+        deps=ClaimLaunchDeps(
+            open_pending_claim_session=_open_pending_claim_session,
+            enforce_claim_retry_ceiling=_enforce_claim_retry_ceiling,
+            attempt_launch_context_claim=_attempt_launch_context_claim,
+            mark_claimed_session_running=_mark_claimed_session_running,
+        ),
         launch_context=launch_context,
-        pending_claim=pending_claim,
         slot_id=slot_id,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
@@ -5987,23 +5964,6 @@ def _claim_launch_context(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-    )
-    if cycle_result is not None:
-        return None, cycle_result
-
-    return (
-        _mark_claimed_session_running(
-            config=config,
-            db=db,
-            launch_context=launch_context,
-            pending_claim=pending_claim,
-            slot_id=slot_id,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            cp_config=cp_config,
-            gh_runner=gh_runner,
-        ),
-        None,
     )
 
 
@@ -6525,106 +6485,29 @@ def _execute_claimed_session(
     gh_runner: Callable[..., str] | None,
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
-    candidate = launch_context.issue_ref
-    session_id = claimed_context.session_id
-
-    prompt = _assemble_codex_prompt(
-        launch_context.issue_context,
-        candidate,
-        prepared.cp_config,
-        launch_context.effective_consumer_config,
-        launch_context.worktree_path,
-        launch_context.branch_name,
-        dependency_summary=launch_context.dependency_summary,
-        workflow_definition=launch_context.workflow_definition,
-        session_kind=launch_context.session_kind,
-        repair_pr_url=launch_context.repair_pr_url,
-        branch_reconcile_state=launch_context.branch_reconcile_state,
-        branch_reconcile_error=launch_context.branch_reconcile_error,
-    )
-
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = config.output_dir / f"{session_id}.json"
-    exit_code = _run_codex_session(
-        launch_context.worktree_path,
-        prompt,
-        config.schema_path,
-        output_path,
-        launch_context.effective_consumer_config.codex_timeout_seconds,
-        heartbeat_fn=lambda: db.update_heartbeat(candidate),
-        subprocess_runner=subprocess_runner,
-    )
-
-    codex_result = _parse_codex_result(output_path, file_reader=file_reader)
-
-    session_status, failure_reason = _session_status_from_codex_result(
-        exit_code,
-        codex_result,
-    )
-    pr_outcome = _create_pr_for_execution_result(
+    return _execute_claimed_session_use_case(
         config=config,
+        db=db,
+        prepared=prepared,
+        deps=ExecutionDeps(
+            assemble_codex_prompt=_assemble_codex_prompt,
+            run_codex_session=_run_codex_session,
+            parse_codex_result=_parse_codex_result,
+            session_status_from_codex_result=_session_status_from_codex_result,
+            create_pr_for_execution_result=_create_pr_for_execution_result,
+            handoff_execution_to_review=_handoff_execution_to_review,
+            handle_non_review_execution_outcome=_handle_non_review_execution_outcome,
+            build_session_execution_outcome=SessionExecutionOutcome,
+        ),
         launch_context=launch_context,
         claimed_context=claimed_context,
-        codex_result=codex_result,
-        session_status=session_status,
-        failure_reason=failure_reason,
         subprocess_runner=subprocess_runner,
+        file_reader=file_reader,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
         gh_runner=gh_runner,
-    )
-
-    should_transition_to_review = bool(pr_outcome.pr_url) and (
-        launch_context.session_kind != "repair"
-        or pr_outcome.session_status == "success"
-    )
-
-    immediate_review_summary = ReviewQueueDrainSummary()
-    resolution_evaluation: ResolutionEvaluation | None = None
-    done_reason: str | None = None
-    effective_session_status = pr_outcome.session_status
-    if should_transition_to_review:
-        immediate_review_summary = _handoff_execution_to_review(
-            config=config,
-            db=db,
-            prepared=prepared,
-            launch_context=launch_context,
-            session_id=session_id,
-            pr_url=pr_outcome.pr_url or "",
-            session_status=pr_outcome.session_status,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-    else:
-        (
-            effective_session_status,
-            resolution_evaluation,
-            done_reason,
-        ) = _handle_non_review_execution_outcome(
-            config=config,
-            db=db,
-            prepared=prepared,
-            launch_context=launch_context,
-            session_id=session_id,
-            session_status=pr_outcome.session_status,
-            codex_result=codex_result,
-            has_commits=pr_outcome.has_commits,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            comment_poster=comment_poster,
-            subprocess_runner=subprocess_runner,
-            gh_runner=gh_runner,
-        )
-
-    return SessionExecutionOutcome(
-        session_status=effective_session_status,
-        failure_reason=pr_outcome.failure_reason,
-        pr_url=pr_outcome.pr_url,
-        has_commits=pr_outcome.has_commits,
-        codex_result=codex_result,
-        should_transition_to_review=should_transition_to_review,
-        immediate_review_summary=immediate_review_summary,
-        resolution_evaluation=resolution_evaluation,
-        done_reason=done_reason,
     )
 
 
@@ -6642,52 +6525,23 @@ def _finalize_claimed_session(
     gh_runner: Callable[..., str] | None,
 ) -> CycleResult:
     """Persist final session state and return the cycle result."""
-    cp_config = prepared.cp_config
-    candidate = launch_context.issue_ref
-    session_id = claimed_context.session_id
-    effective_max_retries = claimed_context.effective_max_retries
-
-    db.release_lease(candidate)
-    final_phase = _final_phase_for_claimed_session(
-        launch_context=launch_context,
-        execution_outcome=execution_outcome,
-    )
-    _persist_claimed_session_completion(
-        db=db,
-        session_id=session_id,
-        issue_ref=candidate,
-        execution_outcome=execution_outcome,
-        final_phase=final_phase,
-    )
-    _post_claimed_session_result_comment(
-        issue_ref=candidate,
-        session_id=session_id,
-        codex_result=execution_outcome.codex_result,
-        cp_config=cp_config,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-    )
-    _maybe_escalate_claimed_session_failure(
+    return _finalize_claimed_session_use_case(
         config=config,
         db=db,
-        issue_ref=candidate,
-        effective_max_retries=effective_max_retries,
-        session_status=execution_outcome.session_status,
-        codex_result=execution_outcome.codex_result,
-        cp_config=cp_config,
+        prepared=prepared,
+        deps=FinalizeClaimedSessionDeps(
+            final_phase_for_claimed_session=_final_phase_for_claimed_session,
+            persist_claimed_session_completion=_persist_claimed_session_completion,
+            post_claimed_session_result_comment=_post_claimed_session_result_comment,
+            maybe_escalate_claimed_session_failure=_maybe_escalate_claimed_session_failure,
+        ),
+        launch_context=launch_context,
+        claimed_context=claimed_context,
+        execution_outcome=execution_outcome,
         board_info_resolver=board_info_resolver,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-    )
-
-    return CycleResult(
-        action="claimed",
-        issue_ref=candidate,
-        session_id=session_id,
-        reason=execution_outcome.session_status,
-        pr_url=execution_outcome.pr_url,
     )
 
 
