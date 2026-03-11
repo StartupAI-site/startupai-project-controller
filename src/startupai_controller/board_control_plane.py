@@ -27,7 +27,7 @@ from startupai_controller.board_automation_config import (
     DEFAULT_PROJECT_OWNER,
     load_automation_config,
 )
-from startupai_controller.board_consumer import (
+from startupai_controller.consumer_config import (
     ConsumerConfig,
     DEFAULT_CONFIG_PATH,
     DEFAULT_DB_PATH,

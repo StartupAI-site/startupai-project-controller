@@ -65,15 +65,6 @@ def _runtime_imported_modules(path: Path) -> set[str]:
     return collector.imports
 
 
-def _runtime_imported_names(path: Path, module_name: str) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == module_name:
-            imported.update(alias.name for alias in node.names)
-    return imported
-
-
 def test_orchestrators_use_canonical_runtime_boundaries() -> None:
     for path in ORCHESTRATOR_MODULES:
         imported = _runtime_imported_modules(path)
@@ -130,14 +121,9 @@ def test_application_has_no_entrypoint_adapter_or_shim_imports() -> None:
 
 
 def test_board_control_plane_does_not_import_private_consumer_helpers() -> None:
-    imported = _runtime_imported_names(
-        SRC_ROOT / "board_control_plane.py",
-        "startupai_controller.board_consumer",
-    )
-    offending = sorted(name for name in imported if name.startswith("_"))
-    assert offending == [], (
-        "board_control_plane.py imports private helpers from board_consumer.py: "
-        f"{offending}"
+    imported = _runtime_imported_modules(SRC_ROOT / "board_control_plane.py")
+    assert "startupai_controller.board_consumer" not in imported, (
+        "board_control_plane.py still imports board_consumer.py at runtime"
     )
 
 
