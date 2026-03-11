@@ -1064,38 +1064,7 @@ def _worktree_ownership_is_safe(
     return _worktree_ownership_is_safe_helper(store, issue_ref, worktree_path)
 
 
-def _prepare_worktree(
-    issue_ref: str,
-    title: str,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    *,
-    branch_name_override: str | None = None,
-    session_store: SessionStorePort | None = None,
-    worktree_port: WorktreePort | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> tuple[str, str]:
-    """Create or safely adopt a worktree for an issue."""
-    return _launch_support_wiring.prepare_worktree(
-        issue_ref,
-        title,
-        config,
-        db,
-        parse_issue_ref=parse_issue_ref,
-        build_session_store=build_session_store,
-        build_worktree_port=build_worktree_port,
-        list_repo_worktrees=_list_repo_worktrees,
-        worktree_is_clean=_worktree_is_clean,
-        worktree_ownership_is_safe=_worktree_ownership_is_safe,
-        create_worktree=_create_worktree,
-        record_metric=_record_metric,
-        error_cls=WorktreePrepareError,
-        logger=logger,
-        branch_name_override=branch_name_override,
-        session_store=session_store,
-        worktree_port=worktree_port,
-        subprocess_runner=subprocess_runner,
-    )
+_prepare_worktree = _launch_support_wiring.prepare_worktree
 
 
 # ---------------------------------------------------------------------------
@@ -1103,67 +1072,16 @@ def _prepare_worktree(
 # ---------------------------------------------------------------------------
 
 
-def _create_worktree(
-    issue_ref: str,
-    title: str,
-    config: ConsumerConfig,
-    *,
-    branch_name_override: str | None = None,
-    worktree_port: WorktreePort | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> tuple[str, str]:
-    """Create a worktree for the issue. Returns (worktree_path, branch_name).
-
-    Shells out to wt-create.sh.
-    """
-    return _launch_support_wiring.create_worktree(
-        issue_ref,
-        title,
-        config,
-        build_worktree_port=build_worktree_port,
-        branch_name_override=branch_name_override,
-        worktree_port=worktree_port,
-        subprocess_runner=subprocess_runner,
-    )
+_create_worktree = _launch_support_wiring.create_worktree
 
 
-def _fast_forward_existing_worktree(
-    worktree_path: str,
-    branch: str,
-    *,
-    worktree_port: WorktreePort | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> None:
-    """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    _launch_support_wiring.fast_forward_existing_worktree(
-        worktree_path,
-        branch,
-        build_worktree_port=build_worktree_port,
-        worktree_port=worktree_port,
-        subprocess_runner=subprocess_runner,
-    )
+_fast_forward_existing_worktree = _launch_support_wiring.fast_forward_existing_worktree
 
 
-def _git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
-    """Return the most useful human-readable detail from a git subprocess result."""
-    return result.stderr.strip() or result.stdout.strip() or "unknown-error"
+_git_command_detail = _launch_support_wiring.git_command_detail
 
 
-def _reconcile_repair_branch(
-    worktree_path: str,
-    branch: str,
-    *,
-    worktree_port: WorktreePort | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> RepairBranchReconcileOutcome:
-    """Reconcile a repair branch against its remote and origin/main."""
-    return _launch_support_wiring.reconcile_repair_branch(
-        worktree_path,
-        branch,
-        build_worktree_port=build_worktree_port,
-        worktree_port=worktree_port,
-        subprocess_runner=subprocess_runner,
-    )
+_reconcile_repair_branch = _launch_support_wiring.reconcile_repair_branch
 
 
 # ---------------------------------------------------------------------------
@@ -3064,235 +2982,25 @@ def _block_prelaunch_issue(
 # ---------------------------------------------------------------------------
 
 
-def _setup_launch_worktree(
-    issue_ref: str,
-    title: str,
-    session_kind: str,
-    repair_branch_name: str | None,
-    *,
-    config: ConsumerConfig,
-    cp_config: CriticalPathConfig,
-    db: ConsumerDB,
-    session_store: SessionStorePort | None = None,
-    worktree_port: WorktreePort | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[str, str, str | None, str | None]:
-    """Set up worktree and reconcile repair branch if needed.
-
-    Returns (worktree_path, branch_name, reconcile_state, reconcile_error).
-    Raises WorktreePrepareError on blocking failure.
-    """
-    return _launch_support_wiring.setup_launch_worktree(
-        issue_ref,
-        title,
-        session_kind,
-        repair_branch_name,
-        config=config,
-        cp_config=cp_config,
-        db=db,
-        prepare_worktree=_prepare_worktree,
-        record_metric=_record_metric,
-        block_prelaunch_issue=_block_prelaunch_issue,
-        reconcile_repair_branch=_reconcile_repair_branch,
-        worktree_error_cls=WorktreePrepareError,
-        session_store=session_store,
-        worktree_port=worktree_port,
-        subprocess_runner=subprocess_runner,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+_setup_launch_worktree = _launch_support_wiring.setup_launch_worktree
 
 
-def _resolve_launch_runtime(
-    candidate_prefix: str,
-    worktree_path: str,
-    *,
-    config: ConsumerConfig,
-    prepared: PreparedCycleContext,
-) -> tuple[Any, ConsumerConfig]:
-    """Load worktree workflow and compute effective runtime config.
-
-    Returns (workflow_definition, effective_consumer_config).
-    """
-    return _launch_support_wiring.resolve_launch_runtime(
-        candidate_prefix,
-        worktree_path,
-        config=config,
-        prepared=prepared,
-        load_worktree_workflow=load_worktree_workflow,
-    )
+_resolve_launch_runtime = _launch_support_wiring.resolve_launch_runtime
 
 
-def _resolve_launch_candidate_metadata(
-    issue_ref: str,
-    *,
-    cp_config: CriticalPathConfig,
-    auto_config: BoardAutomationConfig | None,
-    board_snapshot: CycleBoardSnapshot,
-    pr_port: PullRequestPort,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[
-    str,
-    str,
-    str,
-    int,
-    _ProjectItemSnapshot | None,
-    str,
-    str | None,
-    str | None,
-]:
-    """Resolve launch candidate identity and repair-session metadata."""
-    return _launch_support_wiring.resolve_launch_candidate_metadata(
-        issue_ref,
-        cp_config=cp_config,
-        auto_config=auto_config,
-        board_snapshot=board_snapshot,
-        pr_port=pr_port,
-        gh_runner=gh_runner,
-        parse_issue_ref=parse_issue_ref,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        snapshot_for_issue=_snapshot_for_issue,
-        classify_open_pr_candidates=_classify_open_pr_candidates,
-        launch_session_kind=_launch_session_kind,
-    )
+_resolve_launch_candidate_metadata = _launch_support_wiring.resolve_launch_candidate_metadata
 
 
-def _resolve_launch_issue_context(
-    issue_ref: str,
-    *,
-    owner: str,
-    repo: str,
-    number: int,
-    snapshot: _ProjectItemSnapshot | None,
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    issue_context_port: IssueContextPort,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[IssueContext, str]:
-    """Hydrate launch issue context and compute the launch title."""
-    return _launch_support_wiring.resolve_launch_issue_context(
-        issue_ref,
-        owner=owner,
-        repo=repo,
-        number=number,
-        snapshot=snapshot,
-        config=config,
-        db=db,
-        issue_context_port=issue_context_port,
-        gh_runner=gh_runner,
-        hydrate_issue_context=_hydrate_issue_context,
-    )
+_resolve_launch_issue_context = _launch_support_wiring.resolve_launch_issue_context
 
 
-def _run_launch_workspace_hooks(
-    workflow_definition: WorkflowDefinition,
-    *,
-    worktree_path: str,
-    issue_ref: str,
-    branch_name: str,
-    worktree_port: WorktreePort,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
-) -> None:
-    """Run launch workspace hooks around the prepared worktree."""
-    _launch_support_wiring.run_launch_workspace_hooks(
-        workflow_definition,
-        worktree_path=worktree_path,
-        issue_ref=issue_ref,
-        branch_name=branch_name,
-        worktree_port=worktree_port,
-        subprocess_runner=subprocess_runner,
-        run_workspace_hooks=_run_workspace_hooks,
-    )
+_run_launch_workspace_hooks = _launch_support_wiring.run_launch_workspace_hooks
 
 
-def _assemble_prepared_launch_context(
-    issue_ref: str,
-    *,
-    candidate_prefix: str,
-    owner: str,
-    repo: str,
-    number: int,
-    title: str,
-    context: IssueContext,
-    session_kind: str,
-    repair_pr_url: str | None,
-    repair_branch_name: str | None,
-    worktree_path: str,
-    branch_name: str,
-    workflow_definition: WorkflowDefinition,
-    effective_consumer_config: ConsumerConfig,
-    dependency_summary: str | None,
-    branch_reconcile_state: str | None,
-    branch_reconcile_error: str | None,
-) -> PreparedLaunchContext:
-    """Create the final launch context for a prepared candidate."""
-    return _cycle_wiring.assemble_prepared_launch_context(
-        issue_ref,
-        candidate_prefix=candidate_prefix,
-        owner=owner,
-        repo=repo,
-        number=number,
-        title=title,
-        context=context,
-        session_kind=session_kind,
-        repair_pr_url=repair_pr_url,
-        repair_branch_name=repair_branch_name,
-        worktree_path=worktree_path,
-        branch_name=branch_name,
-        workflow_definition=workflow_definition,
-        effective_consumer_config=effective_consumer_config,
-        dependency_summary=dependency_summary,
-        branch_reconcile_state=branch_reconcile_state,
-        branch_reconcile_error=branch_reconcile_error,
-    )
+_assemble_prepared_launch_context = _cycle_wiring.assemble_prepared_launch_context
 
 
-def _prepare_launch_candidate(
-    issue_ref: str,
-    *,
-    config: ConsumerConfig,
-    prepared: PreparedCycleContext,
-    db: ConsumerDB,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    pr_port: PullRequestPort | None = None,
-    issue_context_port: IssueContextPort | None = None,
-    session_store: SessionStorePort | None = None,
-    worktree_port: WorktreePort | None = None,
-) -> PreparedLaunchContext:
-    """Prepare local launch state for an issue before board claim."""
-    return _cycle_wiring.prepare_launch_candidate(
-        issue_ref,
-        config=config,
-        prepared=prepared,
-        db=db,
-        subprocess_runner=subprocess_runner,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        pr_port=pr_port,
-        issue_context_port=issue_context_port,
-        session_store=session_store,
-        worktree_port=worktree_port,
-        build_session_store=build_session_store,
-        build_github_port_bundle=build_github_port_bundle,
-        build_worktree_port=build_worktree_port,
-        resolve_launch_candidate_metadata=_resolve_launch_candidate_metadata,
-        resolve_launch_issue_context=_resolve_launch_issue_context,
-        setup_launch_worktree=_setup_launch_worktree,
-        resolve_launch_runtime=_resolve_launch_runtime,
-        run_launch_workspace_hooks=_run_launch_workspace_hooks,
-        build_dependency_summary=_build_dependency_summary,
-        assemble_prepared_launch_context=_assemble_prepared_launch_context,
-    )
+_prepare_launch_candidate = _cycle_wiring.prepare_launch_candidate
 
 
 def _select_launch_candidate_for_cycle(

@@ -29,6 +29,13 @@ from startupai_controller.consumer_types import (
 )
 
 
+def _shell_module():
+    """Import the consumer shell lazily to avoid import cycles."""
+    from startupai_controller import board_consumer
+
+    return board_consumer
+
+
 def assemble_prepared_launch_context(
     issue_ref: str,
     *,
@@ -86,34 +93,25 @@ def prepare_launch_candidate(
     issue_context_port: Any | None = None,
     session_store: Any | None = None,
     worktree_port: Any | None = None,
-    build_session_store: Callable[[Any], Any],
-    build_github_port_bundle: Callable[..., Any],
-    build_worktree_port: Callable[..., Any],
-    resolve_launch_candidate_metadata: Callable[..., tuple[Any, ...]],
-    resolve_launch_issue_context: Callable[..., tuple[Any, str]],
-    setup_launch_worktree: Callable[..., tuple[str, str, str | None, str | None]],
-    resolve_launch_runtime: Callable[..., tuple[Any, Any]],
-    run_launch_workspace_hooks: Callable[..., None],
-    build_dependency_summary: Callable[..., str],
-    assemble_prepared_launch_context: Callable[..., PreparedLaunchContext],
 ) -> PreparedLaunchContext:
     """Prepare local launch state for an issue before board claim."""
+    shell = _shell_module()
     return _prepare_launch_candidate_use_case(
         issue_ref,
         config=config,
         prepared=prepared,
         db=db,
         deps=PrepareLaunchDeps(
-            build_session_store=build_session_store,
-            build_github_port_bundle=build_github_port_bundle,
-            build_worktree_port=build_worktree_port,
-            resolve_launch_candidate_metadata=resolve_launch_candidate_metadata,
-            resolve_launch_issue_context=resolve_launch_issue_context,
-            setup_launch_worktree=setup_launch_worktree,
-            resolve_launch_runtime=resolve_launch_runtime,
-            run_launch_workspace_hooks=run_launch_workspace_hooks,
-            build_dependency_summary=build_dependency_summary,
-            assemble_prepared_launch_context=assemble_prepared_launch_context,
+            build_session_store=shell.build_session_store,
+            build_github_port_bundle=shell.build_github_port_bundle,
+            build_worktree_port=shell.build_worktree_port,
+            resolve_launch_candidate_metadata=shell._resolve_launch_candidate_metadata,
+            resolve_launch_issue_context=shell._resolve_launch_issue_context,
+            setup_launch_worktree=shell._setup_launch_worktree,
+            resolve_launch_runtime=shell._resolve_launch_runtime,
+            run_launch_workspace_hooks=shell._run_launch_workspace_hooks,
+            build_dependency_summary=shell._build_dependency_summary,
+            assemble_prepared_launch_context=shell._assemble_prepared_launch_context,
         ),
         subprocess_runner=subprocess_runner,
         status_resolver=status_resolver,
