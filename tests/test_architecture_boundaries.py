@@ -73,6 +73,14 @@ def _runtime_imported_modules(path: Path) -> set[str]:
     return collector.imports
 
 
+def _controller_runtime_imports(path: Path) -> set[str]:
+    return {
+        module
+        for module in _runtime_imported_modules(path)
+        if module.startswith("startupai_controller")
+    }
+
+
 def test_orchestrators_use_canonical_runtime_boundaries() -> None:
     for path in ORCHESTRATOR_MODULES:
         imported = _runtime_imported_modules(path)
@@ -135,6 +143,63 @@ def test_board_control_plane_does_not_import_private_consumer_helpers() -> None:
     )
     assert "startupai_controller.board_automation" not in imported, (
         "board_control_plane.py still imports board_automation.py at runtime"
+    )
+
+
+def test_board_control_plane_imports_stay_within_control_plane_stack() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "board_control_plane.py")
+    offending = sorted(
+        module
+        for module in imported
+        if module not in {
+            "startupai_controller.board_automation_config",
+            "startupai_controller.consumer_config",
+            "startupai_controller.consumer_workflow",
+            "startupai_controller.runtime.wiring",
+            "startupai_controller.validate_critical_path_promotion",
+        }
+        and not module.startswith("startupai_controller.application.control_plane.")
+        and not module.startswith("startupai_controller.control_plane_")
+    )
+    assert offending == [], (
+        "board_control_plane.py imports modules outside the control-plane shell stack: "
+        f"{offending}"
+    )
+
+
+def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "board_automation.py")
+    offending = sorted(
+        module
+        for module in imported
+        if module in {
+            "startupai_controller.board_consumer",
+            "startupai_controller.board_control_plane",
+        }
+        or module.startswith("startupai_controller.application.consumer.")
+        or module.startswith("startupai_controller.consumer_")
+        or module.startswith("startupai_controller.control_plane_")
+    )
+    assert offending == [], (
+        "board_automation.py crosses into other shell stacks at runtime: "
+        f"{offending}"
+    )
+
+
+def test_board_consumer_endgame_shell_avoids_lower_level_execution_mechanisms() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "board_consumer.py")
+    offending = sorted(
+        module
+        for module in imported
+        if module in {
+            "startupai_controller.application.consumer.execution",
+            "startupai_controller.application.consumer.launch",
+            "startupai_controller.consumer_review_handoff_helpers",
+        }
+    )
+    assert offending == [], (
+        "board_consumer.py bypasses outer execution/launch wiring modules: "
+        f"{offending}"
     )
 
 

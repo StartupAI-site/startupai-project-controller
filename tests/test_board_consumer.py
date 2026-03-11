@@ -19,8 +19,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from startupai_controller.board_consumer import (
+    ClaimedSessionContext,
     ConsumerConfig,
     CycleResult,
+    PendingClaimContext,
+    PrCreationOutcome,
+    PreparedLaunchContext,
     RepairBranchReconcileOutcome,
     ESCALATION_CEILING_FAILED,
     ESCALATION_CEILING_TRANSIENT,
@@ -33,6 +37,8 @@ from startupai_controller.board_consumer import (
     _backfill_review_verdicts,
     _apply_review_queue_result,
     _apply_review_queue_partial_failure,
+    _attempt_launch_context_claim,
+    _block_prelaunch_issue,
     _blocker_class,
     _build_review_snapshots_for_queue_entries,
     _cmd_drain,
@@ -46,6 +52,8 @@ from startupai_controller.board_consumer import (
     _assemble_codex_prompt,
     _build_pr_body,
     _clear_drain,
+    _handle_non_review_execution_outcome,
+    _execute_claimed_session,
     _create_or_update_pr,
     _create_worktree,
     _drain_requested,
@@ -65,6 +73,7 @@ from startupai_controller.board_consumer import (
     _replay_deferred_actions,
     _recover_interrupted_sessions,
     _request_drain,
+    _resolve_launch_context_for_cycle,
     _review_queue_retry_seconds_for_blocked_reason,
     _review_queue_retry_seconds_for_result,
     _return_issue_to_ready,
@@ -77,6 +86,8 @@ from startupai_controller.board_consumer import (
     run_daemon_loop,
     run_one_cycle,
     ReconciliationResult,
+    ReviewQueueDrainSummary,
+    SessionExecutionOutcome,
     WorktreePrepareError,
 )
 from startupai_controller.board_automation import (
@@ -296,6 +307,65 @@ def _codex_result_json(
         "needs_handoff_to": extra.get("needs_handoff_to"),
         "duration_seconds": extra.get("duration_seconds", 60),
     }
+
+
+def _make_prepared_cycle_context(
+    tmp_path: Path,
+    config: ConsumerConfig,
+    *,
+    effective_interval: int = 180,
+    global_limit: int = 1,
+):
+    return SimpleNamespace(
+        cp_config=_load(tmp_path),
+        auto_config=load_automation_config(config.automation_config_path),
+        main_workflows={},
+        workflow_statuses={},
+        dispatchable_repo_prefixes=("crew",),
+        effective_interval=effective_interval,
+        global_limit=global_limit,
+        board_snapshot=SimpleNamespace(items=(), items_with_status=lambda *_a, **_k: ()),
+        github_memo=SimpleNamespace(),
+        ready_flow_port=SimpleNamespace(),
+        admission_summary={},
+        review_queue_summary=ReviewQueueDrainSummary(),
+        timings_ms={},
+        github_request_counts={},
+    )
+
+
+def _make_prepared_launch_context(
+    tmp_path: Path,
+    *,
+    issue_ref: str = "crew#84",
+    session_kind: str = "new_work",
+    repair_pr_url: str | None = None,
+) -> PreparedLaunchContext:
+    prefix, number = issue_ref.split("#", maxsplit=1)
+    repo_by_prefix = {
+        "crew": "startupai-crew",
+        "app": "app.startupai-site",
+        "site": "startupai.site",
+    }
+    return PreparedLaunchContext(
+        issue_ref=issue_ref,
+        repo_prefix=prefix,
+        owner="StartupAI-site",
+        repo=repo_by_prefix[prefix],
+        number=int(number),
+        title="Test issue",
+        issue_context={"title": "Test issue", "acceptance_criteria": ["works"]},
+        session_kind=session_kind,
+        repair_pr_url=repair_pr_url,
+        repair_branch_name="feat/84-test" if session_kind == "repair" else None,
+        worktree_path=str(tmp_path / "claimed-worktree"),
+        branch_name="feat/84-test",
+        workflow_definition=SimpleNamespace(),
+        effective_consumer_config=SimpleNamespace(codex_timeout_seconds=1800),
+        dependency_summary="deps ready",
+        branch_reconcile_state=None,
+        branch_reconcile_error=None,
+    )
 
 
 # -- _select_best_candidate tests -------------------------------------------
@@ -3092,6 +3162,387 @@ class TestRunOneCycle:
         assert session.done_reason == "already_resolved"
         gh_joined = "\n".join(" ".join(call) for call in call_log["gh"])
         assert "state=closed" in gh_joined
+
+
+class TestConsumerShellSeams:
+    def test_run_one_cycle_uses_supplied_launch_context_without_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        prepared = _make_prepared_cycle_context(
+            tmp_path,
+            config,
+            effective_interval=47,
+        )
+        launch_context = _make_prepared_launch_context(tmp_path)
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._select_launch_candidate_for_cycle",
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("selected candidate lookup should be skipped")
+            ),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._prepare_selected_launch_candidate",
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("launch preparation should be skipped")
+            ),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._claim_launch_context",
+            lambda **kwargs: (
+                ClaimedSessionContext("sess-001", 3, kwargs["slot_id"]),
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._execute_claimed_session",
+            lambda **kwargs: SessionExecutionOutcome(
+                session_status="success",
+                failure_reason=None,
+                pr_url="https://github.com/O/R/pull/10",
+                has_commits=True,
+                codex_result=_codex_result_json(),
+                should_transition_to_review=True,
+                immediate_review_summary=ReviewQueueDrainSummary(),
+            ),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._finalize_claimed_session",
+            lambda **kwargs: CycleResult(
+                action="claimed",
+                issue_ref=kwargs["launch_context"].issue_ref,
+                session_id=kwargs["claimed_context"].session_id,
+                reason="used-injected-launch-context",
+            ),
+        )
+
+        result = run_one_cycle(
+            config,
+            db,
+            prepared=prepared,
+            launch_context=launch_context,
+            slot_id_override=1,
+            skip_control_plane=True,
+        )
+
+        assert result.reason == "used-injected-launch-context"
+        assert result.issue_ref == "crew#84"
+        assert config.poll_interval_seconds == 47
+
+    def test_resolve_launch_context_for_cycle_dry_run_claims_selected_issue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        prepared = _make_prepared_cycle_context(tmp_path, config)
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._select_launch_candidate_for_cycle",
+            lambda **kwargs: (SimpleNamespace(issue_ref="crew#84"), None),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._prepare_selected_launch_candidate",
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("dry-run should not prepare a worktree")
+            ),
+        )
+
+        launch_context, cycle_result = _resolve_launch_context_for_cycle(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=None,
+            target_issue=None,
+            dry_run=True,
+            status_resolver=None,
+            subprocess_runner=None,
+            board_info_resolver=None,
+            board_mutator=None,
+            gh_runner=None,
+        )
+
+        assert launch_context is None
+        assert cycle_result == CycleResult(
+            action="claimed",
+            issue_ref="crew#84",
+            reason="dry-run",
+        )
+
+    def test_attempt_launch_context_claim_records_attempt_and_aborts_wip_limit_rejection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        prepared = _make_prepared_cycle_context(tmp_path, config)
+        launch_context = _make_prepared_launch_context(tmp_path)
+        session_id = db.create_session("crew#84", "codex")
+        db.acquire_lease("crew#84", session_id, now=datetime.now(timezone.utc))
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer.claim_ready_issue",
+            lambda *args, **kwargs: ClaimReadyResult(reason="wip-limit"),
+        )
+
+        claim_result, cycle_result = _attempt_launch_context_claim(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            pending_claim=PendingClaimContext(session_id=session_id, effective_max_retries=3),
+            slot_id=2,
+            status_resolver=None,
+            board_info_resolver=None,
+            board_mutator=None,
+            comment_checker=None,
+            comment_poster=None,
+            gh_runner=None,
+        )
+
+        assert claim_result is None
+        assert cycle_result == CycleResult(
+            action="idle",
+            issue_ref="crew#84",
+            session_id=session_id,
+            reason="claim-rejected:wip-limit",
+        )
+        assert db.active_lease_count() == 0
+        session = db.get_session(session_id)
+        assert session is not None
+        assert session.status == "aborted"
+        assert session.failure_reason == "claim_rejected_wip_limit"
+        metrics = db.recent_metric_events(limit=10)
+        claim_attempt = next(
+            event for event in metrics if event.event_type == "claim_attempted"
+        )
+        worker_failure = next(
+            event for event in metrics if event.event_type == "worker_start_failed"
+        )
+        assert claim_attempt.issue_ref == "crew#84"
+        assert json.loads(claim_attempt.payload_json or "{}") == {"slot_id": 2}
+        assert json.loads(worker_failure.payload_json or "{}") == {
+            "reason": "claim_rejected_wip_limit"
+        }
+
+    def test_handle_non_review_execution_outcome_queues_ready_reset_when_return_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        prepared = _make_prepared_cycle_context(tmp_path, config)
+        launch_context = _make_prepared_launch_context(tmp_path)
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._return_issue_to_ready",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("board unavailable")),
+        )
+
+        session_status, resolution_evaluation, done_reason = _handle_non_review_execution_outcome(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id="sess-001",
+            session_status="failed",
+            codex_result=None,
+            has_commits=False,
+            board_info_resolver=None,
+            board_mutator=None,
+            comment_poster=None,
+            subprocess_runner=None,
+            gh_runner=None,
+        )
+
+        assert session_status == "aborted"
+        assert resolution_evaluation is None
+        assert done_reason is None
+        deferred = db.list_deferred_actions()
+        assert len(deferred) == 1
+        assert deferred[0].action_type == "set_status"
+        assert deferred[0].payload == {
+            "issue_ref": "crew#84",
+            "to_status": "Ready",
+            "from_statuses": ["In Progress", "Review"],
+        }
+        assert db.get_control_value("degraded") == "true"
+        assert db.get_control_value("degraded_reason") == "ready-reset:board unavailable"
+
+    def test_execute_claimed_session_keeps_failed_repair_pr_out_of_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        prepared = _make_prepared_cycle_context(tmp_path, config)
+        launch_context = _make_prepared_launch_context(
+            tmp_path,
+            session_kind="repair",
+            repair_pr_url="https://github.com/O/R/pull/9",
+        )
+        claimed_context = ClaimedSessionContext("sess-001", 3, 1)
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._assemble_codex_prompt",
+            lambda *args, **kwargs: "prompt",
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._run_codex_session",
+            lambda *args, **kwargs: 0,
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._parse_codex_result",
+            lambda *args, **kwargs: _codex_result_json(
+                outcome="failed",
+                summary="repair failed",
+            ),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._session_status_from_codex_result",
+            lambda *args, **kwargs: ("failed", "tests_failed"),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._create_pr_for_execution_result",
+            lambda **kwargs: PrCreationOutcome(
+                pr_url="https://github.com/O/R/pull/10",
+                has_commits=True,
+                session_status="failed",
+                failure_reason="tests_failed",
+            ),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._handoff_execution_to_review",
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("failed repair PRs should not transition to review")
+            ),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._handle_non_review_execution_outcome",
+            lambda **kwargs: ("failed", None, "repair-pr-failed"),
+        )
+
+        outcome = _execute_claimed_session(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            claimed_context=claimed_context,
+            subprocess_runner=None,
+            file_reader=None,
+            board_info_resolver=None,
+            board_mutator=None,
+            comment_checker=None,
+            comment_poster=None,
+            gh_runner=None,
+        )
+
+        assert outcome.session_status == "failed"
+        assert outcome.failure_reason == "tests_failed"
+        assert outcome.pr_url == "https://github.com/O/R/pull/10"
+        assert outcome.should_transition_to_review is False
+        assert outcome.done_reason == "repair-pr-failed"
+
+    def test_recover_interrupted_sessions_requeues_open_pr_work_into_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        session_id = db.create_session("crew#84", "codex")
+        db.acquire_lease("crew#84", session_id, now=datetime.now(timezone.utc))
+        db.update_session(
+            session_id,
+            status="running",
+            worktree_path="/tmp/wt",
+            branch_name="feat/84-test",
+            pr_url="https://github.com/O/R/pull/10",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        auto_config = load_automation_config(config.automation_config_path)
+        transitioned: list[str] = []
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._transition_issue_to_review",
+            lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
+        )
+
+        recovered = _recover_interrupted_sessions(
+            config,
+            db,
+            automation_config=auto_config,
+        )
+
+        assert [lease.issue_ref for lease in recovered] == ["crew#84"]
+        assert transitioned == ["crew#84"]
+        session = db.get_session(session_id)
+        assert session is not None
+        assert session.status == "aborted"
+
+    def test_reconcile_board_truth_leaves_review_without_active_repair_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        cp_config = load_config(config.critical_paths_path)
+        auto_config = load_automation_config(config.automation_config_path)
+        review_item = _ProjectItemSnapshot(
+            "StartupAI-site/startupai-crew#84",
+            "Review",
+            "codex",
+            "none",
+            "P0",
+        )
+        board_snapshot = CycleBoardSnapshot(
+            items=(review_item,),
+            by_status={"Review": (review_item,)},
+        )
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._transition_issue_to_in_progress",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("review items without active repair must stay put")
+            ),
+        )
+
+        result = _reconcile_board_truth(
+            config,
+            cp_config,
+            auto_config,
+            db,
+            board_snapshot=board_snapshot,
+        )
+
+        assert result.moved_in_progress == ()
+
+    def test_block_prelaunch_issue_queues_fallback_when_block_transition_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        cp_config = _load(tmp_path)
+        db = _make_db(tmp_path)
+
+        monkeypatch.setattr(
+            "startupai_controller.board_consumer._set_blocked_with_reason",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("mutation offline")),
+        )
+
+        _block_prelaunch_issue(
+            "crew#84",
+            "workflow-invalid",
+            config=config,
+            cp_config=cp_config,
+            db=db,
+        )
+
+        deferred = db.list_deferred_actions()
+        assert len(deferred) == 1
+        assert deferred[0].action_type == "set_status"
+        assert deferred[0].payload == {
+            "issue_ref": "crew#84",
+            "to_status": "Blocked",
+            "from_statuses": ["Ready"],
+            "blocked_reason": "workflow-invalid",
+        }
+        assert db.get_control_value("degraded") == "true"
+        assert db.get_control_value("degraded_reason") == "prelaunch-block:mutation offline"
 
 
 # -- CLI parser tests ----------------------------------------------------------
