@@ -42,6 +42,7 @@ from startupai_controller.board_automation import (
 from startupai_controller import consumer_board_state_helpers as _board_state_helpers
 import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
 from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
+import startupai_controller.consumer_execution_outcome_wiring as _execution_outcome_wiring
 from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
@@ -98,12 +99,6 @@ from startupai_controller.consumer_comment_pr_helpers import (
     post_consumer_claim_comment as _post_consumer_claim_comment_helper,
     post_pr_codex_verdict as _post_pr_codex_verdict_helper,
     post_result_comment as _post_result_comment_helper,
-)
-from startupai_controller.consumer_review_handoff_helpers import (
-    post_claimed_session_verdict_marker as _post_claimed_session_verdict_marker_helper,
-    queue_claimed_session_for_review as _queue_claimed_session_for_review_helper,
-    run_immediate_review_handoff as _run_immediate_review_handoff_helper,
-    transition_claimed_session_to_review as _transition_claimed_session_to_review_helper,
 )
 import startupai_controller.consumer_claim_helpers as _claim_helpers
 import startupai_controller.consumer_claim_wiring as _claim_wiring
@@ -3096,26 +3091,22 @@ def _block_prelaunch_issue(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a launch-unready issue to Blocked before claim."""
-    try:
-        _set_blocked_with_reason(
-            issue_ref,
-            blocked_reason,
-            cp_config,
-            config.project_owner,
-            config.project_number,
-            gh_runner=gh_runner,
-        )
-        _record_successful_github_mutation(db)
-    except (GhQueryError, Exception) as err:
-        logger.error("Prelaunch block failed for %s: %s", issue_ref, err)
-        _mark_degraded(db, f"prelaunch-block:{err}")
-        _queue_status_transition(
-            db,
-            issue_ref,
-            to_status="Blocked",
-            from_statuses={"Ready"},
-            blocked_reason=blocked_reason,
-        )
+    _execution_outcome_wiring.block_prelaunch_issue(
+        issue_ref,
+        blocked_reason,
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        gh_query_error_type=GhQueryError,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        mark_degraded=_mark_degraded,
+        queue_status_transition=_queue_status_transition,
+        logger=logger,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3824,7 +3815,7 @@ def _create_pr_for_execution_result(
     gh_runner: Callable[..., str] | None,
 ) -> PrCreationOutcome:
     """Reuse or create a PR from claimed-session output."""
-    return _session_completion_helpers.create_pr_for_execution_result(
+    return _execution_outcome_wiring.create_pr_for_execution_result(
         config=config,
         launch_context=launch_context,
         claimed_context=claimed_context,
@@ -3886,7 +3877,7 @@ def _transition_claimed_session_to_review(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Move one claimed issue into Review or queue the transition on failure."""
-    _transition_claimed_session_to_review_helper(
+    _execution_outcome_wiring.transition_claimed_session_to_review(
         db=db,
         issue_ref=issue_ref,
         session_id=session_id,
@@ -3899,7 +3890,7 @@ def _transition_claimed_session_to_review(
         record_successful_github_mutation=_record_successful_github_mutation,
         mark_degraded=_mark_degraded,
         queue_status_transition=_queue_status_transition,
-        log_error=lambda err: logger.error("Review transition failed: %s", err),
+        logger=logger,
     )
 
 
@@ -3911,7 +3902,7 @@ def _post_claimed_session_verdict_marker(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Post the codex verdict marker for a newly handed-off review PR."""
-    _post_claimed_session_verdict_marker_helper(
+    _execution_outcome_wiring.post_claimed_session_verdict_marker(
         db=db,
         pr_url=pr_url,
         session_id=session_id,
@@ -3920,7 +3911,7 @@ def _post_claimed_session_verdict_marker(
         record_successful_github_mutation=_record_successful_github_mutation,
         mark_degraded=_mark_degraded,
         queue_verdict_marker=_queue_verdict_marker,
-        log_error=lambda err: logger.error("PR codex verdict comment failed: %s", err),
+        logger=logger,
     )
 
 
@@ -3932,7 +3923,7 @@ def _queue_claimed_session_for_review(
     session_id: str,
 ) -> ReviewQueueEntry | None:
     """Queue one claimed session for immediate review handling."""
-    return _queue_claimed_session_for_review_helper(
+    return _execution_outcome_wiring.queue_claimed_session_for_review(
         store=store,
         issue_ref=issue_ref,
         pr_url=pr_url,
@@ -3952,7 +3943,7 @@ def _run_immediate_review_handoff(
     db: ConsumerDB,
 ) -> ReviewQueueDrainSummary:
     """Run immediate rescue for the just-opened review PR."""
-    return _run_immediate_review_handoff_helper(
+    return _execution_outcome_wiring.run_immediate_review_handoff(
         config=config,
         critical_path_config=critical_path_config,
         automation_config=automation_config,
@@ -3968,11 +3959,7 @@ def _run_immediate_review_handoff(
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
         summary_factory=ReviewQueueDrainSummary,
-        log_warning=lambda issue_ref, _detail, err: logger.warning(
-            "Immediate review clearance failed for %s: %s",
-            issue_ref,
-            err,
-        ),
+        logger=logger,
     )
 
 
@@ -3993,7 +3980,7 @@ def _handle_non_review_execution_outcome(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[str, ResolutionEvaluation | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
-    return _cycle_wiring.handle_non_review_execution_outcome(
+    return _execution_outcome_wiring.handle_non_review_execution_outcome(
         config=config,
         db=db,
         prepared=prepared,
@@ -4025,7 +4012,7 @@ def _final_phase_for_claimed_session(
     execution_outcome: SessionExecutionOutcome,
 ) -> str:
     """Determine the final persisted phase for a claimed session."""
-    return _session_completion_helpers.final_phase_for_claimed_session(
+    return _execution_outcome_wiring.final_phase_for_claimed_session(
         launch_context=launch_context,
         execution_outcome=execution_outcome,
     )
@@ -4040,7 +4027,7 @@ def _persist_claimed_session_completion(
     final_phase: str,
 ) -> None:
     """Persist the final session record for a claimed execution outcome."""
-    _session_completion_helpers.persist_claimed_session_completion(
+    _execution_outcome_wiring.persist_claimed_session_completion(
         db=db,
         session_id=session_id,
         issue_ref=issue_ref,
@@ -4061,7 +4048,7 @@ def _post_claimed_session_result_comment(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Post the session result comment when Codex produced structured output."""
-    _session_completion_helpers.post_claimed_session_result_comment(
+    _execution_outcome_wiring.post_claimed_session_result_comment(
         issue_ref=issue_ref,
         session_id=session_id,
         codex_result=codex_result,
@@ -4089,7 +4076,7 @@ def _maybe_escalate_claimed_session_failure(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Escalate terminal failed/timeout sessions once retry ceiling is reached."""
-    _session_completion_helpers.maybe_escalate_claimed_session_failure(
+    _execution_outcome_wiring.maybe_escalate_claimed_session_failure(
         config=config,
         db=db,
         issue_ref=issue_ref,
@@ -4122,7 +4109,7 @@ def _execute_claimed_session(
     gh_runner: Callable[..., str] | None,
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
-    return _cycle_wiring.execute_claimed_session(
+    return _execution_outcome_wiring.execute_claimed_session(
         config=config,
         db=db,
         prepared=prepared,
@@ -4159,7 +4146,7 @@ def _finalize_claimed_session(
     gh_runner: Callable[..., str] | None,
 ) -> CycleResult:
     """Persist final session state and return the cycle result."""
-    return _cycle_wiring.finalize_claimed_session(
+    return _execution_outcome_wiring.finalize_claimed_session(
         config=config,
         db=db,
         prepared=prepared,
