@@ -24,6 +24,7 @@ from startupai_controller.adapters.review_state import (
     clear_cycle_board_snapshot_cache,
 )
 from startupai_controller.adapters.local_process import LocalProcessAdapter
+from startupai_controller.adapters.system_service import SystemServiceAdapter
 from startupai_controller.adapters.sqlite_store import (
     ConsumerDB,
     MetricEvent,
@@ -34,6 +35,7 @@ from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.service_control import ServiceControlPort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
@@ -113,6 +115,14 @@ def build_worktree_port(
         gh_runner=gh_runner,
         subprocess_runner=subprocess_runner,
     )
+
+
+def build_service_control_port(
+    *,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> ServiceControlPort:
+    """Build the local system-service adapter."""
+    return SystemServiceAdapter(subprocess_runner=subprocess_runner)
 
 
 def clear_github_runtime_caches() -> None:
