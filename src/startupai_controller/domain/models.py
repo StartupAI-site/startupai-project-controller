@@ -135,6 +135,13 @@ class RebalanceDecision:
     skipped: list[tuple[str, str]] = field(default_factory=list)
 
 
+@dataclass
+class DispatchResult:
+    dispatched: list[str] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+    failed: list[tuple[str, str]] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class ReviewSnapshot:
     """Typed review-state projection for one PR."""
