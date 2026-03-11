@@ -166,6 +166,17 @@ from startupai_controller.application.automation.review_rescue import (
 from startupai_controller.application.automation.review_sync import (
     sync_review_state as _app_sync_review_state,
 )
+from startupai_controller.application.automation.review_wiring import (
+    has_copilot_review_signal as _wiring_has_copilot_review_signal,
+    review_scope_refs as _wiring_review_scope_refs,
+    configured_review_checks as _wiring_configured_review_checks,
+    build_review_snapshot as _wiring_build_review_snapshot,
+    sync_review_state as _wiring_sync_review_state,
+    codex_review_gate as _wiring_codex_review_gate,
+    review_rescue as _wiring_review_rescue,
+    review_rescue_all as _wiring_review_rescue_all,
+    automerge_review as _wiring_automerge_review,
+)
 from startupai_controller.application.automation.event_resolution import (
     resolve_issues_from_event as _app_resolve_issues_from_event,
     resolve_pr_to_issues as _app_resolve_pr_to_issues,
@@ -1282,15 +1293,15 @@ def _has_copilot_review_signal(
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Return True when Copilot has submitted approved/commented review."""
-    pr_port = pr_port or _default_pr_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    return pr_port.has_copilot_review_signal(
+    return _wiring_has_copilot_review_signal(
         pr_repo,
         pr_number,
+        pr_port=pr_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        gh_runner=gh_runner,
+        default_pr_port_fn=_default_pr_port,
     )
 
 
@@ -2417,68 +2428,30 @@ def sync_review_state(
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[int, str]:
-    """Sync board state based on PR/review/check events.
-
-    State machine:
-    1. pr_open -> no board change (waiting for review signal)
-    2. pr_ready_for_review -> In Progress -> Review
-    3. review_submitted (approved/commented) -> In Progress -> Review
-    4. changes_requested -> Review -> In Progress
-    5. checks_failed (required checks only) -> Review -> In Progress
-    6. pr_close_merged + checks_passed -> {Review, In Progress} -> Done
-
-    For checks events: read required checks from branch protection API.
-    If branch protection API fails: exit 4, no mutation.
-    """
-    if github_bundle is not None:
-        pr_port = pr_port or github_bundle.pull_requests
-        review_state_port = review_state_port or github_bundle.review_state
-        board_port = board_port or github_bundle.board_mutations
-    pr_port = pr_port or _default_pr_port(
+    """Sync board state based on PR/review/check events."""
+    return _wiring_sync_review_state(
+        event_kind,
+        issue_ref,
+        config,
         project_owner,
         project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    status_mutator = board_mutator
-    if status_mutator is None and board_info_resolver is not None:
-        status_mutator = _legacy_board_status_mutator(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-
-    return _app_sync_review_state(
-        event_kind=event_kind,
-        issue_ref=issue_ref,
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
         automation_config=automation_config,
         pr_state=pr_state,
         review_state=review_state,
         checks_state=checks_state,
         failed_checks=failed_checks,
         dry_run=dry_run,
+        github_bundle=github_bundle,
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
         board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
+        board_mutator=board_mutator,
         gh_runner=gh_runner,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        legacy_board_status_mutator_fn=_legacy_board_status_mutator,
     )
 
 
@@ -2497,20 +2470,16 @@ def _review_scope_refs(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Return linked issue refs currently in Review for a PR."""
-    linked = query_closing_issues(
-        *pr_repo.split("/", maxsplit=1),
+    return _wiring_review_scope_refs(
+        pr_repo,
         pr_number,
         config,
+        project_owner,
+        project_number,
         gh_runner=gh_runner,
+        query_closing_issues_fn=query_closing_issues,
+        query_issue_board_info_fn=_query_issue_board_info,
     )
-    review_refs: list[str] = []
-    for issue in linked:
-        info = _query_issue_board_info(
-            issue.ref, config, project_owner, project_number
-        )
-        if info.status == "Review":
-            review_refs.append(issue.ref)
-    return review_refs
 
 
 def codex_review_gate(
@@ -2525,55 +2494,21 @@ def codex_review_gate(
     apply_fail_routing: bool = True,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[int, str]:
-    """Evaluate strict codex review verdict contract for a PR.
-
-    Returns:
-      0 -> explicit codex pass verdict found.
-      2 -> missing verdict or fail verdict.
-      3/4 -> configuration/API errors.
-    """
-    linked = query_closing_issues(
-        *pr_repo.split("/", maxsplit=1),
-        pr_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    review_refs = _review_scope_refs(
+    """Evaluate strict codex review verdict contract for a PR."""
+    return _wiring_codex_review_gate(
         pr_repo,
         pr_number,
         config,
+        automation_config,
         project_owner,
         project_number,
-        gh_runner=gh_runner,
-    )
-    verdict = query_latest_codex_verdict(
-        pr_repo,
-        pr_number,
-        trusted_actors=automation_config.trusted_codex_actors,
-        gh_runner=gh_runner,
-    )
-
-    def _fail_router(**kwargs) -> None:
-        _apply_codex_fail_routing(
-            issue_ref=kwargs["issue_ref"],
-            route=kwargs["route"],
-            checklist=kwargs["checklist"],
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=kwargs["dry_run"],
-            gh_runner=gh_runner,
-        )
-
-    return _app_codex_review_gate(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        linked_refs=[issue.ref for issue in linked],
-        review_refs=review_refs,
-        verdict=verdict,
         dry_run=dry_run,
         apply_fail_routing=apply_fail_routing,
-        fail_router=_fail_router,
+        gh_runner=gh_runner,
+        query_closing_issues_fn=query_closing_issues,
+        query_issue_board_info_fn=_query_issue_board_info,
+        query_latest_codex_verdict_fn=query_latest_codex_verdict,
+        apply_codex_fail_routing_fn=_apply_codex_fail_routing,
     )
 
 
@@ -2590,8 +2525,7 @@ def _configured_review_checks(
     automation_config: BoardAutomationConfig,
 ) -> tuple[str, ...]:
     """Return repo-specific review checks that should be reconciled."""
-    from startupai_controller.domain.rescue_policy import configured_review_checks
-    return configured_review_checks(pr_repo, automation_config.required_checks_by_repo)
+    return _wiring_configured_review_checks(pr_repo, automation_config)
 
 
 def _build_review_snapshot(
@@ -2607,26 +2541,20 @@ def _build_review_snapshot(
     gh_runner: Callable[..., str] | None = None,
 ) -> ReviewSnapshot:
     """Project PR review state into one explicit snapshot."""
-    review_refs = tuple(
-        _review_scope_refs(
-            pr_repo,
-            pr_number,
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        )
-    )
-    pr_port = pr_port or _default_pr_port(
+    return _wiring_build_review_snapshot(
+        pr_repo,
+        pr_number,
+        config,
+        automation_config,
         project_owner,
         project_number,
-        config,
+        dry_run=dry_run,
+        pr_port=pr_port,
         gh_runner=gh_runner,
+        default_pr_port_fn=_default_pr_port,
+        query_closing_issues_fn=query_closing_issues,
+        query_issue_board_info_fn=_query_issue_board_info,
     )
-    return pr_port.review_snapshots(
-        {(pr_repo, pr_number): review_refs},
-        trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
-    )[(pr_repo, pr_number)]
 
 
 def review_rescue(
@@ -2645,61 +2573,25 @@ def review_rescue(
     board_port: _BoardMutationPort | None = None,
 ) -> ReviewRescueResult:
     """Reconcile one PR in Review back toward self-healing merge flow."""
-    pr_port = pr_port or _default_pr_port(
-        project_owner,
-        project_number,
+    return _wiring_review_rescue(
+        pr_repo,
+        pr_number,
         config,
-        gh_runner,
-    )
-    review_state_port = review_state_port or _default_review_state_port(
+        automation_config,
         project_owner,
         project_number,
-        config=config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner,
-    )
-    snapshot = snapshot or _build_review_snapshot(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        config=config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
         dry_run=dry_run,
-        pr_port=pr_port,
-        gh_runner=gh_runner,
-    )
-
-    def _automerge_runner(**kwargs) -> tuple[int, str]:
-        return automerge_review(
-            pr_repo=kwargs["pr_repo"],
-            pr_number=kwargs["pr_number"],
-            config=config,
-            automation_config=automation_config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=kwargs["dry_run"],
-            snapshot=kwargs["snapshot"],
-            gh_runner=gh_runner,
-            pr_port=kwargs["pr_port"],
-            review_state_port=kwargs["review_state_port"],
-        )
-
-    return _app_review_rescue(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
         snapshot=snapshot,
-        automation_config=automation_config,
-        dry_run=dry_run,
+        gh_runner=gh_runner,
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        automerge_runner=_automerge_runner,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        query_closing_issues_fn=query_closing_issues,
+        query_issue_board_info_fn=_query_issue_board_info,
+        automerge_review_fn=automerge_review,
     )
 
 def review_rescue_all(
@@ -2715,43 +2607,20 @@ def review_rescue_all(
     board_port: _BoardMutationPort | None = None,
 ) -> ReviewRescueSweep:
     """Run review rescue across all governed repos."""
-    pr_port = pr_port or _default_pr_port(project_owner, project_number, config, gh_runner)
-    review_state_port = review_state_port or _default_review_state_port(
+    return _wiring_review_rescue_all(
+        config,
+        automation_config,
         project_owner,
         project_number,
-        config,
-        gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner,
-    )
-
-    def _review_rescue_runner(**kwargs) -> ReviewRescueResult:
-        return review_rescue(
-            pr_repo=kwargs["pr_repo"],
-            pr_number=kwargs["pr_number"],
-            config=config,
-            automation_config=automation_config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=kwargs["dry_run"],
-            gh_runner=gh_runner,
-            pr_port=kwargs["pr_port"],
-            review_state_port=kwargs["review_state_port"],
-            board_port=kwargs["board_port"],
-        )
-
-    return _app_review_rescue_all(
-        config=config,
-        automation_config=automation_config,
         dry_run=dry_run,
+        gh_runner=gh_runner,
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        review_rescue_runner=_review_rescue_runner,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        review_rescue_fn=review_rescue,
     )
 
 
@@ -2777,38 +2646,23 @@ def automerge_review(
     review_state_port: _ReviewStatePort | None = None,
 ) -> tuple[int, str]:
     """Auto-merge PR when codex gate + required checks pass."""
-    pr_port = pr_port or _default_pr_port(project_owner, project_number, config, gh_runner)
-    review_state_port = review_state_port or _default_review_state_port(
+    return _wiring_automerge_review(
+        pr_repo,
+        pr_number,
+        config,
+        automation_config,
         project_owner,
         project_number,
-        config,
-        gh_runner,
-    )
-
-    def _codex_gate_evaluator(**kwargs) -> tuple[int, str]:
-        return codex_review_gate(
-            pr_repo=kwargs["pr_repo"],
-            pr_number=kwargs["pr_number"],
-            config=config,
-            automation_config=automation_config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=kwargs["dry_run"],
-            apply_fail_routing=True,
-            gh_runner=gh_runner,
-        )
-
-    return _app_automerge_review(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        automation_config=automation_config,
         dry_run=dry_run,
         update_branch=update_branch,
         delete_branch=delete_branch,
         snapshot=snapshot,
+        gh_runner=gh_runner,
         pr_port=pr_port,
         review_state_port=review_state_port,
-        codex_gate_evaluator=_codex_gate_evaluator,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
+        codex_review_gate_fn=codex_review_gate,
     )
 
 
