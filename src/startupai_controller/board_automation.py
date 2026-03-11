@@ -117,6 +117,7 @@ from startupai_controller.domain.models import (
     PrGateStatus,
     ProjectItemSnapshot as _ProjectItemSnapshot,
     PromotionResult,
+    RebalanceDecision,
     ReviewRescueResult,
     ReviewRescueSweep,
     ReviewSnapshot,
@@ -133,6 +134,9 @@ from startupai_controller.application.automation.ready_claim import (
 )
 from startupai_controller.application.automation.codex_gate import (
     codex_review_gate as _app_codex_review_gate,
+)
+from startupai_controller.application.automation.rebalance import (
+    rebalance_wip as _app_rebalance_wip,
 )
 from startupai_controller.application.automation.review_rescue import (
     automerge_review as _app_automerge_review,
@@ -3209,27 +3213,6 @@ def dispatch_agent(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class RebalanceDecision:
-    kept: list[str] = field(default_factory=list)
-    moved_ready: list[str] = field(default_factory=list)
-    moved_blocked: list[str] = field(default_factory=list)
-    marked_stale: list[str] = field(default_factory=list)
-    skipped: list[tuple[str, str]] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class _WipCandidate:
-    ref: str
-    owner: str
-    repo: str
-    number: int
-    lane: str
-    executor: str
-    activity_at: datetime
-    has_open_pr: bool
-
-
 def _load_rebalance_in_progress_items(
     *,
     config: CriticalPathConfig,
@@ -3286,338 +3269,6 @@ def _ensure_rebalance_board_port(
     )
 
 
-def _handle_dependency_blocked_rebalance_item(
-    ref: str,
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    dry_run: bool,
-    decision: RebalanceDecision,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> _BoardMutationPort | None:
-    """Route a dependency-blocked WIP item to Blocked with claude handoff."""
-    preds = ",".join(sorted(direct_predecessors(config, ref)))
-    reason = f"dependency-unmet:{preds}"
-    if not dry_run:
-        _set_blocked_with_reason(
-            ref,
-            reason,
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        _set_handoff_target(
-            ref,
-            "claude",
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            gh_runner=gh_runner,
-        )
-    decision.moved_blocked.append(ref)
-    return board_port
-
-
-def _handle_stale_rebalance_item(
-    ref: str,
-    *,
-    owner: str,
-    repo: str,
-    number: int,
-    now: datetime,
-    activity_at: datetime | None,
-    confirm_delay: timedelta,
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    dry_run: bool,
-    decision: RebalanceDecision,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[bool, _BoardMutationPort | None]:
-    """Mark a stale item or demote it back to Ready after confirmation."""
-    stale_prefix = f"<!-- {MARKER_PREFIX}:stale-candidate:{ref}"
-    stale_ts = _query_latest_marker_timestamp(
-        owner,
-        repo,
-        number,
-        stale_prefix,
-        gh_runner=gh_runner,
-    )
-    if (
-        stale_ts is None
-        or (activity_at is not None and activity_at > stale_ts)
-        or (now - stale_ts) < confirm_delay
-    ):
-        decision.marked_stale.append(ref)
-        if not dry_run and stale_ts is None:
-            stale_marker = (
-                f"<!-- {MARKER_PREFIX}:stale-candidate:{ref}:"
-                f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')} -->"
-            )
-            if not _comment_exists(owner, repo, number, stale_marker, gh_runner=gh_runner):
-                board_port = _ensure_rebalance_board_port(
-                    board_port,
-                    project_owner=project_owner,
-                    project_number=project_number,
-                    config=config,
-                    gh_runner=gh_runner,
-                )
-                board_port.post_issue_comment(
-                    f"{owner}/{repo}",
-                    number,
-                    (
-                        f"{stale_marker}\n"
-                        "Stale candidate detected; will demote on next cycle if still inactive."
-                    ),
-                )
-        return True, board_port
-
-    changed, _old = _transition_issue_status(
-        ref,
-        {"In Progress"},
-        "Ready",
-        config,
-        project_owner,
-        project_number,
-        dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
-    if changed and not dry_run:
-        demote_marker = _marker_for("stale-demote", ref)
-        if not _comment_exists(owner, repo, number, demote_marker, gh_runner=gh_runner):
-            board_port = _ensure_rebalance_board_port(
-                board_port,
-                project_owner=project_owner,
-                project_number=project_number,
-                config=config,
-                gh_runner=gh_runner,
-            )
-            board_port.post_issue_comment(
-                f"{owner}/{repo}",
-                number,
-                (
-                    f"{demote_marker}\n"
-                    "Moved back to `Ready` after consecutive stale cycles "
-                    "with no PR and no fresh activity."
-                ),
-            )
-    decision.moved_ready.append(ref)
-    return True, board_port
-
-
-def _evaluate_rebalance_snapshot(
-    snapshot: IssueSnapshot,
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    this_repo_prefix: str | None,
-    all_prefixes: bool,
-    freshness_cutoff: datetime,
-    confirm_delay: timedelta,
-    now: datetime,
-    dry_run: bool,
-    decision: RebalanceDecision,
-    use_ports: bool,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    status_resolver: Callable[..., str] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[_WipCandidate | None, _BoardMutationPort | None]:
-    """Evaluate one in-progress item for dependency, staleness, and lane placement."""
-    if use_ports:
-        ref = snapshot.issue_ref
-    else:
-        ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
-        if ref is None:
-            return None, board_port
-    parsed = parse_issue_ref(ref)
-    if not all_prefixes and this_repo_prefix and parsed.prefix != this_repo_prefix:
-        return None, board_port
-
-    owner, repo, number = _resolve_issue_coordinates(ref, config)
-    executor = snapshot.executor.strip().lower()
-    if executor not in VALID_EXECUTORS:
-        decision.skipped.append((ref, "invalid-executor"))
-        return None, board_port
-
-    if in_any_critical_path(config, ref):
-        code, _msg = evaluate_ready_promotion(
-            issue_ref=ref,
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            status_resolver=status_resolver,
-            require_in_graph=True,
-        )
-        if code != 0:
-            board_port = _handle_dependency_blocked_rebalance_item(
-                ref,
-                config=config,
-                project_owner=project_owner,
-                project_number=project_number,
-                dry_run=dry_run,
-                decision=decision,
-                review_state_port=review_state_port,
-                board_port=board_port,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            return None, board_port
-
-    pr_field = _query_project_item_field(
-        ref,
-        "PR",
-        config,
-        project_owner,
-        project_number,
-        gh_runner=gh_runner,
-    )
-    has_open_pr = False
-    parsed_pr = _parse_pr_url(pr_field)
-    if parsed_pr is not None:
-        pr_owner, pr_repo, pr_number = parsed_pr
-        has_open_pr = (
-            _query_open_pr_updated_at(pr_owner, pr_repo, pr_number, gh_runner=gh_runner)
-            is not None
-        )
-    activity_at = _query_latest_wip_activity_timestamp(
-        ref,
-        owner,
-        repo,
-        number,
-        pr_field,
-        gh_runner=gh_runner,
-    )
-
-    is_fresh = activity_at is not None and activity_at >= freshness_cutoff
-    if not has_open_pr and not is_fresh:
-        handled, board_port = _handle_stale_rebalance_item(
-            ref,
-            owner=owner,
-            repo=repo,
-            number=number,
-            now=now,
-            activity_at=activity_at,
-            confirm_delay=confirm_delay,
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            dry_run=dry_run,
-            decision=decision,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        if handled:
-            return None, board_port
-
-    return (
-        _WipCandidate(
-            ref=ref,
-            owner=owner,
-            repo=repo,
-            number=number,
-            lane=parsed.prefix,
-            executor=executor,
-            activity_at=activity_at or datetime.min.replace(tzinfo=timezone.utc),
-            has_open_pr=has_open_pr,
-        ),
-        board_port,
-    )
-
-
-def _apply_rebalance_lane_overflow(
-    candidates: list[_WipCandidate],
-    *,
-    executor: str,
-    lane: str,
-    automation_config: BoardAutomationConfig,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    dry_run: bool,
-    decision: RebalanceDecision,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> _BoardMutationPort | None:
-    """Keep the freshest lane items and demote overflow back to Ready."""
-    limit = _wip_limit_for_lane(automation_config, executor, lane, fallback=3)
-    ranked = sorted(
-        candidates,
-        key=lambda item: (
-            0 if item.has_open_pr else 1,
-            -int(item.activity_at.timestamp()),
-            _issue_sort_key(item.ref),
-        ),
-    )
-    keep = ranked[:limit]
-    overflow = ranked[limit:]
-    decision.kept.extend(item.ref for item in keep)
-    for item in overflow:
-        changed, _old = _transition_issue_status(
-            item.ref,
-            {"In Progress"},
-            "Ready",
-            config,
-            project_owner,
-            project_number,
-            dry_run=dry_run,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        if changed and not dry_run:
-            marker = _marker_for("wip-rebalance", item.ref)
-            if not _comment_exists(
-                item.owner, item.repo, item.number, marker, gh_runner=gh_runner
-            ):
-                board_port = _ensure_rebalance_board_port(
-                    board_port,
-                    project_owner=project_owner,
-                    project_number=project_number,
-                    config=config,
-                    gh_runner=gh_runner,
-                )
-                board_port.post_issue_comment(
-                    f"{item.owner}/{item.repo}",
-                    item.number,
-                    f"{marker}\nMoved back to `Ready` by lane WIP rebalance (limit={limit}).",
-                )
-        decision.moved_ready.append(item.ref)
-    return board_port
-
-
 def rebalance_wip(
     config: CriticalPathConfig,
     automation_config: BoardAutomationConfig,
@@ -3636,13 +3287,6 @@ def rebalance_wip(
     gh_runner: Callable[..., str] | None = None,
 ) -> RebalanceDecision:
     """Rebalance In Progress lanes with stale demotion and dependency blocking."""
-    now = datetime.now(timezone.utc)
-    freshness_cutoff = now - timedelta(hours=automation_config.freshness_hours)
-    confirm_delay = timedelta(
-        minutes=cycle_minutes * max(1, automation_config.stale_confirmation_cycles - 1)
-    )
-    decision = RebalanceDecision()
-
     use_ports, review_state_port, board_port, in_progress = (
         _load_rebalance_in_progress_items(
             config=config,
@@ -3655,53 +3299,42 @@ def rebalance_wip(
             gh_runner=gh_runner,
         )
     )
-    lane_buckets: dict[tuple[str, str], list[_WipCandidate]] = {}
-
-    for snapshot in in_progress:
-        candidate, board_port = _evaluate_rebalance_snapshot(
-            snapshot,
-            config=config,
+    return _app_rebalance_wip(
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        in_progress_items=in_progress,
+        use_ports=use_ports,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        cycle_minutes=cycle_minutes,
+        dry_run=dry_run,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        status_resolver=status_resolver,
+        gh_runner=gh_runner,
+        is_graph_member=in_any_critical_path,
+        ready_promotion_evaluator=evaluate_ready_promotion,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        set_handoff_target=_set_handoff_target,
+        query_project_item_field=_query_project_item_field,
+        query_open_pr_updated_at=_query_open_pr_updated_at,
+        query_latest_wip_activity_timestamp=_query_latest_wip_activity_timestamp,
+        query_latest_marker_timestamp=_query_latest_marker_timestamp,
+        comment_exists=_comment_exists,
+        ensure_board_port=lambda current_board_port: _ensure_rebalance_board_port(
+            current_board_port,
             project_owner=project_owner,
             project_number=project_number,
-            this_repo_prefix=this_repo_prefix,
-            all_prefixes=all_prefixes,
-            freshness_cutoff=freshness_cutoff,
-            confirm_delay=confirm_delay,
-            now=now,
-            dry_run=dry_run,
-            decision=decision,
-            use_ports=use_ports,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            status_resolver=status_resolver,
-            gh_runner=gh_runner,
-        )
-        if candidate is not None:
-            lane_buckets.setdefault((candidate.executor, candidate.lane), []).append(
-                candidate
-            )
-
-    for (executor, lane), candidates in lane_buckets.items():
-        board_port = _apply_rebalance_lane_overflow(
-            candidates,
-            executor=executor,
-            lane=lane,
-            automation_config=automation_config,
             config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            dry_run=dry_run,
-            decision=decision,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
             gh_runner=gh_runner,
-        )
-
-    return decision
+        ),
+        transition_issue_status=_transition_issue_status,
+        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+    )
 
 
 # ---------------------------------------------------------------------------

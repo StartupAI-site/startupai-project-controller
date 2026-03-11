@@ -126,6 +126,15 @@ class ExecutionPolicyDecision:
     copilot_unassigned: list[str] = field(default_factory=list)
 
 
+@dataclass
+class RebalanceDecision:
+    kept: list[str] = field(default_factory=list)
+    moved_ready: list[str] = field(default_factory=list)
+    moved_blocked: list[str] = field(default_factory=list)
+    marked_stale: list[str] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class ReviewSnapshot:
     """Typed review-state projection for one PR."""
