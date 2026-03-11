@@ -59,6 +59,19 @@ from startupai_controller.consumer_config import (
     DEFAULT_SCHEMA_PATH,
     DEFAULT_WORKFLOW_STATE_PATH,
 )
+from startupai_controller.consumer_launch_helpers import (
+    resolve_launch_candidate_metadata as _resolve_launch_candidate_metadata_helper,
+    resolve_launch_issue_context as _resolve_launch_issue_context_helper,
+    resolve_launch_runtime as _resolve_launch_runtime_helper,
+    run_launch_workspace_hooks as _run_launch_workspace_hooks_helper,
+    setup_launch_worktree as _setup_launch_worktree_helper,
+)
+from startupai_controller.consumer_review_handoff_helpers import (
+    post_claimed_session_verdict_marker as _post_claimed_session_verdict_marker_helper,
+    queue_claimed_session_for_review as _queue_claimed_session_for_review_helper,
+    run_immediate_review_handoff as _run_immediate_review_handoff_helper,
+    transition_claimed_session_to_review as _transition_claimed_session_to_review_helper,
+)
 from startupai_controller.control_plane_runtime import (
     CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
     CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE,
@@ -4846,98 +4859,26 @@ def _setup_launch_worktree(
     Returns (worktree_path, branch_name, reconcile_state, reconcile_error).
     Raises WorktreePrepareError on blocking failure.
     """
-    try:
-        worktree_path, branch_name = _prepare_worktree(
-            issue_ref,
-            title,
-            config,
-            db,
-            branch_name_override=repair_branch_name,
-            session_store=session_store,
-            worktree_port=worktree_port,
-            subprocess_runner=subprocess_runner,
-        )
-    except WorktreePrepareError as err:
-        _record_metric(
-            db,
-            config,
-            "worktree_blocked",
-            issue_ref=issue_ref,
-            payload={"reason": err.reason_code, "detail": err.detail},
-        )
-        blocked_reason = (
-            err.reason_code
-            if err.reason_code == "worktree_in_use"
-            else f"workspace_prepare:{err.detail}"
-        )
-        _block_prelaunch_issue(
-            issue_ref,
-            blocked_reason,
-            config=config,
-            cp_config=cp_config,
-            db=db,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        raise
-    except RuntimeError as err:
-        _record_metric(
-            db,
-            config,
-            "worktree_blocked",
-            issue_ref=issue_ref,
-            payload={"reason": "workspace_error", "detail": str(err)},
-        )
-        blocked_reason = f"workspace_prepare:{err}"
-        _block_prelaunch_issue(
-            issue_ref,
-            blocked_reason,
-            config=config,
-            cp_config=cp_config,
-            db=db,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        raise WorktreePrepareError("workspace_error", str(err)) from err
-
-    branch_reconcile_state: str | None = None
-    branch_reconcile_error: str | None = None
-    if session_kind == "repair":
-        reconcile_outcome = _reconcile_repair_branch(
-            worktree_path,
-            branch_name,
-            worktree_port=worktree_port,
-            subprocess_runner=subprocess_runner,
-        )
-        branch_reconcile_state = reconcile_outcome.state
-        branch_reconcile_error = reconcile_outcome.error
-        if branch_reconcile_state == "reconcile_setup_failed":
-            blocked_reason = (
-                "repair-branch-reconcile:"
-                f"{branch_reconcile_error or 'unknown-error'}"
-            )
-            _block_prelaunch_issue(
-                issue_ref,
-                blocked_reason,
-                config=config,
-                cp_config=cp_config,
-                db=db,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_metric(
-                db,
-                config,
-                "worker_start_failed",
-                issue_ref=issue_ref,
-                payload={"reason": "repair_reconcile_error", "detail": blocked_reason},
-            )
-            raise WorktreePrepareError("repair_reconcile_error", blocked_reason)
-
-    return worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error
+    return _setup_launch_worktree_helper(
+        issue_ref,
+        title,
+        session_kind,
+        repair_branch_name,
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        prepare_worktree=_prepare_worktree,
+        record_metric=_record_metric,
+        block_prelaunch_issue=_block_prelaunch_issue,
+        reconcile_repair_branch=_reconcile_repair_branch,
+        worktree_error_cls=WorktreePrepareError,
+        session_store=session_store,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
 
 
 def _resolve_launch_runtime(
@@ -4951,35 +4892,13 @@ def _resolve_launch_runtime(
 
     Returns (workflow_definition, effective_consumer_config).
     """
-    workflow_definition = load_worktree_workflow(
+    return _resolve_launch_runtime_helper(
         candidate_prefix,
-        Path(worktree_path),
-        filename=config.workflow_filename,
+        worktree_path,
+        config=config,
+        prepared=prepared,
+        load_worktree_workflow=load_worktree_workflow,
     )
-
-    main_workflow = prepared.main_workflows.get(candidate_prefix)
-    effective_max_retries = (
-        main_workflow.runtime.max_retries
-        if main_workflow is not None and main_workflow.runtime.max_retries is not None
-        else config.max_retries
-    )
-    effective_validation_cmd = (
-        workflow_definition.runtime.validation_cmd
-        if workflow_definition.runtime.validation_cmd is not None
-        else config.validation_cmd
-    )
-    effective_timeout_seconds = (
-        workflow_definition.runtime.codex_timeout_seconds
-        if workflow_definition.runtime.codex_timeout_seconds is not None
-        else config.codex_timeout_seconds
-    )
-    effective_consumer_config = replace(
-        config,
-        validation_cmd=effective_validation_cmd,
-        codex_timeout_seconds=effective_timeout_seconds,
-        max_retries=effective_max_retries,
-    )
-    return workflow_definition, effective_consumer_config
 
 
 def _resolve_launch_candidate_metadata(
@@ -5001,35 +4920,18 @@ def _resolve_launch_candidate_metadata(
     str | None,
 ]:
     """Resolve launch candidate identity and repair-session metadata."""
-    candidate_prefix = parse_issue_ref(issue_ref).prefix
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, cp_config)
-    snapshot = _snapshot_for_issue(board_snapshot, issue_ref, cp_config)
-    session_kind = "new_work"
-    repair_pr_url: str | None = None
-    repair_branch_name: str | None = None
-    if auto_config is not None:
-        classification, pr_match, _reason = _classify_open_pr_candidates(
-            issue_ref,
-            owner,
-            repo,
-            number,
-            auto_config,
-            pr_port=pr_port,
-            gh_runner=gh_runner,
-        )
-        session_kind = _launch_session_kind(classification, pr_match)
-        if session_kind == "repair" and pr_match is not None:
-            repair_pr_url = pr_match.url
-            repair_branch_name = pr_match.branch_name
-    return (
-        candidate_prefix,
-        owner,
-        repo,
-        number,
-        snapshot,
-        session_kind,
-        repair_pr_url,
-        repair_branch_name,
+    return _resolve_launch_candidate_metadata_helper(
+        issue_ref,
+        cp_config=cp_config,
+        auto_config=auto_config,
+        board_snapshot=board_snapshot,
+        pr_port=pr_port,
+        gh_runner=gh_runner,
+        parse_issue_ref=parse_issue_ref,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        snapshot_for_issue=_snapshot_for_issue,
+        classify_open_pr_candidates=_classify_open_pr_candidates,
+        launch_session_kind=_launch_session_kind,
     )
 
 
@@ -5046,7 +4948,7 @@ def _resolve_launch_issue_context(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[IssueContext, str]:
     """Hydrate launch issue context and compute the launch title."""
-    context = _hydrate_issue_context(
+    return _resolve_launch_issue_context_helper(
         issue_ref,
         owner=owner,
         repo=repo,
@@ -5056,12 +4958,8 @@ def _resolve_launch_issue_context(
         db=db,
         issue_context_port=issue_context_port,
         gh_runner=gh_runner,
+        hydrate_issue_context=_hydrate_issue_context,
     )
-    title = str(
-        context.get("title")
-        or (snapshot.title if snapshot is not None else f"issue-{number}")
-    )
-    return context, title
 
 
 def _run_launch_workspace_hooks(
@@ -5074,21 +4972,14 @@ def _run_launch_workspace_hooks(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
 ) -> None:
     """Run launch workspace hooks around the prepared worktree."""
-    _run_workspace_hooks(
-        workflow_definition.runtime.workspace_hooks.get("after_create", ()),
+    _run_launch_workspace_hooks_helper(
+        workflow_definition,
         worktree_path=worktree_path,
         issue_ref=issue_ref,
         branch_name=branch_name,
         worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
-    )
-    _run_workspace_hooks(
-        workflow_definition.runtime.workspace_hooks.get("before_run", ()),
-        worktree_path=worktree_path,
-        issue_ref=issue_ref,
-        branch_name=branch_name,
-        worktree_port=worktree_port,
-        subprocess_runner=subprocess_runner,
+        run_workspace_hooks=_run_workspace_hooks,
     )
 
 
@@ -6009,27 +5900,21 @@ def _transition_claimed_session_to_review(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Move one claimed issue into Review or queue the transition on failure."""
-    try:
-        _transition_issue_to_review(
-            issue_ref,
-            critical_path_config,
-            config.project_owner,
-            config.project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        _record_successful_github_mutation(db)
-    except (GhQueryError, Exception) as err:
-        logger.error("Review transition failed: %s", err)
-        _mark_degraded(db, f"review-transition:{err}")
-        _queue_status_transition(
-            db,
-            issue_ref,
-            to_status="Review",
-            from_statuses={"In Progress"},
-        )
-        db.update_session(session_id, phase="review")
+    _transition_claimed_session_to_review_helper(
+        db=db,
+        issue_ref=issue_ref,
+        session_id=session_id,
+        config=config,
+        critical_path_config=critical_path_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        transition_issue_to_review=_transition_issue_to_review,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        mark_degraded=_mark_degraded,
+        queue_status_transition=_queue_status_transition,
+        log_error=lambda err: logger.error("Review transition failed: %s", err),
+    )
 
 
 def _post_claimed_session_verdict_marker(
@@ -6040,17 +5925,17 @@ def _post_claimed_session_verdict_marker(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Post the codex verdict marker for a newly handed-off review PR."""
-    try:
-        _post_pr_codex_verdict(
-            pr_url,
-            session_id,
-            gh_runner=gh_runner,
-        )
-        _record_successful_github_mutation(db)
-    except (GhQueryError, Exception) as err:
-        logger.error("PR codex verdict comment failed: %s", err)
-        _mark_degraded(db, f"verdict-marker:{err}")
-        _queue_verdict_marker(db, pr_url, session_id)
+    _post_claimed_session_verdict_marker_helper(
+        db=db,
+        pr_url=pr_url,
+        session_id=session_id,
+        gh_runner=gh_runner,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        mark_degraded=_mark_degraded,
+        queue_verdict_marker=_queue_verdict_marker,
+        log_error=lambda err: logger.error("PR codex verdict comment failed: %s", err),
+    )
 
 
 def _queue_claimed_session_for_review(
@@ -6061,11 +5946,12 @@ def _queue_claimed_session_for_review(
     session_id: str,
 ) -> ReviewQueueEntry | None:
     """Queue one claimed session for immediate review handling."""
-    return _queue_review_item(
-        store,
-        issue_ref,
-        pr_url,
+    return _queue_claimed_session_for_review_helper(
+        store=store,
+        issue_ref=issue_ref,
+        pr_url=pr_url,
         session_id=session_id,
+        queue_review_item=_queue_review_item,
     )
 
 
@@ -6080,71 +5966,28 @@ def _run_immediate_review_handoff(
     db: ConsumerDB,
 ) -> ReviewQueueDrainSummary:
     """Run immediate rescue for the just-opened review PR."""
-    try:
-        review_memo = CycleGitHubMemo()
-        handoff_pr_port = build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=critical_path_config,
-            github_memo=review_memo,
-            gh_runner=gh_runner,
-        ).pull_requests
-        queue_entries = [
-            entry
-            for entry in store.list_review_queue_items()
-            if entry.pr_repo == queue_entry.pr_repo
-            and entry.pr_number == queue_entry.pr_number
-        ]
-        review_snapshots = _build_review_snapshots_for_queue_entries(
-            queue_entries=queue_entries,
-            review_refs={entry.issue_ref for entry in queue_entries},
-            pr_port=handoff_pr_port,
-            trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
-        )
-        snapshot = review_snapshots.get((queue_entry.pr_repo, queue_entry.pr_number))
-        result = review_rescue(
-            pr_repo=queue_entry.pr_repo,
-            pr_number=queue_entry.pr_number,
-            config=critical_path_config,
-            automation_config=automation_config,
-            project_owner=config.project_owner,
-            project_number=config.project_number,
-            dry_run=False,
-            snapshot=snapshot,
-            gh_runner=gh_runner,
-        )
-        state_digest = handoff_pr_port.review_state_digests(
-            [(queue_entry.pr_repo, queue_entry.pr_number)]
-        ).get((queue_entry.pr_repo, queue_entry.pr_number))
-        for entry in queue_entries or [queue_entry]:
-            _apply_review_queue_result(
-                store,
-                entry,
-                result,
-                last_state_digest=state_digest,
-            )
-        pr_ref = f"{queue_entry.pr_repo}#{queue_entry.pr_number}"
-        return ReviewQueueDrainSummary(
-            queued_count=len(queue_entries) or 1,
-            due_count=len(queue_entries) or 1,
-            rerun=(
-                (f"{pr_ref}:{','.join(result.rerun_checks)}",)
-                if result.rerun_checks
-                else ()
-            ),
-            auto_merge_enabled=((pr_ref,) if result.auto_merge_enabled else ()),
-            requeued=result.requeued_refs,
-            blocked=((f"{pr_ref}:{result.blocked_reason}",) if result.blocked_reason else ()),
-            skipped=((f"{pr_ref}:{result.skipped_reason}",) if result.skipped_reason else ()),
-        )
-    except GhQueryError as err:
-        logger.warning(
+    return _run_immediate_review_handoff_helper(
+        config=config,
+        critical_path_config=critical_path_config,
+        automation_config=automation_config,
+        store=store,
+        queue_entry=queue_entry,
+        gh_runner=gh_runner,
+        db=db,
+        build_github_port_bundle=build_github_port_bundle,
+        github_memo_factory=CycleGitHubMemo,
+        build_review_snapshots_for_queue_entries=_build_review_snapshots_for_queue_entries,
+        review_rescue=review_rescue,
+        apply_review_queue_result=_apply_review_queue_result,
+        mark_degraded=_mark_degraded,
+        gh_reason_code=gh_reason_code,
+        summary_factory=ReviewQueueDrainSummary,
+        log_warning=lambda issue_ref, _detail, err: logger.warning(
             "Immediate review clearance failed for %s: %s",
-            queue_entry.issue_ref,
+            issue_ref,
             err,
-        )
-        _mark_degraded(db, f"review-queue:{gh_reason_code(err)}:{err}")
-        return ReviewQueueDrainSummary()
+        ),
+    )
 
 
 def _handle_non_review_execution_outcome(
