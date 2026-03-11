@@ -103,6 +103,9 @@ from startupai_controller.consumer_review_handoff_helpers import (
     transition_claimed_session_to_review as _transition_claimed_session_to_review_helper,
 )
 import startupai_controller.consumer_claim_helpers as _claim_helpers
+import startupai_controller.consumer_recovery_helpers as _recovery_helpers
+import startupai_controller.consumer_review_queue_wiring as _review_queue_wiring
+import startupai_controller.consumer_runtime_wiring as _runtime_wiring
 import startupai_controller.consumer_session_completion_helpers as _session_completion_helpers
 from startupai_controller.control_plane_runtime import (
     CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
@@ -176,7 +179,6 @@ from startupai_controller.application.consumer.execution import (
     handle_non_review_execution_outcome as _handle_non_review_execution_outcome_use_case,
 )
 from startupai_controller.application.consumer.recovery import (
-    RecoveryDeps,
     recover_interrupted_sessions as _recover_interrupted_sessions_use_case,
 )
 from startupai_controller.application.consumer.daemon import (
@@ -198,7 +200,6 @@ from startupai_controller.application.consumer.daemon import (
     submit_multi_worker_task as _submit_multi_worker_task_use_case,
 )
 from startupai_controller.application.consumer.status import (
-    CollectStatusPayloadDeps,
     collect_status_payload as _collect_status_payload_use_case,
 )
 from startupai_controller.consumer_workflow import (
@@ -2265,7 +2266,7 @@ def _prepare_review_queue_batch(
     dry_run: bool,
 ) -> tuple[PreparedReviewQueueBatch | None, ReviewQueueDrainSummary | None]:
     """Prepare the bounded review-queue workset for one drain cycle."""
-    return _review_queue_helpers.prepare_review_queue_batch(
+    return _review_queue_wiring.prepare_review_queue_batch(
         config=config,
         store=store,
         critical_path_config=critical_path_config,
@@ -2273,9 +2274,8 @@ def _prepare_review_queue_batch(
         pr_port=pr_port,
         now=now,
         dry_run=dry_run,
-        prepared_batch_factory=PreparedReviewQueueBatch,
-        summary_factory=ReviewQueueDrainSummary,
-        log_warning=lambda err: logger.warning("Review queue wakeup probe failed: %s", err),
+        deps=_build_review_queue_wiring_deps(),
+        review_queue_helpers=_review_queue_helpers,
     )
 
 
@@ -2290,7 +2290,7 @@ def _prepare_due_review_processing(
     gh_runner: Callable[..., str] | None,
 ) -> PreparedDueReviewProcessing:
     """Prepare the changed due-review groups and snapshots for rescue processing."""
-    return _review_queue_helpers.prepare_due_review_processing(
+    return _review_queue_wiring.prepare_due_review_processing(
         store=store,
         automation_config=automation_config,
         pr_port=pr_port,
@@ -2298,19 +2298,8 @@ def _prepare_due_review_processing(
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        post_pr_codex_verdict=_post_pr_codex_verdict,
-        prepared_due_processing_factory=PreparedDueReviewProcessing,
-        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
-            "Pre-backfill verdict failed for %s: %s",
-            issue_ref,
-            err,
-        ),
-        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
-            "Review verdict backfill failed for %s (%s): %s",
-            issue_ref,
-            session_id,
-            err,
-        ),
+        deps=_build_review_queue_wiring_deps(),
+        review_queue_helpers=_review_queue_helpers,
     )
 
 
@@ -2331,7 +2320,7 @@ def _process_due_review_group(
     gh_runner: Callable[..., str] | None,
 ) -> ReviewGroupProcessingOutcome:
     """Process one due PR group from the review queue."""
-    return _review_queue_helpers.process_due_review_group(
+    return _review_queue_wiring.process_due_review_group(
         config=config,
         store=store,
         critical_path_config=critical_path_config,
@@ -2345,9 +2334,8 @@ def _process_due_review_group(
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        review_group_outcome_factory=ReviewGroupProcessingOutcome,
-        review_rescue_fn=review_rescue,
-        escalate_to_claude=_escalate_to_claude,
+        deps=_build_review_queue_wiring_deps(),
+        review_queue_helpers=_review_queue_helpers,
     )
 
 
@@ -2358,6 +2346,36 @@ class ReviewRescueExecution:
     result: ReviewRescueResult
     partial_failure: bool = False
     error: str | None = None
+
+
+def _build_review_queue_wiring_deps() -> _review_queue_wiring.ReviewQueueWiringDeps:
+    """Build shell-facing review-queue wiring dependencies."""
+    return _review_queue_wiring.ReviewQueueWiringDeps(
+        prepared_batch_factory=PreparedReviewQueueBatch,
+        summary_factory=ReviewQueueDrainSummary,
+        prepared_due_processing_factory=PreparedDueReviewProcessing,
+        review_group_outcome_factory=ReviewGroupProcessingOutcome,
+        review_queue_processing_outcome_factory=ReviewQueueProcessingOutcome,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        review_rescue_fn=review_rescue,
+        escalate_to_claude=_escalate_to_claude,
+        gh_reason_code=gh_reason_code,
+        log_probe_warning=lambda err: logger.warning(
+            "Review queue wakeup probe failed: %s",
+            err,
+        ),
+        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
+            "Pre-backfill verdict failed for %s: %s",
+            issue_ref,
+            err,
+        ),
+        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
+            "Review verdict backfill failed for %s (%s): %s",
+            issue_ref,
+            session_id,
+            err,
+        ),
+    )
 
 
 def _run_review_rescue_for_group(
@@ -2412,7 +2430,7 @@ def _apply_review_queue_group_result(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[str, ...]:
     """Persist one review-group result and return escalated issue refs."""
-    return _review_queue_helpers.apply_review_queue_group_result(
+    return _review_queue_wiring.apply_review_queue_group_result(
         store=store,
         critical_path_config=critical_path_config,
         project_owner=project_owner,
@@ -2425,7 +2443,8 @@ def _apply_review_queue_group_result(
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        escalate_to_claude=_escalate_to_claude,
+        deps=_build_review_queue_wiring_deps(),
+        review_queue_helpers=_review_queue_helpers,
     )
 
 
@@ -2445,7 +2464,7 @@ def _summarize_review_group_outcome(
     gh_runner: Callable[..., str] | None,
 ) -> ReviewGroupProcessingOutcome:
     """Build the public outcome for one processed review group."""
-    return _review_queue_helpers.summarize_review_group_outcome(
+    return _review_queue_wiring.summarize_review_group_outcome(
         critical_path_config=critical_path_config,
         store=store,
         project_owner=project_owner,
@@ -2458,8 +2477,8 @@ def _summarize_review_group_outcome(
         escalated=escalated,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        escalate_to_claude=_escalate_to_claude,
-        review_group_outcome_factory=ReviewGroupProcessingOutcome,
+        deps=_build_review_queue_wiring_deps(),
+        review_queue_helpers=_review_queue_helpers,
     )
 
 
@@ -2477,7 +2496,7 @@ def _process_review_queue_due_groups(
     gh_runner: Callable[..., str] | None = None,
 ) -> ReviewQueueProcessingOutcome:
     """Process the due PR groups for a prepared review-queue batch."""
-    return _review_queue_helpers.process_review_queue_due_groups(
+    return _review_queue_wiring.process_review_queue_due_groups(
         config=config,
         store=store,
         critical_path_config=critical_path_config,
@@ -2488,24 +2507,8 @@ def _process_review_queue_due_groups(
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        post_pr_codex_verdict=_post_pr_codex_verdict,
-        review_rescue_fn=review_rescue,
-        escalate_to_claude=_escalate_to_claude,
-        prepared_due_processing_factory=PreparedDueReviewProcessing,
-        review_group_outcome_factory=ReviewGroupProcessingOutcome,
-        review_queue_processing_outcome_factory=ReviewQueueProcessingOutcome,
-        gh_reason_code=gh_reason_code,
-        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
-            "Pre-backfill verdict failed for %s: %s",
-            issue_ref,
-            err,
-        ),
-        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
-            "Review verdict backfill failed for %s (%s): %s",
-            issue_ref,
-            session_id,
-            err,
-        ),
+        deps=_build_review_queue_wiring_deps(),
+        review_queue_helpers=_review_queue_helpers,
     )
 
 
@@ -2978,30 +2981,9 @@ def _recover_interrupted_sessions(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[RecoveredLease]:
     """Recover leases left behind by a previous interrupted daemon process."""
-    recovered = db.recover_interrupted_leases()
-    if not recovered:
-        return []
-
-    try:
-        cp_config = load_config(config.critical_paths_path)
-    except ConfigError as err:
-        logger.error("Interrupted-session recovery skipped: %s", err)
-        return recovered
-    return _recover_interrupted_sessions_use_case(
+    return _recovery_helpers.recover_interrupted_sessions(
         config,
         db,
-        recovered=recovered,
-        cp_config=cp_config,
-        deps=RecoveryDeps(
-            gh_query_error_type=GhQueryError,
-            build_github_port_bundle=build_github_port_bundle,
-            load_automation_config=load_automation_config,
-            resolve_issue_coordinates=_resolve_issue_coordinates,
-            classify_open_pr_candidates=_classify_open_pr_candidates,
-            return_issue_to_ready=_return_issue_to_ready,
-            transition_issue_to_review=_transition_issue_to_review,
-            set_blocked_with_reason=_set_blocked_with_reason,
-        ),
         automation_config=automation_config,
         pr_port=pr_port,
         review_state_port=review_state_port,
@@ -3009,11 +2991,18 @@ def _recover_interrupted_sessions(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        log_error=lambda issue_ref, err: logger.error(
-            "Interrupted-session board recovery failed for %s: %s",
-            issue_ref,
-            err,
-        ),
+        load_config=load_config,
+        config_error_type=ConfigError,
+        logger=logger,
+        recovery_use_case=_recover_interrupted_sessions_use_case,
+        gh_query_error_type=GhQueryError,
+        build_github_port_bundle=build_github_port_bundle,
+        load_automation_config=load_automation_config,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        classify_open_pr_candidates=_classify_open_pr_candidates,
+        return_issue_to_ready=_return_issue_to_ready,
+        transition_issue_to_review=_transition_issue_to_review,
+        set_blocked_with_reason=_set_blocked_with_reason,
     )
 
 
@@ -4594,55 +4583,35 @@ def run_one_cycle(
 
     Returns a CycleResult describing what happened.
     """
-    try:
-        if skip_control_plane:
-            if prepared is None:
-                raise ValueError("prepared cycle context is required when skip_control_plane=True")
-        else:
-            prepared = _prepare_cycle(
-                config,
-                db,
-                dry_run=dry_run,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-    except ConfigError as err:
-        logger.error("Config error: %s", err)
-        return CycleResult(action="error", reason=f"config-error:{err}")
-    except WorkflowConfigError as err:
-        logger.error("Workflow config error: %s", err)
-        return CycleResult(action="error", reason=f"workflow-config:{err}")
-    except GhQueryError as err:
-        logger.error("Control-plane preflight failed: %s", err)
-        _mark_degraded(db, f"control-plane:{gh_reason_code(err)}:{err}")
-        return CycleResult(action="error", reason=f"control-plane:{err}")
-
-    assert prepared is not None
-    gh_port = build_gh_runner_port(gh_runner=gh_runner)
-    process_runner = build_process_runner_port(
-        gh_runner=gh_runner,
-        subprocess_runner=subprocess_runner,
-    )
-    return run_prepared_cycle(
+    return _runtime_wiring.run_one_cycle(
         config=config,
         db=db,
-        prepared=prepared,
-        deps=_prepared_cycle_deps(),
         dry_run=dry_run,
-        launch_context=launch_context,
         target_issue=target_issue,
+        prepared=prepared,
+        launch_context=launch_context,
         slot_id_override=slot_id_override,
-        gh_runner=gh_port,
-        process_runner=process_runner,
+        skip_control_plane=skip_control_plane,
+        gh_runner=gh_runner,
+        subprocess_runner=subprocess_runner,
         file_reader=file_reader,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
+        prepare_cycle=_prepare_cycle,
+        config_error_type=ConfigError,
+        workflow_config_error_type=WorkflowConfigError,
+        gh_query_error_type=GhQueryError,
+        mark_degraded=_mark_degraded,
+        gh_reason_code=gh_reason_code,
+        cycle_result_factory=CycleResult,
+        build_gh_runner_port=build_gh_runner_port,
+        build_process_runner_port=build_process_runner_port,
+        run_prepared_cycle=run_prepared_cycle,
+        prepared_cycle_deps=_prepared_cycle_deps(),
+        logger=logger,
     )
 
 
@@ -4918,36 +4887,35 @@ def _collect_status_payload(
     local_only: bool = False,
 ) -> dict[str, Any]:
     """Collect consumer status as a JSON-serializable payload."""
-    return _collect_status_payload_use_case(
+    return _runtime_wiring.collect_status_payload(
         config,
         local_only=local_only,
-        deps=CollectStatusPayloadDeps(
-            config_error_type=ConfigError,
-            load_automation_config=load_automation_config,
-            apply_automation_runtime=_apply_automation_runtime,
-            current_main_workflows=_current_main_workflows,
-            read_workflow_snapshot=read_workflow_snapshot,
-            open_consumer_db=open_consumer_db,
-            load_config=load_config,
-            list_project_items_by_status=_list_project_items_by_status,
-            parse_issue_ref=parse_issue_ref,
-            load_admission_summary=_load_admission_summary,
-            control_plane_health_summary=_control_plane_health_summary,
-            drain_requested=_drain_requested,
-            workflow_status_payload=workflow_status_payload,
-            session_retry_state=_session_retry_state,
-            parse_iso8601_timestamp=_parse_iso8601_timestamp,
-            control_keys={
-                "degraded": CONTROL_KEY_DEGRADED,
-                "degraded_reason": CONTROL_KEY_DEGRADED_REASON,
-                "claim_suppressed_until": CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL,
-                "claim_suppressed_reason": CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
-                "claim_suppressed_scope": CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE,
-                "last_rate_limit_at": CONTROL_KEY_LAST_RATE_LIMIT_AT,
-                "last_successful_board_sync_at": CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT,
-                "last_successful_github_mutation_at": CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT,
-            },
-        ),
+        collect_status_payload_use_case=_collect_status_payload_use_case,
+        config_error_type=ConfigError,
+        load_automation_config=load_automation_config,
+        apply_automation_runtime=_apply_automation_runtime,
+        current_main_workflows=_current_main_workflows,
+        read_workflow_snapshot=read_workflow_snapshot,
+        open_consumer_db=open_consumer_db,
+        load_config=load_config,
+        list_project_items_by_status=_list_project_items_by_status,
+        parse_issue_ref=parse_issue_ref,
+        load_admission_summary=_load_admission_summary,
+        control_plane_health_summary=_control_plane_health_summary,
+        drain_requested=_drain_requested,
+        workflow_status_payload=workflow_status_payload,
+        session_retry_state=_session_retry_state,
+        parse_iso8601_timestamp=_parse_iso8601_timestamp,
+        control_keys={
+            "degraded": CONTROL_KEY_DEGRADED,
+            "degraded_reason": CONTROL_KEY_DEGRADED_REASON,
+            "claim_suppressed_until": CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL,
+            "claim_suppressed_reason": CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
+            "claim_suppressed_scope": CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE,
+            "last_rate_limit_at": CONTROL_KEY_LAST_RATE_LIMIT_AT,
+            "last_successful_board_sync_at": CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT,
+            "last_successful_github_mutation_at": CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT,
+        },
     )
 
 
