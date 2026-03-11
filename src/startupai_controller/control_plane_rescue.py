@@ -5,9 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from startupai_controller import consumer_board_state_helpers as _board_state_helpers
+from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
+from startupai_controller.board_automation import review_rescue, _set_blocked_with_reason
 from startupai_controller.board_automation_config import BoardAutomationConfig
-from startupai_controller.board_automation import review_rescue
+from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.control_plane_runtime import (
     _clear_degraded,
     _record_successful_github_mutation,
@@ -139,33 +142,51 @@ def _replay_deferred_actions(
 ) -> tuple[int, ...]:
     """Replay queued control-plane actions after GitHub recovery."""
     consumer = _consumer_module()
-    replayed: list[int] = []
-    for action in db.list_deferred_actions():
-        try:
-            consumer._replay_deferred_action(
-                action=action,
-                config=config,
-                critical_path_config=critical_path_config,
-                pr_port=pr_port,
-                review_state_port=review_state_port,
-                board_port=board_port,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-        except GhQueryError:
-            raise
-        except Exception as error:
-            raise GhQueryError(
-                f"Deferred action {action.id} failed: {error}"
-            ) from error
-
-        db.delete_deferred_action(action.id)
-        _record_successful_github_mutation(db)
-        replayed.append(action.id)
-
-    if replayed:
-        _clear_degraded(db)
-    return tuple(replayed)
+    return _deferred_action_helpers.replay_deferred_actions(
+        db,
+        config,
+        critical_path_config,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        replay_deferred_action=lambda **kwargs: _deferred_action_helpers.replay_deferred_action(
+            **kwargs,
+            set_blocked_with_reason=_set_blocked_with_reason,
+            transition_issue_to_review=_board_state_helpers.transition_issue_to_review,
+            transition_issue_to_in_progress=lambda issue_ref, config, project_owner, project_number, **inner_kwargs: _board_state_helpers.transition_issue_to_in_progress(
+                issue_ref,
+                config,
+                project_owner,
+                project_number,
+                build_github_port_bundle=build_github_port_bundle,
+                from_statuses=inner_kwargs.get("from_statuses"),
+                review_state_port=inner_kwargs.get("review_state_port"),
+                board_port=inner_kwargs.get("board_port"),
+                gh_runner=inner_kwargs.get("gh_runner"),
+            ),
+            return_issue_to_ready=lambda issue_ref, config, project_owner, project_number, **inner_kwargs: _board_state_helpers.return_issue_to_ready(
+                issue_ref,
+                config,
+                project_owner,
+                project_number,
+                build_github_port_bundle=build_github_port_bundle,
+                from_statuses=inner_kwargs.get("from_statuses"),
+                review_state_port=inner_kwargs.get("review_state_port"),
+                board_port=inner_kwargs.get("board_port"),
+                gh_runner=inner_kwargs.get("gh_runner"),
+            ),
+            post_pr_codex_verdict=consumer._post_pr_codex_verdict,
+            resolve_issue_coordinates=_resolve_issue_coordinates,
+            runtime_comment_poster=consumer._runtime_comment_poster,
+            runtime_issue_closer=consumer._runtime_issue_closer,
+            runtime_failed_check_rerun=consumer._runtime_failed_check_rerun,
+            runtime_automerge_enabler=consumer._runtime_automerge_enabler,
+        ),
+        record_successful_github_mutation=_record_successful_github_mutation,
+        clear_degraded=_clear_degraded,
+    )

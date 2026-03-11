@@ -41,6 +41,7 @@ from startupai_controller.board_automation import (
     sync_review_state,
 )
 from startupai_controller import consumer_board_state_helpers as _board_state_helpers
+from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
@@ -3023,59 +3024,29 @@ def _replay_deferred_action(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Execute one deferred control-plane action."""
-    payload = action.payload
-    if action.action_type == "set_status":
-        _replay_deferred_status_action(
-            payload=payload,
-            config=config,
-            critical_path_config=critical_path_config,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        return
-    if action.action_type == "post_verdict_marker":
-        _replay_deferred_verdict_marker(
-            payload=payload,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-        )
-        return
-    if action.action_type == "post_issue_comment":
-        _replay_deferred_issue_comment(
-            payload=payload,
-            critical_path_config=critical_path_config,
-            board_port=board_port,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-        )
-        return
-    if action.action_type == "close_issue":
-        _replay_deferred_issue_close(
-            payload=payload,
-            critical_path_config=critical_path_config,
-            board_port=board_port,
-            gh_runner=gh_runner,
-        )
-        return
-    if action.action_type == "rerun_check":
-        _replay_deferred_check_rerun(
-            payload=payload,
-            pr_port=pr_port,
-            gh_runner=gh_runner,
-        )
-        return
-    if action.action_type == "enable_automerge":
-        _replay_deferred_automerge_enable(
-            payload=payload,
-            pr_port=pr_port,
-            gh_runner=gh_runner,
-        )
-        return
-    raise GhQueryError(f"Unsupported deferred action type: {action.action_type}")
+    _deferred_action_helpers.replay_deferred_action(
+        action=action,
+        config=config,
+        critical_path_config=critical_path_config,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        transition_issue_to_review=_transition_issue_to_review,
+        transition_issue_to_in_progress=_transition_issue_to_in_progress,
+        return_issue_to_ready=_return_issue_to_ready,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        runtime_comment_poster=_runtime_comment_poster,
+        runtime_issue_closer=_runtime_issue_closer,
+        runtime_failed_check_rerun=_runtime_failed_check_rerun,
+        runtime_automerge_enabler=_runtime_automerge_enabler,
+    )
 
 
 def _replay_deferred_status_action(
@@ -3090,60 +3061,20 @@ def _replay_deferred_status_action(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Replay a deferred issue status transition."""
-    issue_ref = str(payload["issue_ref"])
-    to_status = str(payload["to_status"])
-    from_statuses = {str(value) for value in payload.get("from_statuses", [])}
-    blocked_reason = payload.get("blocked_reason")
-    if to_status == "Blocked":
-        _set_blocked_with_reason(
-            issue_ref,
-            str(blocked_reason or "deferred-control-plane"),
-            critical_path_config,
-            config.project_owner,
-            config.project_number,
-            gh_runner=gh_runner,
-        )
-        return
-    if to_status == "Review":
-        _transition_issue_to_review(
-            issue_ref,
-            critical_path_config,
-            config.project_owner,
-            config.project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        return
-    if to_status == "In Progress":
-        _transition_issue_to_in_progress(
-            issue_ref,
-            critical_path_config,
-            config.project_owner,
-            config.project_number,
-            from_statuses=from_statuses,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        return
-    if to_status == "Ready":
-        _return_issue_to_ready(
-            issue_ref,
-            critical_path_config,
-            config.project_owner,
-            config.project_number,
-            from_statuses=from_statuses,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        return
-    raise GhQueryError(f"Unsupported deferred status target: {to_status}")
+    _deferred_action_helpers.replay_deferred_status_action(
+        payload=payload,
+        config=config,
+        critical_path_config=critical_path_config,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        transition_issue_to_review=_transition_issue_to_review,
+        transition_issue_to_in_progress=_transition_issue_to_in_progress,
+        return_issue_to_ready=_return_issue_to_ready,
+    )
 
 
 def _replay_deferred_verdict_marker(
@@ -3154,12 +3085,12 @@ def _replay_deferred_verdict_marker(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Replay a deferred PR verdict marker post."""
-    _post_pr_codex_verdict(
-        str(payload["pr_url"]),
-        str(payload["session_id"]),
+    _deferred_action_helpers.replay_deferred_verdict_marker(
+        payload=payload,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
     )
 
 
@@ -3172,14 +3103,15 @@ def _replay_deferred_issue_comment(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Replay a deferred issue comment post."""
-    issue_ref = str(payload["issue_ref"])
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
-    body = str(payload["body"])
-    if board_port is not None:
-        board_port.post_issue_comment(f"{owner}/{repo}", number, body)
-        return
-    poster = comment_poster or _runtime_comment_poster
-    poster(owner, repo, number, body, gh_runner=gh_runner)
+    _deferred_action_helpers.replay_deferred_issue_comment(
+        payload=payload,
+        critical_path_config=critical_path_config,
+        board_port=board_port,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        runtime_comment_poster=_runtime_comment_poster,
+    )
 
 
 def _replay_deferred_issue_close(
@@ -3190,12 +3122,14 @@ def _replay_deferred_issue_close(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Replay a deferred issue close."""
-    issue_ref = str(payload["issue_ref"])
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
-    if board_port is not None:
-        board_port.close_issue(f"{owner}/{repo}", number)
-        return
-    _runtime_issue_closer(owner, repo, number, gh_runner=gh_runner)
+    _deferred_action_helpers.replay_deferred_issue_close(
+        payload=payload,
+        critical_path_config=critical_path_config,
+        board_port=board_port,
+        gh_runner=gh_runner,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        runtime_issue_closer=_runtime_issue_closer,
+    )
 
 
 def _replay_deferred_check_rerun(
@@ -3205,16 +3139,12 @@ def _replay_deferred_check_rerun(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Replay a deferred failed-check rerun request."""
-    pr_repo = str(payload["pr_repo"])
-    check_name = str(payload.get("check_name") or "")
-    run_id = int(payload["run_id"])
-    if pr_port is not None:
-        if not pr_port.rerun_failed_check(pr_repo, check_name, run_id):
-            raise GhQueryError(
-                f"Failed rerunning check for {pr_repo} run {run_id}"
-            )
-        return
-    _runtime_failed_check_rerun(pr_repo, run_id, gh_runner=gh_runner)
+    _deferred_action_helpers.replay_deferred_check_rerun(
+        payload=payload,
+        pr_port=pr_port,
+        gh_runner=gh_runner,
+        runtime_failed_check_rerun=_runtime_failed_check_rerun,
+    )
 
 
 def _replay_deferred_automerge_enable(
@@ -3224,12 +3154,12 @@ def _replay_deferred_automerge_enable(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Replay a deferred auto-merge enablement."""
-    pr_repo = str(payload["pr_repo"])
-    pr_number = int(payload["pr_number"])
-    if pr_port is not None:
-        pr_port.enable_automerge(pr_repo, pr_number)
-        return
-    _runtime_automerge_enabler(pr_repo, pr_number, gh_runner=gh_runner)
+    _deferred_action_helpers.replay_deferred_automerge_enable(
+        payload=payload,
+        pr_port=pr_port,
+        gh_runner=gh_runner,
+        runtime_automerge_enabler=_runtime_automerge_enabler,
+    )
 
 
 # ---------------------------------------------------------------------------
