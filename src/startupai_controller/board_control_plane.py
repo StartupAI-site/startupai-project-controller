@@ -79,11 +79,6 @@ def _consumer_config_from_args(args: argparse.Namespace) -> ConsumerConfig:
     )
 
 
-def _consumer_service_active() -> bool:
-    """Return True when the user-level consumer service is active."""
-    return build_service_control_port().is_active("startupai-consumer.service")
-
-
 def _review_scope_refs(
     config: ConsumerConfig,
     critical_path_config,
@@ -144,7 +139,7 @@ def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
                 mark_degraded=_mark_degraded,
                 control_plane_health_summary=_control_plane_health_summary,
                 runtime_gh_reason_code=runtime_gh_reason_code,
-                consumer_service_active=_consumer_service_active,
+                service_control_port=build_service_control_port(),
                 gh_query_error_type=GhQueryError,
             ),
         )

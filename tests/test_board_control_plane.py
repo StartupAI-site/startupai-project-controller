@@ -205,7 +205,11 @@ def test_tick_skips_review_rescue_when_no_review_items(
     )
     monkeypatch.setattr(control_plane, "_record_successful_board_sync", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(control_plane, "_clear_degraded", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(control_plane, "_consumer_service_active", lambda: True)
+    monkeypatch.setattr(
+        control_plane,
+        "build_service_control_port",
+        lambda: SimpleNamespace(is_active=lambda _service_name, user=True: True),
+    )
     monkeypatch.setattr(
         control_plane,
         "_control_plane_health_summary",

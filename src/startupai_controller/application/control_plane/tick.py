@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import time
 from typing import Any, Callable
 
+from startupai_controller.ports.service_control import ServiceControlPort
+
 
 @dataclass(frozen=True)
 class TickDeps:
@@ -26,7 +28,7 @@ class TickDeps:
     mark_degraded: Callable[..., None]
     control_plane_health_summary: Callable[..., dict[str, Any]]
     runtime_gh_reason_code: Callable[[Exception], str]
-    consumer_service_active: Callable[[], bool]
+    service_control_port: ServiceControlPort
     gh_query_error_type: type[Exception]
 
 
@@ -71,7 +73,9 @@ def run_tick(
                     "health": "degraded_recovering",
                     "reason_code": deps.runtime_gh_reason_code(error),
                     "error": f"deferred-replay:{error}",
-                    "consumer_service_active": deps.consumer_service_active(),
+                    "consumer_service_active": deps.service_control_port.is_active(
+                        "startupai-consumer.service"
+                    ),
                     "timings_ms": timings_ms,
                 }
             )
@@ -101,7 +105,9 @@ def run_tick(
                 "health": "degraded_recovering",
                 "reason_code": deps.runtime_gh_reason_code(error),
                 "error": f"executor-routing:{error}",
-                "consumer_service_active": deps.consumer_service_active(),
+                "consumer_service_active": deps.service_control_port.is_active(
+                    "startupai-consumer.service"
+                ),
                 "timings_ms": timings_ms,
             }
         )
@@ -174,7 +180,9 @@ def run_tick(
         {
             "health": health["health"],
             "reason_code": health["reason_code"],
-            "consumer_service_active": deps.consumer_service_active(),
+            "consumer_service_active": deps.service_control_port.is_active(
+                "startupai-consumer.service"
+            ),
             "poll_interval_seconds": effective_interval,
             "timings_ms": timings_ms,
             "replayed_actions": list(replayed),
