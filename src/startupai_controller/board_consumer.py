@@ -41,7 +41,9 @@ from startupai_controller.board_automation import (
     sync_review_state,
 )
 from startupai_controller import consumer_board_state_helpers as _board_state_helpers
+from startupai_controller import consumer_codex_helpers as _codex_helpers
 from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
+from startupai_controller import consumer_resolution_helpers as _resolution_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
@@ -859,11 +861,12 @@ def _session_retry_state(
 
 def _repo_root_for_issue_ref(config: ConsumerConfig, issue_ref: str) -> Path:
     """Return the canonical main-checkout root for an issue ref."""
-    repo_prefix = parse_issue_ref(issue_ref).prefix
-    root = config.repo_roots.get(repo_prefix)
-    if root is None:
-        raise ConfigError(f"Missing repo root for {issue_ref}")
-    return root
+    return _resolution_helpers.repo_root_for_issue_ref(
+        config,
+        issue_ref,
+        parse_issue_ref=parse_issue_ref,
+        config_error_type=ConfigError,
+    )
 
 
 def _verify_code_refs_on_main(
@@ -871,20 +874,7 @@ def _verify_code_refs_on_main(
     code_refs: list[str],
 ) -> tuple[bool, list[str]]:
     """Verify that every referenced path exists on canonical main."""
-    if not code_refs:
-        return False, []
-    missing: list[str] = []
-    resolved_root = repo_root.resolve()
-    for ref in code_refs:
-        candidate = (repo_root / ref).resolve()
-        try:
-            candidate.relative_to(resolved_root)
-        except ValueError:
-            missing.append(ref)
-            continue
-        if not candidate.exists():
-            missing.append(ref)
-    return len(missing) == 0, missing
+    return _resolution_helpers.verify_code_refs_on_main(repo_root, code_refs)
 
 
 def _run_validation_on_main(
@@ -894,17 +884,11 @@ def _run_validation_on_main(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[bool, int | None, str]:
     """Run the repo validation command against canonical main."""
-    if not command.strip():
-        return False, None, "missing-validation-command"
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    result = runner(
-        ["bash", "-lc", command],
-        cwd=str(repo_root),
-        capture_output=True,
-        text=True,
+    return _resolution_helpers.run_validation_on_main(
+        repo_root,
+        command,
+        subprocess_runner=subprocess_runner,
     )
-    detail = (result.stderr or result.stdout or "").strip()
-    return result.returncode == 0, result.returncode, detail
 
 
 def _commit_reachable_from_origin_main(
@@ -914,21 +898,11 @@ def _commit_reachable_from_origin_main(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Return True when a commit is reachable from origin/main."""
-    runner = subprocess_runner or (lambda args, **kw: subprocess.run(args, **kw))
-    result = runner(
-        [
-            "git",
-            "-C",
-            str(repo_root),
-            "merge-base",
-            "--is-ancestor",
-            commit_sha,
-            "origin/main",
-        ],
-        capture_output=True,
-        text=True,
+    return _resolution_helpers.commit_reachable_from_origin_main(
+        repo_root,
+        commit_sha,
+        subprocess_runner=subprocess_runner,
     )
-    return result.returncode == 0
 
 
 def _pr_is_merged(
@@ -938,34 +912,13 @@ def _pr_is_merged(
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Return True when a PR URL points at a merged pull request."""
-    parsed = _parse_pr_url(pr_url)
-    if parsed is None:
-        return False
-    owner, repo, pr_number = parsed
-    if pr_port is not None:
-        try:
-            return pr_port.is_pull_request_merged(f"{owner}/{repo}", pr_number)
-        except Exception:
-            return False
-    output = _run_gh(
-        [
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            f"{owner}/{repo}",
-            "--json",
-            "state,mergedAt",
-        ],
+    return _resolution_helpers.pr_is_merged(
+        pr_url,
+        pr_port=pr_port,
         gh_runner=gh_runner,
+        parse_pr_url=_parse_pr_url,
+        run_gh=_run_gh,
     )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
-        return False
-    merged_at = payload.get("mergedAt")
-    state = str(payload.get("state") or "").strip().upper()
-    return bool(merged_at) or state == "MERGED"
 
 
 def _verify_resolution_payload(
@@ -979,67 +932,24 @@ def _verify_resolution_payload(
     gh_runner: Callable[..., str] | None = None,
 ) -> ResolutionEvaluation:
     """Verify a structured resolution payload against canonical main."""
-    normalized = normalize_resolution_payload(resolution)
-    if normalized is None:
-        return ResolutionEvaluation(
-            resolution_kind=None,
-            verification_class="failed",
-            final_action="blocked_for_resolution_review",
-            summary="Successful no-op session returned no structured resolution evidence.",
-            evidence={},
-            blocked_reason="resolution-review-required:no-structured-resolution",
-        )
-
-    kind = str(normalized["kind"])
-    summary = str(normalized["summary"] or "").strip()
-    repo_root = _repo_root_for_issue_ref(config, issue_ref)
-    validation_command = _resolution_validation_command(
+    return _resolution_helpers.verify_resolution_payload(
         issue_ref,
-        normalized,
+        resolution,
         config=config,
         workflows=workflows,
-    )
-    evidence = _resolution_evidence_payload(
-        repo_root,
-        normalized,
-        validation_command,
         pr_port=pr_port,
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
-    )
-    if _resolution_is_strong(normalized, evidence):
-        return ResolutionEvaluation(
-            resolution_kind=kind,
-            verification_class="strong",
-            final_action="closed_as_already_resolved",
-            summary=summary or "Verified existing implementation already satisfies the issue.",
-            evidence=evidence,
-        )
-
-    if kind in NON_AUTO_CLOSE_RESOLUTION_KINDS:
-        return ResolutionEvaluation(
-            resolution_kind=kind,
-            verification_class="weak",
-            final_action="blocked_for_resolution_review",
-            summary=summary or f"Resolution `{kind}` requires review.",
-            evidence=evidence,
-            blocked_reason=f"resolution-review-required:{kind}",
-        )
-
-    verification_class = (
-        "ambiguous"
-        if resolution_has_meaningful_signal(normalized)
-        else "failed"
-    )
-    blocked_reason = _resolution_blocked_reason(normalized, evidence)
-
-    return ResolutionEvaluation(
-        resolution_kind=kind,
-        verification_class=verification_class,
-        final_action="blocked_for_resolution_review",
-        summary=summary or "Resolution evidence was not strong enough to auto-close.",
-        evidence=evidence,
-        blocked_reason=blocked_reason,
+        build_resolution_evaluation=ResolutionEvaluation,
+        normalize_resolution_payload=normalize_resolution_payload,
+        resolution_has_meaningful_signal=resolution_has_meaningful_signal,
+        resolution_allows_autoclose=resolution_allows_autoclose,
+        non_auto_close_resolution_kinds=NON_AUTO_CLOSE_RESOLUTION_KINDS,
+        repo_root_for_issue_ref_fn=_repo_root_for_issue_ref,
+        resolution_validation_command_fn=_resolution_validation_command,
+        resolution_evidence_payload_fn=_resolution_evidence_payload,
+        resolution_is_strong_fn=_resolution_is_strong,
+        resolution_blocked_reason_fn=_resolution_blocked_reason,
     )
 
 
@@ -1051,15 +961,12 @@ def _resolution_validation_command(
     workflows: dict[str, WorkflowDefinition],
 ) -> str:
     """Resolve the validation command for a resolution verification run."""
-    workflow = workflows.get(parse_issue_ref(issue_ref).prefix)
-    return (
-        str(normalized["validation_command"]).strip()
-        if normalized["validation_command"]
-        else (
-            workflow.runtime.validation_cmd
-            if workflow is not None and workflow.runtime.validation_cmd is not None
-            else config.validation_cmd
-        )
+    return _resolution_helpers.resolution_validation_command(
+        issue_ref,
+        normalized,
+        config=config,
+        workflows=workflows,
+        parse_issue_ref=parse_issue_ref,
     )
 
 
@@ -1073,46 +980,17 @@ def _resolution_evidence_payload(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
     """Collect deterministic evidence for resolution verification."""
-    code_refs = list(normalized["code_refs"])
-    commit_shas = list(normalized["commit_shas"])
-    pr_urls = list(normalized["pr_urls"])
-    code_refs_ok, missing_code_refs = _verify_code_refs_on_main(repo_root, code_refs)
-    reachable_commits = [
-        sha
-        for sha in commit_shas
-        if _commit_reachable_from_origin_main(
-            repo_root,
-            sha,
-            subprocess_runner=subprocess_runner,
-        )
-    ]
-    merged_pr_urls = [
-        pr_url
-        for pr_url in pr_urls
-        if _pr_is_merged(pr_url, pr_port=pr_port, gh_runner=gh_runner)
-    ]
-    validation_ok, validation_exit_code, validation_detail = _run_validation_on_main(
+    return _resolution_helpers.resolution_evidence_payload(
         repo_root,
+        normalized,
         validation_command,
+        pr_port=pr_port,
         subprocess_runner=subprocess_runner,
+        gh_runner=gh_runner,
+        verify_code_refs_on_main_fn=_verify_code_refs_on_main,
+        commit_reachable_from_origin_main_fn=_commit_reachable_from_origin_main,
+        pr_is_merged_fn=_pr_is_merged,
     )
-    return {
-        "code_refs": code_refs,
-        "missing_code_refs": missing_code_refs,
-        "code_refs_ok": code_refs_ok,
-        "commit_shas": commit_shas,
-        "reachable_commit_shas": reachable_commits,
-        "pr_urls": pr_urls,
-        "merged_pr_urls": merged_pr_urls,
-        "validated_on_main_claim": bool(normalized["validated_on_main"]),
-        "validation_command": validation_command,
-        "validation_ok": validation_ok,
-        "validation_exit_code": validation_exit_code,
-        "validation_detail": validation_detail[:500] if validation_detail else "",
-        "acceptance_criteria_met": bool(normalized["acceptance_criteria_met"]),
-        "acceptance_criteria_notes": normalized["acceptance_criteria_notes"],
-        "equivalence_claim": normalized["equivalence_claim"],
-    }
 
 
 def _resolution_is_strong(
@@ -1120,19 +998,10 @@ def _resolution_is_strong(
     evidence: dict[str, Any],
 ) -> bool:
     """Return True when resolution evidence is strong enough to auto-close."""
-    has_reference_evidence = bool(
-        evidence["code_refs"] or evidence["commit_shas"] or evidence["pr_urls"]
-    )
-    return all(
-        [
-            resolution_allows_autoclose(normalized),
-            has_reference_evidence,
-            bool(evidence["code_refs_ok"]),
-            bool(evidence["reachable_commit_shas"] or evidence["merged_pr_urls"]),
-            bool(normalized["validated_on_main"]),
-            bool(evidence["validation_ok"]),
-            bool(normalized["acceptance_criteria_met"]),
-        ]
+    return _resolution_helpers.resolution_is_strong(
+        normalized,
+        evidence,
+        resolution_allows_autoclose=resolution_allows_autoclose,
     )
 
 
@@ -1141,22 +1010,11 @@ def _resolution_blocked_reason(
     evidence: dict[str, Any],
 ) -> str:
     """Return the deterministic blocked reason for a non-strong resolution."""
-    has_reference_evidence = bool(
-        evidence["code_refs"] or evidence["commit_shas"] or evidence["pr_urls"]
+    return _resolution_helpers.resolution_blocked_reason(
+        normalized,
+        evidence,
+        resolution_allows_autoclose=resolution_allows_autoclose,
     )
-    if not resolution_allows_autoclose(normalized):
-        return "resolution-review-required:unsupported-resolution-kind"
-    if not has_reference_evidence:
-        return "resolution-review-required:missing-evidence"
-    if not evidence["code_refs_ok"]:
-        return "resolution-review-required:missing-code-refs"
-    if not (evidence["reachable_commit_shas"] or evidence["merged_pr_urls"]):
-        return "resolution-review-required:unverified-main-evidence"
-    if not normalized["validated_on_main"] or not evidence["validation_ok"]:
-        return "resolution-review-required:validation-failed"
-    if not normalized["acceptance_criteria_met"]:
-        return "resolution-review-required:acceptance-not-met"
-    return "resolution-review-required:ambiguous"
 
 
 def _queue_issue_comment(
@@ -1165,11 +1023,7 @@ def _queue_issue_comment(
     body: str,
 ) -> None:
     """Queue an issue comment for replay after GitHub recovery."""
-    db.queue_deferred_action(
-        issue_ref,
-        "post_issue_comment",
-        {"issue_ref": issue_ref, "body": body},
-    )
+    _resolution_helpers.queue_issue_comment(db, issue_ref, body)
 
 
 def _queue_issue_close(
@@ -1177,11 +1031,7 @@ def _queue_issue_close(
     issue_ref: str,
 ) -> None:
     """Queue an issue close mutation for replay."""
-    db.queue_deferred_action(
-        issue_ref,
-        "close_issue",
-        {"issue_ref": issue_ref},
-    )
+    _resolution_helpers.queue_issue_close(db, issue_ref)
 
 
 def _set_issue_handoff_target(
@@ -1196,15 +1046,16 @@ def _set_issue_handoff_target(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    port = board_port
-    if port is None:
-        port = build_github_port_bundle(
-            project_owner,
-            project_number,
-            config=config,
-            gh_runner=gh_runner,
-        ).board_mutations
-    port.set_issue_field(issue_ref, "Handoff To", target)
+    _resolution_helpers.set_issue_handoff_target(
+        issue_ref,
+        target,
+        config,
+        project_owner,
+        project_number,
+        board_port=board_port,
+        gh_runner=gh_runner,
+        build_github_port_bundle=build_github_port_bundle,
+    )
 
 
 def _apply_resolution_action(
@@ -1221,91 +1072,31 @@ def _apply_resolution_action(
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Apply the verified resolution decision to the board and issue."""
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, critical_path_config)
-    comment_body = build_resolution_comment(
-        issue_ref=issue_ref,
+    return _resolution_helpers.apply_resolution_action(
+        issue_ref,
+        evaluation,
         session_id=session_id,
-        resolution_kind=evaluation.resolution_kind or "unknown",
-        summary=evaluation.summary,
-        verification_class=evaluation.verification_class,
-        final_action=evaluation.final_action,
-        evidence=evaluation.evidence,
+        db=db,
+        config=config,
+        critical_path_config=critical_path_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        build_resolution_comment=build_resolution_comment,
+        mark_issues_done=mark_issues_done,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        mark_degraded=_mark_degraded,
+        gh_reason_code=gh_reason_code,
+        queue_status_transition=_queue_status_transition,
+        runtime_comment_poster=_runtime_comment_poster,
+        runtime_issue_closer=_runtime_issue_closer,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        set_issue_handoff_target_fn=_set_issue_handoff_target,
+        linked_issue_type=LinkedIssue,
+        gh_query_error_type=GhQueryError,
     )
-
-    if evaluation.final_action == "closed_as_already_resolved":
-        try:
-            mark_issues_done(
-                [LinkedIssue(owner=owner, repo=repo, number=number, ref=issue_ref)],
-                critical_path_config,
-                config.project_owner,
-                config.project_number,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-            )
-            _record_successful_github_mutation(db)
-        except (GhQueryError, Exception) as err:
-            _mark_degraded(db, f"resolution-done:{gh_reason_code(err)}:{err}")
-            _queue_status_transition(
-                db,
-                issue_ref,
-                to_status="Done",
-                from_statuses={"Backlog", "In Progress", "Ready"},
-            )
-        try:
-            poster = comment_poster or _runtime_comment_poster
-            poster(owner, repo, number, comment_body, gh_runner=gh_runner)
-            _record_successful_github_mutation(db)
-        except (GhQueryError, Exception) as err:
-            _mark_degraded(db, f"resolution-comment:{gh_reason_code(err)}:{err}")
-            _queue_issue_comment(db, issue_ref, comment_body)
-        try:
-            _runtime_issue_closer(owner, repo, number, gh_runner=gh_runner)
-            _record_successful_github_mutation(db)
-        except (GhQueryError, Exception) as err:
-            _mark_degraded(db, f"resolution-close:{gh_reason_code(err)}:{err}")
-            _queue_issue_close(db, issue_ref)
-        return "already_resolved"
-
-    blocked_reason = evaluation.blocked_reason or "resolution-review-required"
-    try:
-        _set_blocked_with_reason(
-            issue_ref,
-            blocked_reason,
-            critical_path_config,
-            config.project_owner,
-            config.project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        _set_issue_handoff_target(
-            issue_ref,
-            "claude",
-            critical_path_config,
-            config.project_owner,
-            config.project_number,
-            board_info_resolver=board_info_resolver,
-            gh_runner=gh_runner,
-        )
-        _record_successful_github_mutation(db)
-    except (GhQueryError, Exception) as err:
-        _mark_degraded(db, f"resolution-blocked:{gh_reason_code(err)}:{err}")
-        _queue_status_transition(
-            db,
-            issue_ref,
-            to_status="Blocked",
-            from_statuses={"Backlog", "In Progress", "Ready"},
-            blocked_reason=blocked_reason,
-        )
-    try:
-        poster = comment_poster or _runtime_comment_poster
-        poster(owner, repo, number, comment_body, gh_runner=gh_runner)
-        _record_successful_github_mutation(db)
-    except (GhQueryError, Exception) as err:
-        _mark_degraded(db, f"resolution-comment:{gh_reason_code(err)}:{err}")
-        _queue_issue_comment(db, issue_ref, comment_body)
-    return "resolution_review"
 
 
 def _run_workspace_hooks(
@@ -1682,73 +1473,24 @@ def _assemble_codex_prompt(
 
     Pure function — no I/O.
     """
-    parsed = parse_issue_ref(issue_ref)
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-    title = issue_context.get("title", f"Issue #{parsed.number}")
-    body = issue_context.get("body", "")
-
-    # Extract acceptance criteria from issue body
-    acceptance = _extract_acceptance_criteria(body)
-
-    prompt = f"""\
-Issue: {title} (#{number})
-Repository: {owner}/{repo}
-Base branch: main
-
-Working directory: {worktree_path}
-Branch: {branch_name}
-
-Dependency summary:
-{dependency_summary or "(No graph dependencies.)"}
-(All listed predecessors are Done.)
-
-Acceptance criteria:
-{acceptance or "(See issue body for details.)"}
-
-Constraints:
-- You are working in an EXISTING worktree at the path above on the branch above.
-  Do NOT create a new worktree, branch, or checkout.
-- Do not modify board state, issue state, or project fields.
-- Do not open or create pull requests — PR lifecycle is consumer-owned.
-- Validate your work: {consumer_config.validation_cmd}
-- Commit changes and push to origin/{branch_name}.
-- If the issue is already satisfied on main and no code changes are needed, set
-  `resolution` with concrete code refs, merged PRs or commits, and the exact
-  validation result on canonical main. Do not leave `resolution` null in a
-  successful no-op case.
-- Return ONLY JSON matching the provided schema. Populate every schema field;
-  use null or [] when applicable. No prose, no markdown."""
-
-    if session_kind == "repair":
-        prompt += (
-            "\n\nRepair context:\n"
-            f"- Existing PR: {repair_pr_url or '(unknown)'}\n"
-            f"- Branch reconcile state: {branch_reconcile_state or 'not-run'}\n"
-        )
-        if branch_reconcile_error:
-            prompt += f"- Branch reconcile error: {branch_reconcile_error}\n"
-        prompt += (
-            "- This is an in-place repair of an existing PR branch.\n"
-            "- First make the branch cleanly mergeable with main.\n"
-            "- If the branch currently has merge conflicts from origin/main, "
-            "resolve them before running final validation.\n"
-        )
-
-    if workflow_definition is not None:
-        workflow_context = {
-            "issue_ref": issue_ref,
-            "issue_title": title,
-            "repository": f"{owner}/{repo}",
-            "worktree_path": worktree_path,
-            "branch_name": branch_name,
-            "dependency_summary": dependency_summary or "(No graph dependencies.)",
-            "acceptance_criteria": acceptance or "(See issue body for details.)",
-            "validation_cmd": consumer_config.validation_cmd,
-        }
-        rendered = render_workflow_prompt(workflow_definition, workflow_context)
-        prompt = f"{prompt}\n\nRepository workflow instructions:\n{rendered}"
-
-    return prompt
+    return _codex_helpers.assemble_codex_prompt(
+        issue_context,
+        issue_ref,
+        config,
+        consumer_config,
+        worktree_path,
+        branch_name,
+        dependency_summary=dependency_summary,
+        workflow_definition=workflow_definition,
+        session_kind=session_kind,
+        repair_pr_url=repair_pr_url,
+        branch_reconcile_state=branch_reconcile_state,
+        branch_reconcile_error=branch_reconcile_error,
+        parse_issue_ref=parse_issue_ref,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        extract_acceptance_criteria=_extract_acceptance_criteria,
+        render_workflow_prompt=render_workflow_prompt,
+    )
 
 
 def _extract_acceptance_criteria(body: str) -> str:
@@ -1814,98 +1556,28 @@ def _run_codex_session(
 
     Exit 124 = timeout (from coreutils timeout command).
     """
-    codex_cmd = _resolve_cli_command("codex")
-    args = [
-        "timeout",
-        str(timeout_seconds),
-        codex_cmd,
-        "exec",
-        "-C", worktree_path,
-        "--full-auto",
-        "--output-schema", str(schema_path),
-        "-o", str(output_path),
+    return _codex_helpers.run_codex_session(
+        worktree_path,
         prompt,
-    ]
-    if subprocess_runner is not None:
-        result = subprocess_runner(
-            args,
-            capture_output=True,
-            text=True,
-        )
-    else:
-        proc_args = args[2:]
-        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout_log, tempfile.TemporaryFile(
-            mode="w+t",
-            encoding="utf-8",
-        ) as stderr_log:
-            process = subprocess.Popen(
-                proc_args,
-                stdout=stdout_log,
-                stderr=stderr_log,
-                text=True,
-            )
-            deadline = time.monotonic() + timeout_seconds
-            while True:
-                if heartbeat_fn is not None:
-                    heartbeat_fn()
-                rc = process.poll()
-                if rc is not None:
-                    stdout_log.flush()
-                    stderr_log.flush()
-                    stdout_log.seek(0)
-                    stderr_log.seek(0)
-                    result = subprocess.CompletedProcess(
-                        args=proc_args,
-                        returncode=rc,
-                        stdout=stdout_log.read(),
-                        stderr=stderr_log.read(),
-                    )
-                    break
-                if time.monotonic() >= deadline:
-                    process.kill()
-                    process.wait()
-                    stdout_log.flush()
-                    stderr_log.flush()
-                    stdout_log.seek(0)
-                    stderr_log.seek(0)
-                    result = subprocess.CompletedProcess(
-                        args=proc_args,
-                        returncode=124,
-                        stdout=stdout_log.read(),
-                        stderr=stderr_log.read(),
-                    )
-                    break
-                time.sleep(15)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        if detail:
-            logger.error("codex exec failed (exit %s): %s", result.returncode, detail)
-        else:
-            logger.error("codex exec failed (exit %s) with no output", result.returncode)
-    elif not output_path.exists():
-        logger.error("codex exec exited 0 but produced no output file: %s", output_path)
-    return result.returncode
+        schema_path,
+        output_path,
+        timeout_seconds,
+        heartbeat_fn=heartbeat_fn,
+        subprocess_runner=subprocess_runner,
+        resolve_cli_command_fn=_resolve_cli_command,
+        popen_factory=subprocess.Popen,
+        sleep_fn=time.sleep,
+        logger=logger,
+    )
 
 
 def _resolve_cli_command(command: str) -> str:
     """Resolve a CLI binary without relying on interactive shell PATH setup."""
-    resolved = shutil.which(command)
-    if resolved:
-        return resolved
-
-    home = Path.home()
-    candidates = [
-        home / ".local" / "bin" / command,
-        home / ".local" / "share" / "pnpm" / command,
-        home / ".npm-global" / "bin" / command,
-        Path("/usr/local/bin") / command,
-        Path("/usr/bin") / command,
-    ]
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-
-    return command
+    return _codex_helpers.resolve_cli_command(
+        command,
+        which=shutil.which,
+        home_getter=Path.home,
+    )
 
 
 def _drain_requested(path: Path) -> bool:
@@ -1938,12 +1610,10 @@ def _parse_codex_result(
     file_reader: Callable[[Path], str] | None = None,
 ) -> dict[str, Any] | None:
     """Parse CodexSessionResult JSON from output file. Returns None on failure."""
-    reader = file_reader or (lambda p: p.read_text(encoding="utf-8"))
-    try:
-        text = reader(output_path)
-        return json.loads(text)
-    except (OSError, json.JSONDecodeError):
-        return None
+    return _codex_helpers.parse_codex_result(
+        output_path,
+        file_reader=file_reader,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1970,92 +1640,22 @@ def _create_or_update_pr(
     2. If yes -> verify body contains required fields; gh pr edit if needed.
     3. If no -> gh pr create with required body fields.
     """
-    resolved_issue_ref = issue_ref or f"{_repo_to_prefix_for_repo(repo)}#{issue_number}"
-
-    # Check for existing PR
-    try:
-        existing = _run_gh(
-            [
-                "pr",
-                "view",
-                branch,
-                "--repo",
-                f"{owner}/{repo}",
-                "--json",
-                "url,body",
-            ],
-            gh_runner=gh_runner,
-        )
-        pr_data = json.loads(existing)
-        pr_url = pr_data.get("url", "")
-        body = pr_data.get("body", "")
-
-        # Validate required body fields
-        needs_edit = False
-        required_lines = {
-            "Lead Agent:": "Lead Agent: codex",
-            "Handoff:": "Handoff: none",
-            f"Closes #{issue_number}": f"Closes #{issue_number}",
-            f"issue={resolved_issue_ref}": f"issue={resolved_issue_ref}",
-        }
-        for marker, full_line in required_lines.items():
-            if marker not in body:
-                needs_edit = True
-                break
-
-        if needs_edit:
-            new_body = _build_pr_body(
-                title,
-                issue_number,
-                issue_ref=resolved_issue_ref,
-                session_id=session_id,
-                repo_prefix=parse_issue_ref(resolved_issue_ref).prefix,
-                branch_name=branch,
-            )
-            _run_gh(
-                [
-                    "pr",
-                    "edit",
-                    branch,
-                    "--repo",
-                    f"{owner}/{repo}",
-                    "--body",
-                    new_body,
-                ],
-                gh_runner=gh_runner,
-            )
-
-        return pr_url
-
-    except (GhQueryError, json.JSONDecodeError, Exception):
-        pass  # No existing PR — create one
-
-    # Create PR
-    body = _build_pr_body(
-        title,
+    return _codex_helpers.create_or_update_pr(
+        worktree_path,
+        branch,
         issue_number,
-        issue_ref=resolved_issue_ref,
-        session_id=session_id,
-        repo_prefix=parse_issue_ref(resolved_issue_ref).prefix,
-        branch_name=branch,
-    )
-    output = _run_gh(
-        [
-            "pr",
-            "create",
-            "--repo",
-            f"{owner}/{repo}",
-            "--head",
-            branch,
-            "--title",
-            f"{title} (#{issue_number})",
-            "--body",
-            body,
-        ],
+        owner,
+        repo,
+        title,
+        config,
+        issue_ref,
+        session_id,
         gh_runner=gh_runner,
+        run_gh=_run_gh,
+        build_pr_body_fn=_build_pr_body,
+        repo_to_prefix_for_repo=_repo_to_prefix_for_repo,
+        parse_issue_ref=parse_issue_ref,
     )
-    # gh pr create outputs the PR URL
-    return output.strip()
 
 
 def _build_pr_body(
@@ -2068,20 +1668,14 @@ def _build_pr_body(
     branch_name: str = "feat/0-legacy",
 ) -> str:
     """Build PR body with required tag-contract fields."""
-    marker = _consumer_provenance_marker(
-        session_id=session_id,
+    return _codex_helpers.build_pr_body(
+        title,
+        issue_number,
         issue_ref=issue_ref,
+        session_id=session_id,
         repo_prefix=repo_prefix,
         branch_name=branch_name,
-        executor="codex",
-    )
-    return (
-        f"## Summary\n\n"
-        f"Automated implementation for #{issue_number}.\n\n"
-        f"Closes #{issue_number}\n\n"
-        f"Lead Agent: codex\n"
-        f"Handoff: none\n\n"
-        f"{marker}\n"
+        consumer_provenance_marker=_consumer_provenance_marker,
     )
 
 
