@@ -32,13 +32,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 
-from startupai_controller.board_automation import (
-    mark_issues_done,
-    _set_blocked_with_reason,
-    review_rescue,
-    sync_review_state,
-)
 from startupai_controller import consumer_board_state_helpers as _board_state_helpers
+import startupai_controller.consumer_automation_bridge as _automation_bridge
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
 from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
@@ -297,6 +292,18 @@ DEFAULT_STATUS_PORT = 8765
 
 # CycleRuntimeContext: re-exported from application.consumer.preflight_runtime
 CycleRuntimeContext = _AppCycleRuntimeContext
+
+
+mark_issues_done = _automation_bridge.mark_issues_done
+
+
+_set_blocked_with_reason = _automation_bridge.set_blocked_with_reason
+
+
+review_rescue = _automation_bridge.review_rescue
+
+
+sync_review_state = _automation_bridge.sync_review_state
 
 
 def _record_metric(
@@ -658,45 +665,7 @@ def _set_issue_handoff_target(
     )
 
 
-def _apply_resolution_action(
-    issue_ref: str,
-    evaluation: ResolutionEvaluation,
-    *,
-    session_id: str | None,
-    db: ConsumerDB,
-    config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> str:
-    """Apply the verified resolution decision to the board and issue."""
-    return _resolution_helpers.apply_resolution_action(
-        issue_ref,
-        evaluation,
-        session_id=session_id,
-        db=db,
-        config=config,
-        critical_path_config=critical_path_config,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        build_resolution_comment=build_resolution_comment,
-        mark_issues_done=mark_issues_done,
-        record_successful_github_mutation=_record_successful_github_mutation,
-        mark_degraded=_mark_degraded,
-        gh_reason_code=gh_reason_code,
-        queue_status_transition=_queue_status_transition,
-        runtime_comment_poster=_runtime_comment_poster,
-        runtime_issue_closer=_runtime_issue_closer,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        set_issue_handoff_target_fn=_set_issue_handoff_target,
-        linked_issue_type=LinkedIssue,
-        gh_query_error_type=GhQueryError,
-    )
+_apply_resolution_action = _resolution_helpers.apply_resolution_action_from_shell
 
 
 def _run_workspace_hooks(
@@ -725,47 +694,7 @@ def _run_workspace_hooks(
 # ---------------------------------------------------------------------------
 
 
-def _select_best_candidate(
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    executor: str = "codex",
-    this_repo_prefix: str | None = None,
-    repo_prefixes: tuple[str, ...] = ("crew",),
-    automation_config: BoardAutomationConfig | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    ready_items: tuple[_ProjectItemSnapshot, ...] | None = None,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    issue_filter: Callable[[str], bool] | None = None,
-) -> str | None:
-    """Select highest-priority Ready issue for executor using agreed ranking.
-
-    Ranking: critical-path first -> Priority (P0 > P1 > P2 > P3) -> oldest number.
-    Skips items with unmet graph dependencies.
-    Returns issue_ref (e.g. "crew#84") or None.
-    """
-    return _selection_retry_wiring.select_best_candidate(
-        config,
-        project_owner,
-        project_number,
-        executor=executor,
-        this_repo_prefix=this_repo_prefix,
-        repo_prefixes=repo_prefixes,
-        status_resolver=status_resolver,
-        ready_items=ready_items,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
-        issue_filter=issue_filter,
-        build_github_port_bundle=build_github_port_bundle,
-        parse_issue_ref=parse_issue_ref,
-        config_error_type=ConfigError,
-        snapshot_to_issue_ref=_snapshot_to_issue_ref,
-        in_any_critical_path=in_any_critical_path,
-        evaluate_ready_promotion=evaluate_ready_promotion,
-        ready_snapshot_rank=_ready_snapshot_rank,
-    )
+_select_best_candidate = _selection_retry_wiring.select_best_candidate_from_shell
 
 
 def _list_project_items_by_status(
@@ -1358,82 +1287,15 @@ def _replay_deferred_automerge_enable(
 # ---------------------------------------------------------------------------
 
 
-def _transition_issue_to_review(
-    issue_ref: str,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    review_state_port: ReviewStatePort | None = None,
-    board_port: BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Move a successfully submitted issue from In Progress to Review."""
-    _board_state_helpers.transition_issue_to_review(
-        issue_ref,
-        config,
-        project_owner,
-        project_number,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+_transition_issue_to_review = _board_state_helpers.transition_issue_to_review_from_shell
 
 
-def _transition_issue_to_in_progress(
-    issue_ref: str,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    from_statuses: set[str] | None = None,
-    review_state_port: ReviewStatePort | None = None,
-    board_port: BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Move an actively running local repair back into In Progress."""
-    _board_state_helpers.transition_issue_to_in_progress(
-        issue_ref,
-        config,
-        project_owner,
-        project_number,
-        build_github_port_bundle=build_github_port_bundle,
-        from_statuses=from_statuses,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        gh_runner=gh_runner,
-    )
+_transition_issue_to_in_progress = (
+    _board_state_helpers.transition_issue_to_in_progress_from_shell
+)
 
 
-def _return_issue_to_ready(
-    issue_ref: str,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    from_statuses: set[str] | None = None,
-    review_state_port: ReviewStatePort | None = None,
-    board_port: BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Move a non-running claimed issue back to Ready so the lane stays truthful."""
-    _board_state_helpers.return_issue_to_ready(
-        issue_ref,
-        config,
-        project_owner,
-        project_number,
-        build_github_port_bundle=build_github_port_bundle,
-        from_statuses=from_statuses,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        gh_runner=gh_runner,
-    )
+_return_issue_to_ready = _board_state_helpers.return_issue_to_ready_from_shell
 
 
 _build_reconciliation_wiring_deps = _operational_wiring.build_reconciliation_wiring_deps
@@ -1484,30 +1346,7 @@ _execute_prepare_cycle_phases = _preflight_wiring.execute_prepare_cycle_phases
 _prepare_cycle = _preflight_wiring.prepare_cycle
 
 
-def _select_candidate_for_cycle(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    prepared: PreparedCycleContext,
-    *,
-    target_issue: str | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    excluded_issue_refs: set[str] | None = None,
-) -> str | None:
-    """Select the next eligible issue for one slot in this cycle."""
-    return _selection_retry_wiring.select_candidate_for_cycle(
-        config,
-        db,
-        prepared,
-        target_issue=target_issue,
-        status_resolver=status_resolver,
-        gh_runner=gh_runner,
-        excluded_issue_refs=excluded_issue_refs,
-        parse_issue_ref=parse_issue_ref,
-        effective_retry_backoff=_effective_retry_backoff,
-        retry_backoff_active=_retry_backoff_active,
-        select_best_candidate=_select_best_candidate,
-    )
+_select_candidate_for_cycle = _selection_retry_wiring.select_candidate_for_cycle_from_shell
 
 
 # ---------------------------------------------------------------------------
@@ -1515,37 +1354,7 @@ def _select_candidate_for_cycle(
 # ---------------------------------------------------------------------------
 
 
-def _escalate_to_claude(
-    issue_ref: str,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    reason: str = "",
-    *,
-    board_info_resolver: Callable | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Block the issue for Claude handoff and post one escalation comment."""
-    _execution_support_helpers.escalate_to_claude(
-        issue_ref,
-        config,
-        project_owner,
-        project_number,
-        reason,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        marker_for=_marker_for,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        set_issue_handoff_target=_set_issue_handoff_target,
-        default_review_comment_checker=_default_review_comment_checker,
-        runtime_comment_poster=_runtime_comment_poster,
-        logger=logger,
-    )
+_escalate_to_claude = _board_state_helpers.escalate_to_claude_from_shell
 
 
 # ---------------------------------------------------------------------------

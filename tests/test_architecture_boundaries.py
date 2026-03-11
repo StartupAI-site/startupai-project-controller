@@ -188,6 +188,9 @@ def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks()
 
 def test_board_consumer_endgame_shell_avoids_lower_level_execution_mechanisms() -> None:
     imported = _controller_runtime_imports(SRC_ROOT / "board_consumer.py")
+    assert "startupai_controller.board_automation" not in imported, (
+        "board_consumer.py still imports board_automation.py at runtime"
+    )
     offending = sorted(
         module
         for module in imported
