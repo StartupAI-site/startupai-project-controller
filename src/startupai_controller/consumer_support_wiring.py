@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import startupai_controller.consumer_runtime_wiring as _runtime_wiring
+import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
 from startupai_controller.board_graph import admission_watermarks
 from startupai_controller.consumer_context_helpers import (
     hydrate_issue_context as _hydrate_issue_context_helper,
 )
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
+from startupai_controller.control_plane_runtime import CONTROL_KEY_LAST_ADMISSION_SUMMARY
 from startupai_controller.domain.models import CycleBoardSnapshot
 
 
@@ -89,6 +92,57 @@ def default_admission_summary(
     }
 
 
+def claim_suppression_state(
+    db: Any,
+    *,
+    now: datetime | None = None,
+) -> dict[str, str] | None:
+    """Return active claim suppression state, clearing expired windows."""
+    shell = _shell_module()
+    current = now or datetime.now(timezone.utc)
+    until_raw = db.get_control_value(shell.CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL)
+    if not until_raw:
+        return None
+    until = shell._parse_iso8601_timestamp(until_raw)
+    if until is None or until <= current:
+        shell._clear_claim_suppression(db)
+        return None
+    return {
+        "until": until.isoformat(),
+        "reason": db.get_control_value(shell.CONTROL_KEY_CLAIM_SUPPRESSED_REASON) or "",
+        "scope": db.get_control_value(shell.CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE) or "",
+    }
+
+
+def load_admission_summary(
+    control_state: dict[str, str],
+    automation_config: Any | None,
+) -> dict[str, Any]:
+    """Return the last persisted admission summary or a stable default."""
+    raw = control_state.get(CONTROL_KEY_LAST_ADMISSION_SUMMARY)
+    if not raw:
+        return default_admission_summary(automation_config)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = default_admission_summary(automation_config)
+        payload["error"] = "invalid-persisted-admission-summary"
+        return payload
+    if not isinstance(payload, dict):
+        payload = default_admission_summary(automation_config)
+        payload["error"] = "invalid-persisted-admission-summary"
+    return payload
+
+
+def next_available_slot(db: Any, limit: int) -> int | None:
+    """Return the next available execution slot id, or None if saturated."""
+    occupied = db.active_slot_ids()
+    for slot_id in range(1, limit + 1):
+        if slot_id not in occupied:
+            return slot_id
+    return None
+
+
 def complete_session(
     db: Any,
     session_id: str,
@@ -101,11 +155,12 @@ def complete_session(
 ) -> int:
     """Persist a terminal session update and return its retry count."""
     shell = _shell_module()
-    retry_count = shell._next_retry_count(
+    retry_count = _selection_retry_wiring.next_retry_count(
         db,
         issue_ref,
         current_session_id=session_id,
         failure_reason=failure_reason,
+        is_retryable_failure_reason=shell._is_retryable_failure_reason,
     )
     db.update_session(
         session_id,

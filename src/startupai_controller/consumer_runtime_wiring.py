@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.application.consumer.daemon import (
     DispatchMultiWorkerLaunchesDeps,
     PrepareMultiWorkerCycleDeps,
@@ -112,7 +113,7 @@ def _daemon_runtime_wiring_deps(shell: Any) -> DaemonRuntimeWiringDeps:
         mark_degraded=shell._mark_degraded,
         gh_reason_code=shell.gh_reason_code,
         logger=shell.logger,
-        claim_suppression_state=shell._claim_suppression_state,
+        claim_suppression_state=_support_wiring.claim_suppression_state,
         parse_iso8601_timestamp=shell._parse_iso8601_timestamp,
         record_metric=shell._record_metric,
         prepare_launch_candidate=shell._prepare_launch_candidate,
@@ -152,7 +153,7 @@ def _status_runtime_wiring_deps(shell: Any) -> StatusRuntimeWiringDeps:
         load_config=shell.load_config,
         list_project_items_by_status=shell._list_project_items_by_status,
         parse_issue_ref=shell.parse_issue_ref,
-        load_admission_summary=shell._load_admission_summary,
+        load_admission_summary=_support_wiring.load_admission_summary,
         control_plane_health_summary=shell._control_plane_health_summary,
         drain_requested=shell._drain_requested,
         workflow_status_payload=shell.workflow_status_payload,

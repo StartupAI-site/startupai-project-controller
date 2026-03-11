@@ -9,6 +9,7 @@ import startupai_controller.consumer_cycle_wiring as _cycle_wiring
 import startupai_controller.consumer_execution_outcome_wiring as _execution_outcome_wiring
 import startupai_controller.consumer_recovery_helpers as _recovery_helpers
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
+import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.application.consumer.reconciliation import (
     ReconciliationWiringDeps,
     reconcile_active_repair_review_items as _reconcile_active_repair_review_items_use_case,
@@ -1083,8 +1084,8 @@ def prepared_cycle_deps():
     """Bind board_consumer helpers for the extracted prepared-cycle slice."""
     shell = _shell_module()
     return _cycle_wiring.prepared_cycle_deps(
-        claim_suppression_state=shell._claim_suppression_state,
-        next_available_slot=shell._next_available_slot,
+        claim_suppression_state=_support_wiring.claim_suppression_state,
+        next_available_slot=_support_wiring.next_available_slot,
         resolve_launch_context_for_cycle=shell._resolve_launch_context_for_cycle,
         claim_launch_context=shell._claim_launch_context,
         execute_claimed_session=shell._execute_claimed_session,

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import startupai_controller.consumer_claim_helpers as _claim_helpers
 from startupai_controller import consumer_selection_helpers as _selection_helpers
+from startupai_controller.board_graph import _ready_snapshot_rank
 
 
 def _shell_module():
@@ -60,6 +61,32 @@ def retry_backoff_active(
     if due_at is None:
         return False
     return datetime.now(timezone.utc) < due_at
+
+
+def next_retry_count(
+    db: Any,
+    issue_ref: str,
+    *,
+    current_session_id: str,
+    failure_reason: str | None,
+    is_retryable_failure_reason: Callable[[str | None], bool],
+) -> int:
+    """Return the next retry attempt count for a terminal session."""
+    if not is_retryable_failure_reason(failure_reason):
+        return 0
+    previous = db.latest_session_for_issue(
+        issue_ref,
+        exclude_session_id=current_session_id,
+    )
+    if previous is None:
+        return 1
+    if previous.failure_reason is None:
+        if previous.status not in {"failed", "timeout"}:
+            return 1
+        return max(previous.retry_count, 1) + 1
+    if not is_retryable_failure_reason(previous.failure_reason):
+        return 1
+    return max(previous.retry_count, 1) + 1
 
 
 def session_retry_state(
@@ -282,7 +309,7 @@ def select_best_candidate_from_shell(
         snapshot_to_issue_ref=shell._snapshot_to_issue_ref,
         in_any_critical_path=shell.in_any_critical_path,
         evaluate_ready_promotion=shell.evaluate_ready_promotion,
-        ready_snapshot_rank=shell._ready_snapshot_rank,
+        ready_snapshot_rank=_ready_snapshot_rank,
     )
 
 

@@ -18,7 +18,6 @@ Exit codes: 0 success, 2 no-op, 3 config error, 4 API error.
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-import json
 import logging
 import os
 import shutil
@@ -37,7 +36,6 @@ import startupai_controller.consumer_automation_bridge as _automation_bridge
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
 from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
-import startupai_controller.consumer_execution_outcome_wiring as _execution_outcome_wiring
 from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
 import startupai_controller.consumer_preflight_wiring as _preflight_wiring
@@ -46,13 +44,9 @@ from startupai_controller import consumer_review_queue_helpers as _review_queue_
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
 import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.board_automation_config import (
-    BoardAutomationConfig,
     load_automation_config,
 )
-from startupai_controller.board_graph import (
-    _ready_snapshot_rank,
-    _resolve_issue_coordinates,
-)
+from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.consumer_config import (
     ConsumerConfig,
     DEFAULT_AUTOMATION_CONFIG_PATH,
@@ -88,11 +82,8 @@ from startupai_controller.consumer_worktree_helpers import (
     worktree_is_clean as _worktree_is_clean_helper,
     worktree_ownership_is_safe as _worktree_ownership_is_safe_helper,
 )
-import startupai_controller.consumer_claim_helpers as _claim_helpers
-import startupai_controller.consumer_claim_wiring as _claim_wiring
 import startupai_controller.consumer_cycle_wiring as _cycle_wiring
 import startupai_controller.consumer_operational_wiring as _operational_wiring
-import startupai_controller.consumer_recovery_helpers as _recovery_helpers
 import startupai_controller.consumer_review_queue_wiring as _review_queue_wiring
 import startupai_controller.consumer_runtime_wiring as _runtime_wiring
 import startupai_controller.consumer_session_completion_helpers as _session_completion_helpers
@@ -102,7 +93,6 @@ from startupai_controller.control_plane_runtime import (
     CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL,
     CONTROL_KEY_DEGRADED,
     CONTROL_KEY_DEGRADED_REASON,
-    CONTROL_KEY_LAST_ADMISSION_SUMMARY,
     CONTROL_KEY_LAST_RATE_LIMIT_AT,
     CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT,
     CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT,
@@ -333,27 +323,6 @@ def _clear_claim_suppression(db: ConsumerDB) -> None:
     db.set_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE, None)
 
 
-def _claim_suppression_state(
-    db: ConsumerDB,
-    *,
-    now: datetime | None = None,
-) -> dict[str, str] | None:
-    """Return active claim suppression state, clearing expired windows."""
-    current = now or datetime.now(timezone.utc)
-    until_raw = db.get_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL)
-    if not until_raw:
-        return None
-    until = _parse_iso8601_timestamp(until_raw)
-    if until is None or until <= current:
-        _clear_claim_suppression(db)
-        return None
-    return {
-        "until": until.isoformat(),
-        "reason": db.get_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_REASON) or "",
-        "scope": db.get_control_value(CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE) or "",
-    }
-
-
 _activate_claim_suppression = _support_wiring.activate_claim_suppression
 
 
@@ -375,26 +344,6 @@ def _maybe_activate_claim_suppression(
 
 
 _default_admission_summary = _support_wiring.default_admission_summary
-
-
-def _load_admission_summary(
-    control_state: dict[str, str],
-    automation_config: BoardAutomationConfig | None,
-) -> dict[str, Any]:
-    """Return the last persisted admission summary or a stable default."""
-    raw = control_state.get(CONTROL_KEY_LAST_ADMISSION_SUMMARY)
-    if not raw:
-        return _default_admission_summary(automation_config)
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        payload = _default_admission_summary(automation_config)
-        payload["error"] = "invalid-persisted-admission-summary"
-        return payload
-    if not isinstance(payload, dict):
-        payload = _default_admission_summary(automation_config)
-        payload["error"] = "invalid-persisted-admission-summary"
-    return payload
 
 
 def _queue_status_transition(
@@ -448,31 +397,6 @@ def _effective_retry_backoff(
         workflow,
         effective_retry_backoff_primitives=_effective_retry_backoff_primitives,
     )
-
-
-def _next_retry_count(
-    db: ConsumerDB,
-    issue_ref: str,
-    *,
-    current_session_id: str,
-    failure_reason: str | None,
-) -> int:
-    """Return the next retry attempt count for a terminal session."""
-    if not _is_retryable_failure_reason(failure_reason):
-        return 0
-    previous = db.latest_session_for_issue(
-        issue_ref,
-        exclude_session_id=current_session_id,
-    )
-    if previous is None:
-        return 1
-    if previous.failure_reason is None:
-        if previous.status not in {"failed", "timeout"}:
-            return 1
-        return max(previous.retry_count, 1) + 1
-    if not _is_retryable_failure_reason(previous.failure_reason):
-        return 1
-    return max(previous.retry_count, 1) + 1
 
 
 _complete_session = _support_wiring.complete_session
@@ -1022,27 +946,6 @@ _backfill_review_verdicts_from_snapshots = _codex_comment_wiring.backfill_review
 _pre_backfill_verdicts_for_due_prs = _codex_comment_wiring.pre_backfill_verdicts_for_due_prs
 
 
-def _review_scope_issue_refs(
-    config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    board_snapshot: CycleBoardSnapshot,
-) -> tuple[str, ...]:
-    """Return governed review issue refs for the consumer executor."""
-    refs: list[str] = []
-    for snapshot in board_snapshot.items_with_status("Review"):
-        issue_ref = _snapshot_to_issue_ref(
-            snapshot.issue_ref, critical_path_config.issue_prefixes
-        )
-        if issue_ref is None:
-            continue
-        if parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
-            continue
-        if snapshot.executor.strip().lower() != config.executor:
-            continue
-        refs.append(issue_ref)
-    return tuple(refs)
-
-
 def _review_queue_next_attempt_at(
     *,
     now: datetime | None = None,
@@ -1148,24 +1051,6 @@ _process_review_queue_due_groups = (
 # ---------------------------------------------------------------------------
 # _drain_review_queue sub-functions: focused extraction from god-function
 # ---------------------------------------------------------------------------
-
-
-def _prune_stale_review_entries(
-    store: SessionStorePort,
-    review_refs: set[str],
-    existing_entries: list[ReviewQueueEntry],
-    *,
-    dry_run: bool = False,
-) -> list[str]:
-    """Remove queue entries for issues no longer in Review scope."""
-    removed: list[str] = []
-    for entry in existing_entries:
-        if entry.issue_ref in review_refs:
-            continue
-        if not dry_run:
-            store.delete_review_queue_item(entry.issue_ref)
-        removed.append(entry.issue_ref)
-    return removed
 
 
 _seed_new_review_entries = _review_queue_wiring.seed_new_review_entries_from_shell
@@ -1398,15 +1283,6 @@ def _has_commits_on_branch(
         branch,
         subprocess_runner=subprocess_runner,
     )
-
-
-def _next_available_slot(db: ConsumerDB, limit: int) -> int | None:
-    """Return the next available execution slot id, or None if saturated."""
-    occupied = db.active_slot_ids()
-    for slot_id in range(1, limit + 1):
-        if slot_id not in occupied:
-            return slot_id
-    return None
 
 
 _reconcile_board_truth = _operational_wiring.reconcile_board_truth
