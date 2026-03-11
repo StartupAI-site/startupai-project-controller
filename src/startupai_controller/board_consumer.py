@@ -66,6 +66,29 @@ from startupai_controller.consumer_launch_helpers import (
     run_launch_workspace_hooks as _run_launch_workspace_hooks_helper,
     setup_launch_worktree as _setup_launch_worktree_helper,
 )
+from startupai_controller.consumer_context_helpers import (
+    fetch_issue_context as _fetch_issue_context_helper,
+    hydrate_issue_context as _hydrate_issue_context_helper,
+    issue_context_cache_is_fresh as _issue_context_cache_is_fresh_helper,
+    snapshot_for_issue as _snapshot_for_issue_helper,
+)
+from startupai_controller.consumer_worktree_helpers import (
+    create_worktree as _create_worktree_helper,
+    fast_forward_existing_worktree as _fast_forward_existing_worktree_helper,
+    list_repo_worktrees as _list_repo_worktrees_helper,
+    prepare_worktree as _prepare_worktree_helper,
+    reconcile_repair_branch as _reconcile_repair_branch_helper,
+    worktree_is_clean as _worktree_is_clean_helper,
+    worktree_ownership_is_safe as _worktree_ownership_is_safe_helper,
+)
+from startupai_controller.consumer_comment_pr_helpers import (
+    backfill_review_verdicts as _backfill_review_verdicts_helper,
+    classify_open_pr_candidates as _classify_open_pr_candidates_helper,
+    list_open_pr_candidates as _list_open_pr_candidates_helper,
+    post_consumer_claim_comment as _post_consumer_claim_comment_helper,
+    post_pr_codex_verdict as _post_pr_codex_verdict_helper,
+    post_result_comment as _post_result_comment_helper,
+)
 from startupai_controller.consumer_review_handoff_helpers import (
     post_claimed_session_verdict_marker as _post_claimed_session_verdict_marker_helper,
     queue_claimed_session_for_review as _queue_claimed_session_for_review_helper,
@@ -1395,18 +1418,14 @@ def _fetch_issue_context(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
     """Read issue title, body, and labels via the issue-context boundary."""
-    port = issue_context_port or build_github_port_bundle(
-        "",
-        0,
+    return _fetch_issue_context_helper(
+        owner,
+        repo,
+        number,
+        build_github_port_bundle=build_github_port_bundle,
+        issue_context_port=issue_context_port,
         gh_runner=gh_runner,
-    ).issue_context
-    context = port.get_issue_context(owner, repo, number)
-    return {
-        "title": context.title,
-        "body": context.body,
-        "labels": list(context.labels),
-        "updated_at": context.updated_at,
-    }
+    )
 
 
 def _snapshot_for_issue(
@@ -1415,10 +1434,12 @@ def _snapshot_for_issue(
     config: CriticalPathConfig,
 ) -> _ProjectItemSnapshot | None:
     """Return the thin board snapshot row for an issue ref."""
-    for snapshot in board_snapshot.items:
-        if _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes) == issue_ref:
-            return snapshot
-    return None
+    return _snapshot_for_issue_helper(
+        board_snapshot,
+        issue_ref,
+        config,
+        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+    )
 
 
 def _issue_context_cache_is_fresh(
@@ -1428,14 +1449,12 @@ def _issue_context_cache_is_fresh(
     now: datetime,
 ) -> bool:
     """Return True when cached issue context is safe to reuse."""
-    if cached is None:
-        return False
-    expires_at = _parse_iso8601_timestamp(getattr(cached, "expires_at", None))
-    if expires_at is None or expires_at <= now:
-        return False
-    if snapshot_updated_at and getattr(cached, "issue_updated_at", "") != snapshot_updated_at:
-        return False
-    return True
+    return _issue_context_cache_is_fresh_helper(
+        cached,
+        snapshot_updated_at=snapshot_updated_at,
+        now=now,
+        parse_iso8601_timestamp=_parse_iso8601_timestamp,
+    )
 
 
 def _hydrate_issue_context(
@@ -1452,82 +1471,21 @@ def _hydrate_issue_context(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Return locally ready issue context, refreshing the cache when needed."""
-    current = now or datetime.now(timezone.utc)
-    cached = db.get_issue_context(issue_ref) if config.issue_context_cache_enabled else None
-    snapshot_updated_at = snapshot.issue_updated_at if snapshot is not None else ""
-    if _issue_context_cache_is_fresh(
-        cached,
-        snapshot_updated_at=snapshot_updated_at,
-        now=current,
-    ):
-        _record_metric(
-            db,
-            config,
-            "context_cache_hit",
-            issue_ref=issue_ref,
-            now=current,
-        )
-        return {
-            "title": cached.title,
-            "body": cached.body,
-            "labels": cached.labels,
-            "updated_at": cached.issue_updated_at,
-        }
-
-    _record_metric(
-        db,
-        config,
-        "context_cache_miss",
-        issue_ref=issue_ref,
-        payload={"stale": cached is not None},
-        now=current,
-    )
-    _record_metric(
-        db,
-        config,
-        "context_hydration_started",
-        issue_ref=issue_ref,
-        now=current,
-    )
-    context = _fetch_issue_context(
-        owner,
-        repo,
-        number,
+    return _hydrate_issue_context_helper(
+        issue_ref,
+        owner=owner,
+        repo=repo,
+        number=number,
+        snapshot=snapshot,
+        config=config,
+        db=db,
+        fetch_issue_context=_fetch_issue_context,
+        issue_context_cache_is_fresh=_issue_context_cache_is_fresh,
+        record_metric=_record_metric,
         issue_context_port=issue_context_port,
         gh_runner=gh_runner,
+        now=now,
     )
-    context.setdefault("title", snapshot.title if snapshot is not None else f"issue-{number}")
-    context.setdefault("body", "")
-    labels = context.get("labels")
-    if not isinstance(labels, list):
-        labels = []
-    context["labels"] = [str(label) for label in labels if str(label)]
-    issue_updated_at = str(context.get("updated_at") or snapshot_updated_at or current.isoformat())
-    context["updated_at"] = issue_updated_at
-    fetched_at = current.isoformat()
-    expires_at = (current + timedelta(seconds=config.issue_context_cache_ttl_seconds)).isoformat()
-    if config.issue_context_cache_enabled:
-        db.set_issue_context(
-            issue_ref,
-            owner=owner,
-            repo=repo,
-            number=number,
-            title=str(context.get("title") or ""),
-            body=str(context.get("body") or ""),
-            labels=list(context["labels"]),
-            issue_updated_at=issue_updated_at,
-            fetched_at=fetched_at,
-            expires_at=expires_at,
-        )
-    _record_metric(
-        db,
-        config,
-        "context_hydration_succeeded",
-        issue_ref=issue_ref,
-        payload={"cached_until": expires_at},
-        now=current,
-    )
-    return context
 
 
 def _list_repo_worktrees(
@@ -1537,10 +1495,12 @@ def _list_repo_worktrees(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Return (worktree_path, branch_name) pairs for a repo root."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
+    return _list_repo_worktrees_helper(
+        repo_root,
+        build_worktree_port=build_worktree_port,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
     )
-    return [(entry.path, entry.branch_name) for entry in port.list_worktrees(str(repo_root))]
 
 
 def _worktree_is_clean(
@@ -1550,10 +1510,12 @@ def _worktree_is_clean(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Return True when a worktree has no local changes."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
+    return _worktree_is_clean_helper(
+        worktree_path,
+        build_worktree_port=build_worktree_port,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
     )
-    return port.is_clean(worktree_path)
 
 
 def _worktree_ownership_is_safe(
@@ -1562,13 +1524,7 @@ def _worktree_ownership_is_safe(
     worktree_path: str,
 ) -> bool:
     """Return True when a clean worktree is safe to adopt for an issue."""
-    for worker in store.active_workers():
-        if worker.worktree_path == worktree_path and worker.issue_ref != issue_ref:
-            return False
-    latest = store.latest_session_for_worktree(worktree_path)
-    if latest is None:
-        return True
-    return latest.issue_ref == issue_ref
+    return _worktree_ownership_is_safe_helper(store, issue_ref, worktree_path)
 
 
 def _prepare_worktree(
@@ -1583,61 +1539,28 @@ def _prepare_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
-    parsed = parse_issue_ref(issue_ref)
-    store = session_store or build_session_store(db)
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
-    if config.worktree_reuse_enabled:
-        repo_root = config.repo_roots.get(parsed.prefix)
-        if repo_root is None:
-            raise WorktreePrepareError(
-                "unknown_repo_prefix",
-                f"unknown repo prefix for worktree prep: {parsed.prefix}",
-            )
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
-        target_branch = branch_name_override or f"feat/{parsed.number}-{slug}"
-        try:
-            worktree_records = _list_repo_worktrees(
-                repo_root,
-                worktree_port=port,
-            )
-        except RuntimeError as err:
-            logger.warning(
-                "Worktree reuse lookup failed for %s (%s); falling back to create",
-                issue_ref,
-                err,
-            )
-            worktree_records = []
-        for worktree_path, branch_name in worktree_records:
-            if branch_name != target_branch:
-                continue
-            if not _worktree_is_clean(worktree_path, worktree_port=port):
-                raise WorktreePrepareError(
-                    "worktree_in_use",
-                    f"existing worktree is dirty for {target_branch}: {worktree_path}",
-                )
-            if not _worktree_ownership_is_safe(store, issue_ref, worktree_path):
-                raise WorktreePrepareError(
-                    "worktree_in_use",
-                    f"existing worktree ownership is ambiguous for {target_branch}: {worktree_path}",
-                )
-            port.fast_forward_existing(worktree_path, target_branch)
-            _record_metric(
-                db,
-                config,
-                "worktree_reused",
-                issue_ref=issue_ref,
-                payload={"worktree_path": worktree_path, "branch_name": target_branch},
-            )
-            return worktree_path, target_branch
-
-    return _create_worktree(
+    return _prepare_worktree_helper(
         issue_ref,
         title,
         config,
+        db,
+        parse_issue_ref=parse_issue_ref,
+        build_session_store=build_session_store,
+        build_worktree_port=build_worktree_port,
+        list_repo_worktrees=_list_repo_worktrees,
+        worktree_is_clean=_worktree_is_clean,
+        worktree_ownership_is_safe=_worktree_ownership_is_safe,
+        create_worktree=_create_worktree,
+        record_metric=_record_metric,
+        error_cls=WorktreePrepareError,
+        log_warning=lambda ref, err: logger.warning(
+            "Worktree reuse lookup failed for %s (%s); falling back to create",
+            ref,
+            err,
+        ),
         branch_name_override=branch_name_override,
-        worktree_port=port,
+        session_store=session_store,
+        worktree_port=worktree_port,
         subprocess_runner=subprocess_runner,
     )
 
@@ -1660,15 +1583,15 @@ def _create_worktree(
 
     Shells out to wt-create.sh.
     """
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
-    entry = port.create_issue_worktree(
+    return _create_worktree_helper(
         issue_ref,
         title,
+        config,
+        build_worktree_port=build_worktree_port,
         branch_name_override=branch_name_override,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
     )
-    return entry.path, entry.branch_name
 
 
 def _fast_forward_existing_worktree(
@@ -1679,10 +1602,13 @@ def _fast_forward_existing_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
+    _fast_forward_existing_worktree_helper(
+        worktree_path,
+        branch,
+        build_worktree_port=build_worktree_port,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
     )
-    port.fast_forward_existing(worktree_path, branch)
 
 
 def _git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
@@ -1698,10 +1624,13 @@ def _reconcile_repair_branch(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> RepairBranchReconcileOutcome:
     """Reconcile a repair branch against its remote and origin/main."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
+    return _reconcile_repair_branch_helper(
+        worktree_path,
+        branch,
+        build_worktree_port=build_worktree_port,
+        worktree_port=worktree_port,
+        subprocess_runner=subprocess_runner,
     )
-    return port.reconcile_repair_branch(worktree_path, branch)
 
 
 # ---------------------------------------------------------------------------
@@ -2209,27 +2138,21 @@ def _post_consumer_claim_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post a deterministic claim provenance marker on the issue."""
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-    marker = _consumer_provenance_marker(
-        session_id=session_id,
-        issue_ref=issue_ref,
-        repo_prefix=repo_prefix,
-        branch_name=branch_name,
-        executor=executor,
+    _post_consumer_claim_comment_helper(
+        issue_ref,
+        session_id,
+        repo_prefix,
+        branch_name,
+        executor,
+        config,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        consumer_provenance_marker=_consumer_provenance_marker,
+        default_review_comment_checker=_default_review_comment_checker,
+        runtime_comment_poster=_runtime_comment_poster,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
-    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
-    if checker(owner, repo, number, marker, gh_runner=gh_runner):
-        return
-    body = "\n".join(
-        [
-            marker,
-            f"Local consumer claimed `{issue_ref}` for `{executor}` execution.",
-            f"Branch: `{branch_name}`",
-            f"Session: `{session_id}`",
-        ]
-    )
-    poster = comment_poster or _runtime_comment_poster
-    poster(owner, repo, number, body, gh_runner=gh_runner)
 
 
 # OpenPullRequestMatch: re-exported from domain.models
@@ -2244,26 +2167,16 @@ def _list_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequestMatch]:
     """Return open PRs that reference an issue number in the repository."""
-    port = pr_port or build_github_port_bundle(
-        "",
-        0,
+    return _list_open_pr_candidates_helper(
+        owner,
+        repo,
+        issue_number,
+        build_github_port_bundle=build_github_port_bundle,
+        open_pr_match_factory=OpenPullRequestMatch,
+        parse_consumer_provenance=_parse_consumer_provenance,
+        pr_port=pr_port,
         gh_runner=gh_runner,
-    ).pull_requests
-    payload = port.list_open_prs_for_issue(f"{owner}/{repo}", issue_number)
-    matches: list[OpenPullRequestMatch] = []
-    for item in payload:
-        body = item.body
-        matches.append(
-            OpenPullRequestMatch(
-                url=item.url,
-                number=item.number,
-                author=item.author,
-                body=body,
-                branch_name=item.head_ref_name,
-                provenance=_parse_consumer_provenance(body),
-            )
-        )
-    return matches
+    )
 
 
 def _classify_open_pr_candidates(
@@ -2278,19 +2191,17 @@ def _classify_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, OpenPullRequestMatch | None, str]:
     """Classify open PRs for an issue as adoptable, ambiguous, non-local, or none."""
-    candidates = _list_open_pr_candidates(
+    return _classify_open_pr_candidates_helper(
+        issue_ref,
         owner,
         repo,
         issue_number,
+        automation_config,
+        list_open_pr_candidates=_list_open_pr_candidates,
+        classify_pr_candidates_pure=_classify_pr_candidates_pure,
+        expected_branch=expected_branch,
         pr_port=pr_port,
         gh_runner=gh_runner,
-    )
-    return _classify_pr_candidates_pure(
-        issue_ref,
-        candidates,
-        trusted_authors=automation_config.trusted_local_authors,
-        expected_branch=expected_branch,
-        issue_number=issue_number,
     )
 
 
@@ -2310,44 +2221,20 @@ def _post_result_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post a machine-marker result comment on the issue."""
-    marker = _marker_for("consumer-result", issue_ref)
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-
-    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
-    # Don't check for duplicates — each cycle posts a new result
-
-    outcome = result.get("outcome", "unknown")
-    summary = result.get("summary", "No summary provided.")
-    tests_run = result.get("tests_run")
-    tests_passed = result.get("tests_passed")
-    changed_files = result.get("changed_files", [])
-    pr_url = result.get("pr_url")
-    duration = result.get("duration_seconds")
-    resolution = normalize_resolution_payload(result.get("resolution"))
-
-    lines = [
-        marker,
-        f"**Consumer result**: `{outcome}` (session: `{session_id}`)",
-        "",
-        f"> {summary}",
-    ]
-    if tests_run is not None:
-        lines.append(f"\nTests: {tests_passed}/{tests_run} passed")
-    if changed_files:
-        lines.append(f"\nChanged files: {len(changed_files)}")
-    if pr_url:
-        lines.append(f"\nPR: {pr_url}")
-    if resolution is not None:
-        lines.append(
-            "\nResolution: "
-            f"{resolution['kind']} ({resolution['equivalence_claim']})"
-        )
-    if duration is not None:
-        lines.append(f"\nDuration: {duration:.0f}s")
-
-    body = "\n".join(lines)
-    poster = comment_poster or _runtime_comment_poster
-    poster(owner, repo, number, body, gh_runner=gh_runner)
+    _post_result_comment_helper(
+        issue_ref,
+        result,
+        session_id,
+        config,
+        marker_for=_marker_for,
+        resolve_issue_coordinates=_resolve_issue_coordinates,
+        normalize_resolution_payload=normalize_resolution_payload,
+        default_review_comment_checker=_default_review_comment_checker,
+        runtime_comment_poster=_runtime_comment_poster,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2364,21 +2251,19 @@ def _post_pr_codex_verdict(
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Post the machine-readable codex pass verdict required for auto-merge."""
-    parsed = _parse_pr_url(pr_url)
-    if parsed is None:
-        raise GhQueryError(f"Invalid PR URL for codex verdict: {pr_url}")
-
-    owner, repo, pr_number = parsed
-    marker = _verdict_marker_text(session_id)
-    checker = comment_checker or _default_review_comment_checker(gh_runner=gh_runner)
-    if checker(owner, repo, pr_number, marker, gh_runner=gh_runner):
-        return False
-
-    body = _verdict_comment_body(session_id
+    return _post_pr_codex_verdict_helper(
+        pr_url,
+        session_id,
+        parse_pr_url=_parse_pr_url,
+        verdict_marker_text=_verdict_marker_text,
+        default_review_comment_checker=_default_review_comment_checker,
+        verdict_comment_body=_verdict_comment_body,
+        runtime_comment_poster=_runtime_comment_poster,
+        gh_query_error_cls=GhQueryError,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
-    poster = comment_poster or _runtime_comment_poster
-    poster(owner, repo, pr_number, body, gh_runner=gh_runner)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -2396,36 +2281,21 @@ def _backfill_review_verdicts(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Re-post missing codex verdict markers for successful review sessions."""
-    backfilled: list[str] = []
-    scoped_review_refs = set(review_refs or ())
-    for session in db.recent_sessions(limit=session_limit):
-        if session.status != "success":
-            continue
-        if session.phase != "review":
-            continue
-        if not session.pr_url:
-            continue
-        if scoped_review_refs and session.issue_ref not in scoped_review_refs:
-            continue
-        try:
-            posted = _post_pr_codex_verdict(
-                session.pr_url,
-                session.id,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-        except (GhQueryError, Exception) as err:
-            logger.warning(
-                "Review verdict backfill failed for %s (%s): %s",
-                session.issue_ref,
-                session.id,
-                err,
-            )
-            continue
-        if posted:
-            backfilled.append(session.issue_ref)
-    return tuple(backfilled)
+    return _backfill_review_verdicts_helper(
+        db,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        log_warning=lambda issue_ref, session_id, err: logger.warning(
+            "Review verdict backfill failed for %s (%s): %s",
+            issue_ref,
+            session_id,
+            err,
+        ),
+        session_limit=session_limit,
+        review_refs=review_refs,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
 
 
 def _group_review_queue_entries_by_pr(
