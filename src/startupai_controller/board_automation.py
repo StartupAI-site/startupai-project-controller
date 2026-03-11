@@ -144,6 +144,8 @@ from startupai_controller.application.automation.ready_wiring import (
     enforce_ready_dependency_guard as _wiring_enforce_ready_dependency_guard,
     schedule_ready_items as _wiring_schedule_ready_items,
     post_claim_comment as _wiring_post_claim_comment,
+    wire_schedule_ready_items as _wiring_wire_schedule_ready_items,
+    wire_claim_ready_issue as _wiring_wire_claim_ready_issue,
 )
 from startupai_controller.application.automation.audit_in_progress import (
     audit_in_progress as _app_audit_in_progress,
@@ -1336,32 +1338,10 @@ def schedule_ready_items(
     gh_runner: Callable[..., str] | None = None,
 ) -> SchedulingDecision:
     """Classify and optionally claim Ready issues. Returns SchedulingDecision."""
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    status_mutator = board_mutator
-    if status_mutator is None and board_info_resolver is not None:
-        status_mutator = _legacy_board_status_mutator(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    return _wiring_schedule_ready_items(
+    return _wiring_wire_schedule_ready_items(
         config,
         project_owner,
         project_number,
-        review_state_port=review_state_port,
-        board_port=board_port,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         mode=mode,
@@ -1369,10 +1349,15 @@ def schedule_ready_items(
         automation_config=automation_config,
         missing_executor_block_cap=missing_executor_block_cap,
         dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
+        board_mutator=board_mutator,
         gh_runner=gh_runner,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        legacy_board_status_mutator_fn=_legacy_board_status_mutator,
     )
 
 
@@ -1399,32 +1384,10 @@ def claim_ready_issue(
     gh_runner: Callable[..., str] | None = None,
 ) -> ClaimReadyResult:
     """Claim one Ready issue for a specific executor."""
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    status_mutator = board_mutator
-    if status_mutator is None and board_info_resolver is not None:
-        status_mutator = _legacy_board_status_mutator(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    return _app_claim_ready_issue(
+    return _wiring_wire_claim_ready_issue(
         config,
         project_owner,
         project_number,
-        review_state_port=review_state_port,
-        board_port=board_port,
         executor=executor,
         issue_ref=issue_ref,
         next_issue=next_issue,
@@ -1433,12 +1396,17 @@ def claim_ready_issue(
         per_executor_wip_limit=per_executor_wip_limit,
         automation_config=automation_config,
         dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
+        board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        legacy_board_status_mutator_fn=_legacy_board_status_mutator,
     )
 
 

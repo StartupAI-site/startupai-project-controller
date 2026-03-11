@@ -598,3 +598,147 @@ def post_claim_comment(
         comment_poster=comment_poster,
         gh_runner=gh_runner,
     )
+
+
+# ---------------------------------------------------------------------------
+# wire_schedule_ready_items (port materialisation + legacy mutator)
+# ---------------------------------------------------------------------------
+
+
+def wire_schedule_ready_items(
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    this_repo_prefix: str | None = None,
+    all_prefixes: bool = False,
+    mode: str = "advisory",
+    per_executor_wip_limit: int = 3,
+    automation_config: BoardAutomationConfig | None = None,
+    missing_executor_block_cap: int = DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
+    dry_run: bool = False,
+    review_state_port=None,
+    board_port=None,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver=None,
+    board_mutator=None,
+    gh_runner: Callable[..., str] | None = None,
+    # Injected board-automation helpers
+    default_review_state_port_fn: Callable[..., object] | None = None,
+    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    legacy_board_status_mutator_fn: Callable[..., Callable] | None = None,
+) -> SchedulingDecision:
+    """Wire port materialisation + legacy mutator, then delegate to core."""
+    review_state_port = review_state_port or default_review_state_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port = board_port or default_board_mutation_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    status_mutator = board_mutator
+    if status_mutator is None and board_info_resolver is not None:
+        status_mutator = legacy_board_status_mutator_fn(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    return schedule_ready_items(
+        config,
+        project_owner,
+        project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        mode=mode,
+        per_executor_wip_limit=per_executor_wip_limit,
+        automation_config=automation_config,
+        missing_executor_block_cap=missing_executor_block_cap,
+        dry_run=dry_run,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=status_mutator,
+        gh_runner=gh_runner,
+    )
+
+
+# ---------------------------------------------------------------------------
+# wire_claim_ready_issue (port materialisation + legacy mutator)
+# ---------------------------------------------------------------------------
+
+
+def wire_claim_ready_issue(
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    executor: str,
+    issue_ref: str | None = None,
+    next_issue: bool = False,
+    this_repo_prefix: str | None = None,
+    all_prefixes: bool = False,
+    per_executor_wip_limit: int = 3,
+    automation_config: BoardAutomationConfig | None = None,
+    dry_run: bool = False,
+    review_state_port=None,
+    board_port=None,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver=None,
+    board_mutator=None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+    # Injected board-automation helpers
+    default_review_state_port_fn: Callable[..., object] | None = None,
+    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    legacy_board_status_mutator_fn: Callable[..., Callable] | None = None,
+) -> ClaimReadyResult:
+    """Wire port materialisation + legacy mutator, then delegate to core."""
+    review_state_port = review_state_port or default_review_state_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port = board_port or default_board_mutation_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    status_mutator = board_mutator
+    if status_mutator is None and board_info_resolver is not None:
+        status_mutator = legacy_board_status_mutator_fn(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    return _app_claim_ready_issue(
+        config,
+        project_owner,
+        project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        executor=executor,
+        issue_ref=issue_ref,
+        next_issue=next_issue,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        per_executor_wip_limit=per_executor_wip_limit,
+        automation_config=automation_config,
+        dry_run=dry_run,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=status_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
