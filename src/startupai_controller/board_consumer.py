@@ -137,6 +137,20 @@ from startupai_controller.application.consumer.preflight import (
     execute_prepare_cycle_phases as _execute_prepare_cycle_phases_use_case,
     reconcile_board_truth as _reconcile_board_truth_use_case,
 )
+from startupai_controller.application.consumer.preflight_runtime import (
+    CycleRuntimeContext as _AppCycleRuntimeContext,
+    InitializeCycleRuntimeDeps,
+    PhaseHelperDeps,
+    PrepareCycleDeps,
+    initialize_cycle_runtime as _initialize_cycle_runtime_use_case,
+    run_deferred_replay_phase as _run_deferred_replay_phase_use_case,
+    load_board_snapshot_phase as _load_board_snapshot_phase_use_case,
+    run_executor_routing_phase as _run_executor_routing_phase_use_case,
+    run_reconciliation_phase as _run_reconciliation_phase_use_case,
+    run_review_queue_phase as _run_review_queue_phase_use_case,
+    run_admission_phase as _run_admission_phase_use_case,
+    prepare_cycle as _prepare_cycle_use_case,
+)
 from startupai_controller.application.consumer.launch import (
     ClaimLaunchDeps,
     PrepareLaunchDeps,
@@ -489,22 +503,8 @@ class ReviewGroupProcessingOutcome:
     error: str | None = None
 
 
-@dataclass(frozen=True)
-class CycleRuntimeContext:
-    """Cycle-scoped runtime wiring and configuration."""
-
-    session_store: SessionStorePort
-    cp_config: CriticalPathConfig
-    auto_config: BoardAutomationConfig | None
-    main_workflows: dict[str, WorkflowDefinition]
-    workflow_statuses: dict[str, Any]
-    dispatchable_repo_prefixes: tuple[str, ...]
-    effective_interval: int
-    global_limit: int
-    github_memo: CycleGitHubMemo
-    ready_flow_port: ReadyFlowPort
-    pr_port: PullRequestPort
-    review_state_port: ReviewStatePort
+# CycleRuntimeContext: re-exported from application.consumer.preflight_runtime
+CycleRuntimeContext = _AppCycleRuntimeContext
 
 
 @dataclass(frozen=True)
@@ -2988,6 +2988,37 @@ def _recover_interrupted_sessions(
     )
 
 
+def _build_init_cycle_runtime_deps() -> InitializeCycleRuntimeDeps:
+    """Build the deps for cycle runtime initialization."""
+    return InitializeCycleRuntimeDeps(
+        build_session_store=build_session_store,
+        load_config=load_config,
+        load_automation_config=load_automation_config,
+        apply_automation_runtime=_apply_automation_runtime,
+        current_main_workflows=_current_main_workflows,
+        build_github_port_bundle=build_github_port_bundle,
+        build_ready_flow_port=build_ready_flow_port,
+        cycle_github_memo_factory=CycleGitHubMemo,
+        config_error_type=ConfigError,
+        logger=logger,
+    )
+
+
+def _build_phase_helper_deps() -> PhaseHelperDeps:
+    """Build the deps for preflight phase helpers."""
+    return PhaseHelperDeps(
+        replay_deferred_actions=_replay_deferred_actions,
+        drain_review_queue=_drain_review_queue,
+        reconcile_board_truth=_reconcile_board_truth,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        record_successful_board_sync=_record_successful_board_sync,
+        clear_degraded=_clear_degraded,
+        mark_degraded=_mark_degraded,
+        persist_admission_summary=_persist_admission_summary,
+        logger=logger,
+    )
+
+
 def _initialize_cycle_runtime(
     config: ConsumerConfig,
     db: ConsumerDB,
@@ -2995,52 +3026,11 @@ def _initialize_cycle_runtime(
     gh_runner: Callable[..., str] | None = None,
 ) -> CycleRuntimeContext:
     """Build cycle-scoped runtime wiring and effective config."""
-    session_store = build_session_store(db)
-
-    cp_config = load_config(config.critical_paths_path)
-    try:
-        auto_config = load_automation_config(config.automation_config_path)
-    except ConfigError as err:
-        logger.warning("Automation config error (proceeding without): %s", err)
-        auto_config = None
-    _apply_automation_runtime(config, auto_config)
-
-    main_workflows, workflow_statuses, effective_interval = _current_main_workflows(
-        config
-    )
-    dispatchable_repo_prefixes = tuple(
-        repo_prefix
-        for repo_prefix in config.repo_prefixes
-        if workflow_statuses[repo_prefix].available
-    )
-    config.poll_interval_seconds = effective_interval
-    github_memo = CycleGitHubMemo()
-    github_ports = build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=cp_config,
-        github_memo=github_memo,
+    return _initialize_cycle_runtime_use_case(
+        config,
+        db,
+        deps=_build_init_cycle_runtime_deps(),
         gh_runner=gh_runner,
-    )
-    global_limit = (
-        auto_config.global_concurrency
-        if auto_config is not None
-        else config.global_concurrency
-    )
-
-    return CycleRuntimeContext(
-        session_store=session_store,
-        cp_config=cp_config,
-        auto_config=auto_config,
-        main_workflows=main_workflows,
-        workflow_statuses=workflow_statuses,
-        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
-        effective_interval=effective_interval,
-        global_limit=global_limit,
-        github_memo=github_memo,
-        ready_flow_port=build_ready_flow_port(),
-        pr_port=github_ports.pull_requests,
-        review_state_port=github_ports.review_state,
     )
 
 
@@ -3058,25 +3048,19 @@ def _run_deferred_replay_phase(
     dry_run: bool,
 ) -> None:
     """Replay deferred actions for the cycle when enabled."""
-    if not config.deferred_replay_enabled or dry_run:
-        return
-    phase_started = time.monotonic()
-    replayed_actions = _replay_deferred_actions(
-        db,
+    return _run_deferred_replay_phase_use_case(
         config,
-        runtime.cp_config,
-        pr_port=runtime.pr_port,
-        review_state_port=runtime.pr_port,
-        board_port=runtime.pr_port,
+        db,
+        runtime,
+        deps=_build_phase_helper_deps(),
+        timings_ms=timings_ms,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
+        dry_run=dry_run,
     )
-    timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
-    if replayed_actions:
-        logger.info("Replayed deferred control-plane actions: %s", replayed_actions)
 
 
 def _load_board_snapshot_phase(
@@ -3087,10 +3071,12 @@ def _load_board_snapshot_phase(
     gh_runner: Callable[..., str] | None,
 ) -> CycleBoardSnapshot:
     """Load the cycle board snapshot."""
-    phase_started = time.monotonic()
-    board_snapshot = runtime.review_state_port.build_board_snapshot()
-    timings_ms["board_snapshot"] = int((time.monotonic() - phase_started) * 1000)
-    return board_snapshot
+    return _load_board_snapshot_phase_use_case(
+        config,
+        runtime,
+        timings_ms=timings_ms,
+        gh_runner=gh_runner,
+    )
 
 
 def _run_executor_routing_phase(
@@ -3104,24 +3090,16 @@ def _run_executor_routing_phase(
     dry_run: bool,
 ) -> None:
     """Normalize executor routing for the protected queue."""
-    phase_started = time.monotonic()
-    routing_decision = runtime.ready_flow_port.route_protected_queue_executors(
-        runtime.cp_config,
-        runtime.auto_config,
-        config.project_owner,
-        config.project_number,
-        dry_run=dry_run,
+    return _run_executor_routing_phase_use_case(
+        config,
+        db,
+        runtime,
+        deps=_build_phase_helper_deps(),
         board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
         gh_runner=gh_runner,
+        dry_run=dry_run,
     )
-    timings_ms["executor_routing"] = int((time.monotonic() - phase_started) * 1000)
-    if routing_decision.routed:
-        if not dry_run:
-            _record_successful_github_mutation(db)
-        logger.info(
-            "Executor routing normalized protected queue: %s",
-            routing_decision.routed,
-        )
 
 
 def _run_reconciliation_phase(
@@ -3136,31 +3114,17 @@ def _run_reconciliation_phase(
     gh_runner: Callable[..., str] | None,
 ) -> None:
     """Run truthful board reconciliation for the cycle."""
-    phase_started = time.monotonic()
-    reconciliation = _reconcile_board_truth(
+    return _run_reconciliation_phase_use_case(
         config,
-        runtime.cp_config,
-        runtime.auto_config,
         db,
-        session_store=runtime.session_store,
-        pr_port=runtime.pr_port,
-        review_state_port=runtime.pr_port,
-        board_port=runtime.pr_port,
+        runtime,
+        deps=_build_phase_helper_deps(),
         board_snapshot=board_snapshot,
+        timings_ms=timings_ms,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
     )
-    timings_ms["reconciliation"] = int((time.monotonic() - phase_started) * 1000)
-    _record_successful_board_sync(db)
-    _clear_degraded(db)
-    if (
-        reconciliation.moved_ready
-        or reconciliation.moved_in_progress
-        or reconciliation.moved_review
-        or reconciliation.moved_blocked
-    ):
-        logger.info("Board reconciliation: %s", reconciliation)
 
 
 def _run_review_queue_phase(
@@ -3174,39 +3138,16 @@ def _run_review_queue_phase(
     dry_run: bool,
 ) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
     """Drain the review queue for the current cycle."""
-    phase_started = time.monotonic()
-    review_queue_summary, updated_snapshot = _drain_review_queue(
+    return _run_review_queue_phase_use_case(
         config,
         db,
-        runtime.cp_config,
-        runtime.auto_config,
-        pr_port=runtime.pr_port,
-        session_store=runtime.session_store,
+        runtime,
+        deps=_build_phase_helper_deps(),
         board_snapshot=board_snapshot,
-        dry_run=dry_run,
-        github_memo=runtime.github_memo,
+        timings_ms=timings_ms,
         gh_runner=gh_runner,
+        dry_run=dry_run,
     )
-    timings_ms["review_queue"] = int((time.monotonic() - phase_started) * 1000)
-    if review_queue_summary.error:
-        logger.warning("Review queue partial failure: %s", review_queue_summary.error)
-        if not dry_run:
-            _mark_degraded(
-                db,
-                f"review-queue:partial-failure:{review_queue_summary.error}",
-            )
-    if (
-        review_queue_summary.seeded
-        or review_queue_summary.removed
-        or review_queue_summary.verdict_backfilled
-        or review_queue_summary.rerun
-        or review_queue_summary.auto_merge_enabled
-        or review_queue_summary.requeued
-        or review_queue_summary.blocked
-        or review_queue_summary.skipped
-    ):
-        logger.info("Review queue: %s", review_queue_summary)
-    return review_queue_summary, updated_snapshot
 
 
 def _run_admission_phase(
@@ -3220,35 +3161,16 @@ def _run_admission_phase(
     dry_run: bool,
 ) -> dict[str, Any]:
     """Run backlog admission for the current cycle."""
-    phase_started = time.monotonic()
-    admission_decision = runtime.ready_flow_port.admit_backlog_items(
-        runtime.cp_config,
-        runtime.auto_config,
-        config.project_owner,
-        config.project_number,
-        dispatchable_repo_prefixes=runtime.dispatchable_repo_prefixes,
-        active_lease_issue_refs=tuple(db.active_lease_issue_refs()),
-        dry_run=dry_run,
+    return _run_admission_phase_use_case(
+        config,
+        db,
+        runtime,
+        deps=_build_phase_helper_deps(),
         board_snapshot=board_snapshot,
-        github_memo=runtime.github_memo,
+        timings_ms=timings_ms,
         gh_runner=gh_runner,
+        dry_run=dry_run,
     )
-    timings_ms["admission"] = int((time.monotonic() - phase_started) * 1000)
-    admission_summary = runtime.ready_flow_port.admission_summary_payload(
-        admission_decision,
-        enabled=bool(
-            runtime.auto_config is not None and runtime.auto_config.admission.enabled
-        ),
-    )
-    if admission_decision.admitted:
-        if not dry_run:
-            _record_successful_github_mutation(db)
-        logger.info("Backlog admission admitted: %s", list(admission_decision.admitted))
-    if admission_decision.partial_failure and admission_decision.error:
-        logger.warning("Backlog admission partial failure: %s", admission_decision.error)
-    if not dry_run:
-        _persist_admission_summary(db, admission_summary)
-    return admission_summary
 
 
 def _execute_prepare_cycle_phases(
@@ -3303,88 +3225,28 @@ def _prepare_cycle(
     gh_runner: Callable[..., str] | None = None,
 ) -> PreparedCycleContext:
     """Run control-plane preflight once for a daemon tick."""
-    request_stats_token = begin_runtime_request_stats()
-    expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
-    if expired:
-        logger.info("Expired stale leases: %s", expired)
-
-    runtime = _initialize_cycle_runtime(
+    return _prepare_cycle_use_case(
         config,
         db,
-        gh_runner=gh_runner,
-    )
-    (
-        board_snapshot,
-        review_queue_summary,
-        admission_summary,
-        timings_ms,
-    ) = _execute_prepare_cycle_phases(
-        config,
-        db,
-        runtime,
+        deps=PrepareCycleDeps(
+            initialize_cycle_runtime_deps=_build_init_cycle_runtime_deps(),
+            phase_helper_deps=_build_phase_helper_deps(),
+            begin_runtime_request_stats=begin_runtime_request_stats,
+            end_runtime_request_stats=end_runtime_request_stats,
+            snapshot_to_issue_ref=_snapshot_to_issue_ref,
+            parse_issue_ref=parse_issue_ref,
+            record_metric=_record_metric,
+            control_key_degraded=CONTROL_KEY_DEGRADED,
+            prepare_cycle_phases_deps_factory=PrepareCyclePhasesDeps,
+            execute_prepare_cycle_phases=_execute_prepare_cycle_phases_use_case,
+        ),
+        prepared_cycle_context_factory=PreparedCycleContext,
         dry_run=dry_run,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-    )
-
-    request_stats = end_runtime_request_stats(request_stats_token)
-    github_request_counts = {
-        "graphql": request_stats.graphql,
-        "rest": request_stats.rest,
-    }
-    total_preflight_ms = sum(timings_ms.values())
-    if total_preflight_ms >= 5000:
-        logger.info(
-            "Preflight timings ms=%s github_requests=%s",
-            timings_ms,
-            github_request_counts,
-        )
-    if not dry_run:
-        ready_for_executor = 0
-        for snapshot in board_snapshot.items_with_status("Ready"):
-            if snapshot.executor.strip().lower() != config.executor:
-                continue
-            issue_ref = _snapshot_to_issue_ref(
-                snapshot.issue_ref, runtime.cp_config.issue_prefixes
-            )
-            if issue_ref is None:
-                continue
-            if (
-                parse_issue_ref(issue_ref).prefix
-                not in runtime.dispatchable_repo_prefixes
-            ):
-                continue
-            ready_for_executor += 1
-        _record_metric(
-            db,
-            config,
-            "cycle_observation",
-            payload={
-                "ready_for_executor": ready_for_executor,
-                "active_leases": db.active_lease_count(),
-                "global_limit": runtime.global_limit,
-                "degraded": db.get_control_value(CONTROL_KEY_DEGRADED) == "true",
-            },
-        )
-
-    return PreparedCycleContext(
-        cp_config=runtime.cp_config,
-        auto_config=runtime.auto_config,
-        main_workflows=runtime.main_workflows,
-        workflow_statuses=runtime.workflow_statuses,
-        dispatchable_repo_prefixes=runtime.dispatchable_repo_prefixes,
-        effective_interval=runtime.effective_interval,
-        global_limit=runtime.global_limit,
-        board_snapshot=board_snapshot,
-        github_memo=runtime.github_memo,
-        ready_flow_port=runtime.ready_flow_port,
-        admission_summary=admission_summary,
-        review_queue_summary=review_queue_summary,
-        timings_ms=timings_ms,
-        github_request_counts=github_request_counts,
     )
 
 
