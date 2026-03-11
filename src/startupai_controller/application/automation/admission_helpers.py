@@ -18,7 +18,10 @@ from startupai_controller.domain.models import (
     OpenPullRequest,
     ProjectItemSnapshot as _ProjectItemSnapshot,
 )
-from startupai_controller.domain.repair_policy import MARKER_PREFIX
+from startupai_controller.domain.repair_policy import (
+    MARKER_PREFIX,
+    parse_consumer_provenance as _parse_consumer_provenance,
+)
 from startupai_controller.domain.resolution_policy import parse_resolution_comment
 from startupai_controller.domain.scheduling_policy import (
     has_structured_acceptance_criteria,
@@ -65,28 +68,6 @@ def _deterministic_issue_branch_pattern(issue_ref: str) -> re.Pattern[str]:
     """Return the canonical issue branch naming pattern."""
     parsed = parse_issue_ref(issue_ref)
     return re.compile(rf"^feat/{parsed.number}-[a-z0-9-]+$")
-
-
-def _parse_consumer_provenance(text: str) -> dict[str, str] | None:
-    """Parse the consumer provenance marker from text."""
-    match = re.search(
-        rf"<!--\s*{re.escape(MARKER_PREFIX)}:consumer:"
-        r"session=(?P<session>[^\s]+)\s+"
-        r"issue=(?P<issue>[^\s]+)\s+"
-        r"repo=(?P<repo>[^\s]+)\s+"
-        r"branch=(?P<branch>[^\s]+)\s+"
-        r"executor=(?P<executor>[^\s]+)\s*-->",
-        text,
-    )
-    if not match:
-        return None
-    return {
-        "session_id": match.group("session"),
-        "issue_ref": match.group("issue"),
-        "repo_prefix": match.group("repo"),
-        "branch_name": match.group("branch"),
-        "executor": match.group("executor"),
-    }
 
 
 def _extract_closing_issue_numbers(body: str) -> set[int]:

@@ -85,6 +85,7 @@ from startupai_controller.domain.rescue_policy import rescue_decision
 from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
     marker_for as _marker_for,
+    parse_consumer_provenance as _parse_consumer_provenance,
     parse_pr_url as _parse_pr_url,
     repo_to_prefix_for_repo as _repo_to_prefix,
 )
@@ -183,6 +184,20 @@ from startupai_controller.application.automation.admission_helpers import (
     build_provisional_admission_candidates as _app_build_provisional_admission_candidates,
     evaluate_admission_candidates as _app_evaluate_admission_candidates,
     apply_admitted_backlog_candidates as _app_apply_admitted_backlog_candidates,
+)
+from startupai_controller.application.automation.codex_fail_routing import (
+    apply_codex_fail_routing as _app_apply_codex_fail_routing,
+)
+from startupai_controller.application.automation.executor_routing import (
+    route_protected_queue_executors as _app_route_protected_queue_executors,
+    protected_queue_executor_target as _app_protected_queue_executor_target,
+)
+from startupai_controller.application.automation.board_field_helpers import (
+    set_handoff_target as _app_set_handoff_target,
+)
+from startupai_controller.application.automation.execution_policy import (
+    ExecutionPolicyPrContext as _ExecutionPolicyPrContext,
+    load_execution_policy_pr_context as _app_load_execution_policy_pr_context,
 )
 from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
@@ -1294,10 +1309,10 @@ def _apply_codex_fail_routing(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Route failed codex review back to In Progress with explicit handoff."""
-    _changed, old_status = _transition_issue_status(
+    _app_apply_codex_fail_routing(
         issue_ref,
-        {"Review"},
-        "In Progress",
+        route,
+        checklist,
         config,
         project_owner,
         project_number,
@@ -1306,70 +1321,13 @@ def _apply_codex_fail_routing(
         board_port=board_port,
         board_info_resolver=board_info_resolver,
         gh_runner=gh_runner,
+        transition_issue_status_fn=_transition_issue_status,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        query_project_item_field_fn=_query_project_item_field,
+        issue_ref_to_repo_parts_fn=_issue_ref_to_repo_parts,
+        comment_exists_fn=_comment_exists,
     )
-
-    if old_status not in {"Review", "In Progress"}:
-        return
-
-    if route == "executor":
-        if review_state_port is not None or board_info_resolver is None:
-            review_state_port = review_state_port or _default_review_state_port(
-                project_owner,
-                project_number,
-                config,
-                gh_runner=gh_runner,
-            )
-            executor = review_state_port.get_issue_fields(issue_ref).executor.lower()
-        else:
-            executor = _query_project_item_field(
-                issue_ref,
-                "Executor",
-                config,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            ).lower()
-        handoff_target = executor if executor in VALID_EXECUTORS else "human"
-    elif route in VALID_EXECUTORS:
-        handoff_target = route
-    else:
-        handoff_target = "human"
-
-    if not dry_run:
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        board_port.set_issue_field(issue_ref, "Handoff To", handoff_target)
-
-    owner, repo, number = _issue_ref_to_repo_parts(issue_ref, config)
-    marker = _marker_for("codex-review-fail", issue_ref)
-    if _comment_exists(owner, repo, number, marker, gh_runner=gh_runner):
-        return
-
-    checklist_text = ""
-    if checklist:
-        checklist_text = "\n".join(f"- [ ] {item}" for item in checklist)
-    else:
-        checklist_text = "- [ ] Address Codex review findings"
-
-    body = (
-        f"{marker}\n"
-        f"Codex review verdict: `fail`\n"
-        f"Route: `{route}` (handoff: `{handoff_target}`)\n\n"
-        "Required fixes:\n"
-        f"{checklist_text}"
-    )
-    if not dry_run:
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        board_port.post_issue_comment(f"{owner}/{repo}", number, body)
 
 
 def mark_issues_done(
@@ -1575,12 +1533,7 @@ def _protected_queue_executor_target(
     automation_config: BoardAutomationConfig | None,
 ) -> str | None:
     """Return the sole protected execution executor when routing is deterministic."""
-    if automation_config is None:
-        return None
-    return _domain_protected_queue_executor_target(
-        execution_authority_mode=automation_config.execution_authority_mode,
-        execution_authority_executors=tuple(automation_config.execution_authority_executors),
-    )
+    return _app_protected_queue_executor_target(automation_config)
 
 
 def route_protected_queue_executors(
@@ -1595,76 +1548,20 @@ def route_protected_queue_executors(
     gh_runner: Callable[..., str] | None = None,
 ) -> ExecutorRoutingDecision:
     """Normalize protected Backlog/Ready queue items onto the local executor lane."""
-    decision = ExecutorRoutingDecision()
-    target_executor = _protected_queue_executor_target(automation_config)
-    if target_executor is None:
-        decision.skipped.append(("*", "no-deterministic-executor-target"))
-        return decision
-    assert automation_config is not None
-    board_port = None if dry_run else _default_board_mutation_port(
+    return _app_route_protected_queue_executors(
+        config,
+        automation_config,
         project_owner,
         project_number,
-        config,
+        statuses=statuses,
+        dry_run=dry_run,
+        board_snapshot=board_snapshot,
         gh_runner=gh_runner,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        list_project_items_by_status_fn=_list_project_items_by_status,
+        query_issue_board_info_fn=_query_issue_board_info,
+        set_single_select_field_fn=_set_single_select_field,
     )
-
-    for status in statuses:
-        items = (
-            board_snapshot.items_with_status(status)
-            if board_snapshot is not None
-            else _list_project_items_by_status(
-                status,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
-        )
-        for snapshot in items:
-            issue_ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
-            if issue_ref is None:
-                decision.skipped.append((snapshot.issue_ref, "unknown-repo-prefix"))
-                continue
-
-            repo_prefix = parse_issue_ref(issue_ref).prefix
-            if repo_prefix not in automation_config.execution_authority_repos:
-                decision.skipped.append((issue_ref, "repo-not-governed"))
-                continue
-
-            current_executor = snapshot.executor.strip().lower()
-            if current_executor == target_executor:
-                decision.unchanged.append(issue_ref)
-                continue
-
-            project_id = snapshot.project_id.strip()
-            item_id = snapshot.item_id.strip()
-            if not project_id or not item_id:
-                info = _query_issue_board_info(
-                    issue_ref,
-                    config,
-                    project_owner,
-                    project_number,
-                )
-                if info.status == "NOT_ON_BOARD":
-                    decision.skipped.append((issue_ref, "not-on-board"))
-                    continue
-                project_id = info.project_id
-                item_id = info.item_id
-
-            if not dry_run and board_port is not None:
-                _set_single_select_field(
-                    project_id,
-                    item_id,
-                    "Executor",
-                    target_executor,
-                    board_port=board_port,
-                    project_owner=project_owner,
-                    project_number=project_number,
-                    config=config,
-                    gh_runner=gh_runner,
-                )
-            decision.routed.append(issue_ref)
-
-    return decision
 
 
 def _controller_owned_admission(
@@ -1698,24 +1595,19 @@ def _set_handoff_target(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set the board Handoff To field for an issue."""
-    review_state_port = review_state_port or _default_review_state_port(
+    _app_set_handoff_target(
+        issue_ref,
+        target,
+        config,
         project_owner,
         project_number,
-        config,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
         gh_runner=gh_runner,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
     )
-    current_status = review_state_port.get_issue_status(issue_ref)
-    if current_status in {None, "NOT_ON_BOARD"}:
-        return
-    if dry_run:
-        return
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port.set_issue_field(issue_ref, "Handoff To", target)
 
 
 def _build_admission_pipeline_deps() -> _AdmissionPipelineDeps:
@@ -2929,28 +2821,6 @@ def automerge_review(
 # ExecutionPolicyDecision — imported from domain.models (M5)
 
 
-def _parse_consumer_provenance(body: str) -> dict[str, str] | None:
-    """Parse consumer provenance marker from PR body."""
-    match = re.search(
-        rf"<!--\s*{re.escape(MARKER_PREFIX)}:consumer:"
-        r"session=(?P<session>[^\s]+)\s+"
-        r"issue=(?P<issue>[^\s]+)\s+"
-        r"repo=(?P<repo>[^\s]+)\s+"
-        r"branch=(?P<branch>[^\s]+)\s+"
-        r"executor=(?P<executor>[^\s]+)\s*-->",
-        body or "",
-    )
-    if not match:
-        return None
-    return {
-        "session_id": match.group("session"),
-        "issue_ref": match.group("issue"),
-        "repo_prefix": match.group("repo"),
-        "branch_name": match.group("branch"),
-        "executor": match.group("executor"),
-    }
-
-
 def enforce_execution_policy(
     pr_repo: str,
     pr_number: int,
@@ -2969,12 +2839,13 @@ def enforce_execution_policy(
     if "/" not in pr_repo:
         raise ConfigError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
 
-    pr_context = _load_execution_policy_pr_context(
+    pr_context = _app_load_execution_policy_pr_context(
         pr_repo=pr_repo,
         pr_number=pr_number,
         project_owner=project_owner,
         project_number=project_number,
         gh_runner=gh_runner,
+        default_pr_port_fn=_default_pr_port,
     )
     actor = pr_context.actor
     state = pr_context.state
@@ -3011,63 +2882,6 @@ def enforce_execution_policy(
             config,
             gh_runner=gh_runner,
         ),
-    )
-
-
-@dataclass(frozen=True)
-class _ExecutionPolicyPrContext:
-    actor: str
-    state: str
-    url: str
-    provenance: dict[str, str] | None
-
-
-def _load_execution_policy_pr_context(
-    *,
-    pr_repo: str,
-    pr_number: int,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    pr_port: _PullRequestPort | None = None,
-    gh_runner: Callable[..., str] | None,
-) -> _ExecutionPolicyPrContext:
-    """Load the PR context needed for execution policy decisions."""
-    if pr_port is None and gh_runner is not None:
-        raw = gh_runner(
-            [
-                "pr",
-                "view",
-                str(pr_number),
-                "--repo",
-                pr_repo,
-                "--json",
-                "author,state,url,body",
-            ]
-        )
-        payload = json.loads(raw)
-        actor = ((payload.get("author") or {}).get("login") or "").strip().lower()
-        state = str(payload.get("state") or "CLOSED").upper()
-        url = str(payload.get("url") or "")
-        body = str(payload.get("body") or "")
-    else:
-        pr_port = pr_port or _default_pr_port(
-            project_owner,
-            project_number,
-            config=None,
-            gh_runner=gh_runner,
-        )
-        pr_data = pr_port.get_pull_request(pr_repo, pr_number)
-        if pr_data is None:
-            raise GhQueryError(f"Failed loading PR payload for {pr_repo}#{pr_number}.")
-        actor = (pr_data.author or "").strip().lower()
-        state = "OPEN" if pr_port.is_pull_request_open(pr_repo, pr_number) else "CLOSED"
-        url = pr_data.url
-        body = pr_data.body or ""
-    return _ExecutionPolicyPrContext(
-        actor=actor,
-        state=state,
-        url=url,
-        provenance=_parse_consumer_provenance(body),
     )
 
 

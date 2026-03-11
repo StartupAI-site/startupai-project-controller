@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.board_automation_config import (
+    BoardAutomationConfig,
+    DEFAULT_PROJECT_OWNER,
+    DEFAULT_PROJECT_NUMBER,
+)
 from startupai_controller.domain.models import ExecutionPolicyDecision, LinkedIssue
 from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
     marker_for as _marker_for,
+    parse_consumer_provenance as _parse_consumer_provenance,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,
+    GhQueryError,
     parse_issue_ref,
 )
 
@@ -295,3 +303,70 @@ def enforce_execution_policy(
             )
 
     return decision
+
+
+# ---------------------------------------------------------------------------
+# PR context loading for execution policy
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExecutionPolicyPrContext:
+    actor: str
+    state: str
+    url: str
+    provenance: dict[str, str] | None
+
+
+def load_execution_policy_pr_context(
+    *,
+    pr_repo: str,
+    pr_number: int,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    pr_port=None,
+    gh_runner: Callable[..., str] | None,
+    # Injected board-automation helpers
+    default_pr_port_fn: Callable[..., object] | None = None,
+) -> ExecutionPolicyPrContext:
+    """Load the PR context needed for execution policy decisions."""
+    if pr_port is None and gh_runner is not None:
+        raw = gh_runner(
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--repo",
+                pr_repo,
+                "--json",
+                "author,state,url,body",
+            ]
+        )
+        payload = json.loads(raw)
+        actor = ((payload.get("author") or {}).get("login") or "").strip().lower()
+        state = str(payload.get("state") or "CLOSED").upper()
+        url = str(payload.get("url") or "")
+        body = str(payload.get("body") or "")
+    else:
+        if default_pr_port_fn is not None:
+            pr_port = pr_port or default_pr_port_fn(
+                project_owner,
+                project_number,
+                config=None,
+                gh_runner=gh_runner,
+            )
+        if pr_port is None:
+            raise GhQueryError(f"No PR port available for {pr_repo}#{pr_number}.")
+        pr_data = pr_port.get_pull_request(pr_repo, pr_number)
+        if pr_data is None:
+            raise GhQueryError(f"Failed loading PR payload for {pr_repo}#{pr_number}.")
+        actor = (pr_data.author or "").strip().lower()
+        state = "OPEN" if pr_port.is_pull_request_open(pr_repo, pr_number) else "CLOSED"
+        url = pr_data.url
+        body = pr_data.body or ""
+    return ExecutionPolicyPrContext(
+        actor=actor,
+        state=state,
+        url=url,
+        provenance=_parse_consumer_provenance(body),
+    )
