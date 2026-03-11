@@ -123,6 +123,14 @@ from startupai_controller.domain.models import (
     SchedulingDecision,
     IssueSnapshot,
 )
+from startupai_controller.application.automation.ready_claim import (
+    _post_claim_comment as _app_post_claim_comment,
+    _set_blocked_with_reason as _app_set_blocked_with_reason,
+    _transition_issue_status as _app_transition_issue_status,
+    _wip_limit_for_lane as _app_wip_limit_for_lane,
+    claim_ready_issue as _app_claim_ready_issue,
+    schedule_ready_items as _app_schedule_ready_items,
+)
 from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
     GitHubPortBundle,
@@ -1070,67 +1078,37 @@ def _set_blocked_with_reason(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set Status=Blocked and Blocked Reason on a board item."""
-    if (
-        board_info_resolver is None
-        and board_mutator is None
-    ) or review_state_port is not None or board_port is not None:
-        review_state_port = review_state_port or _default_review_state_port(
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    status_mutator = board_mutator
+    if status_mutator is None and board_info_resolver is not None:
+        status_mutator = _legacy_board_status_mutator(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        current_status = review_state_port.get_issue_status(issue_ref)
-        if current_status in {None, "NOT_ON_BOARD"}:
-            raise GhQueryError(f"{issue_ref} is not on the project board.")
-        if dry_run:
-            return
-        if current_status != "Blocked":
-            board_port.set_issue_status(issue_ref, "Blocked")
-        board_port.set_issue_field(issue_ref, "Blocked Reason", reason)
-        return
-
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-
-    if info.status == "NOT_ON_BOARD":
-        raise GhQueryError(f"{issue_ref} is not on the project board.")
-
-    mutate = board_mutator
-    if mutate is None:
-        _set_board_status(
-            info.project_id,
-            info.item_id,
-            "Blocked",
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-        )
-    else:
-        mutate(info.project_id, info.item_id)
-
-    # Set Blocked Reason text field through the canonical mutation boundary.
-    _set_text_field(
-        info.project_id,
-        info.item_id,
-        "Blocked Reason",
+    _app_set_blocked_with_reason(
+        issue_ref,
         reason,
-        board_port=_default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        ),
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
+        config,
+        project_owner,
+        project_number,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=status_mutator,
         gh_runner=gh_runner,
     )
 
@@ -1151,38 +1129,38 @@ def _transition_issue_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[bool, str]:
     """Transition issue status through ports, with legacy fallback for tests."""
-    if (
-        board_info_resolver is None
-        and board_mutator is None
-    ) or review_state_port is not None or board_port is not None:
-        review_state_port = review_state_port or _default_review_state_port(
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    status_mutator = board_mutator
+    if status_mutator is None and board_info_resolver is not None:
+        status_mutator = _legacy_board_status_mutator(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-        board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        old_status = review_state_port.get_issue_status(issue_ref) or "NOT_ON_BOARD"
-        if old_status not in from_statuses:
-            return False, old_status
-        if not dry_run:
-            board_port.set_issue_status(issue_ref, to_status)
-        return True, old_status
-
-    return _set_status_if_changed(
+    return _app_transition_issue_status(
         issue_ref,
         from_statuses,
         to_status,
         config,
         project_owner,
         project_number,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
+        board_mutator=status_mutator,
         gh_runner=gh_runner,
     )
 
@@ -1194,8 +1172,30 @@ def _wip_limit_for_lane(
     fallback: int,
 ) -> int:
     """Resolve WIP limit for an executor/lane pair."""
-    wip_limits = automation_config.wip_limits if automation_config else None
-    return _domain_wip_limit_for_lane(wip_limits, executor, lane, fallback)
+    return _app_wip_limit_for_lane(automation_config, executor, lane, fallback)
+
+
+def _legacy_board_status_mutator(
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> Callable[..., None]:
+    """Adapt legacy project-item status helpers to the application boundary."""
+
+    def mutate(project_id: str, item_id: str, status: str = "Blocked") -> None:
+        _set_board_status(
+            project_id,
+            item_id,
+            status,
+            project_owner=project_owner,
+            project_number=project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
+
+    return mutate
 
 
 # ---------------------------------------------------------------------------
@@ -2741,235 +2741,28 @@ def _post_claim_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post deterministic kickoff comment on successful claim."""
-    marker = _marker_for("claim-ready", issue_ref)
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-
-    checker = comment_checker or _comment_exists
-    if checker(owner, repo, number, marker, gh_runner=gh_runner):
-        return
-
-    executor_label = f"Executor: `{executor}`" if executor else ""
-    body = (
-        f"{marker}\n"
-        f"**Claimed for execution** by `{executor}`.\n\n"
-        "Board transition: `Ready -> In Progress`.\n"
-        f"{executor_label}".strip()
+    review_state_port = _default_review_state_port(
+        DEFAULT_PROJECT_OWNER,
+        DEFAULT_PROJECT_NUMBER,
+        config,
+        gh_runner=gh_runner,
     )
-    if comment_poster is not None:
-        comment_poster(owner, repo, number, body, gh_runner=gh_runner)
-        return
     board_port = board_port or _default_board_mutation_port(
         DEFAULT_PROJECT_OWNER,
         DEFAULT_PROJECT_NUMBER,
         config,
         gh_runner=gh_runner,
     )
-    board_port.post_issue_comment(f"{owner}/{repo}", number, body)
-
-
-def _load_schedule_ready_state(
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    automation_config: BoardAutomationConfig | None,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[
-    bool,
-    list[IssueSnapshot],
-    dict[str, int],
-    dict[tuple[str, str], int],
-]:
-    """Load Ready items and WIP counts for one scheduling pass."""
-    use_ports = (
-        board_info_resolver is None
-        and board_mutator is None
-    ) or review_state_port is not None or board_port is not None
-    review_state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
+    _app_post_claim_comment(
+        issue_ref,
+        executor,
         config,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        comment_checker=comment_checker or _comment_exists,
+        comment_poster=comment_poster,
         gh_runner=gh_runner,
     )
-    wip_items = review_state_port.list_issues_by_status("In Progress")
-    wip_counts = _count_wip_by_executor(wip_items)
-    lane_wip_counts: dict[tuple[str, str], int] = {}
-    if automation_config is not None:
-        lane_wip_counts = _count_wip_by_executor_lane(config, wip_items)
-    ready_items = review_state_port.list_issues_by_status("Ready")
-    ready_items = sorted(
-        ready_items,
-        key=lambda snapshot: _ready_snapshot_rank(snapshot, config),
-    )
-    return use_ports, ready_items, wip_counts, lane_wip_counts
-
-
-def _record_missing_executor_ready_item(
-    ref: str,
-    reason: str,
-    *,
-    decision: SchedulingDecision,
-    missing_executor_block_cap: int,
-    dry_run: bool,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Block or skip one Ready item with a missing/invalid executor."""
-    if len(decision.blocked_missing_executor) < missing_executor_block_cap:
-        if not dry_run:
-            try:
-                _set_blocked_with_reason(
-                    ref,
-                    reason,
-                    config,
-                    project_owner,
-                    project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError:
-                pass
-        decision.blocked_missing_executor.append(ref)
-        return
-    decision.skipped_missing_executor.append(ref)
-
-
-def _process_schedule_ready_snapshot(
-    snapshot: object,
-    *,
-    use_ports: bool,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    this_repo_prefix: str | None,
-    all_prefixes: bool,
-    mode: str,
-    per_executor_wip_limit: int,
-    automation_config: BoardAutomationConfig | None,
-    missing_executor_block_cap: int,
-    dry_run: bool,
-    decision: SchedulingDecision,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    wip_counts: dict[str, int],
-    lane_wip_counts: dict[tuple[str, str], int],
-) -> None:
-    """Apply scheduling policy to one Ready snapshot."""
-    ref = getattr(snapshot, "issue_ref", None)
-    if ref is None:
-        ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
-        if ref is None:
-            return
-
-    if not all_prefixes and this_repo_prefix:
-        parsed = parse_issue_ref(ref)
-        if parsed.prefix != this_repo_prefix:
-            return
-
-    is_graph_member = in_any_critical_path(config, ref)
-    executor = snapshot.executor.strip().lower()
-    if executor not in VALID_EXECUTORS:
-        reason = "missing-executor" if not executor else f"invalid-executor:{executor}"
-        _record_missing_executor_ready_item(
-            ref,
-            reason,
-            decision=decision,
-            missing_executor_block_cap=missing_executor_block_cap,
-            dry_run=dry_run,
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        return
-
-    if not is_graph_member:
-        decision.skipped_non_graph.append(ref)
-    else:
-        val_code, _val_output = evaluate_ready_promotion(
-            issue_ref=ref,
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            status_resolver=status_resolver,
-            require_in_graph=True,
-        )
-        if val_code != 0:
-            preds = direct_predecessors(config, ref)
-            reason = f"dependency-unmet:{','.join(sorted(preds))}"
-            if not dry_run:
-                try:
-                    _set_blocked_with_reason(
-                        ref,
-                        reason,
-                        config,
-                        project_owner,
-                        project_number,
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
-                    )
-                except GhQueryError:
-                    pass
-            decision.blocked_invalid_ready.append(ref)
-            return
-
-    lane = parse_issue_ref(ref).prefix
-    if automation_config is not None:
-        current_wip = lane_wip_counts.get((executor, lane), 0)
-        lane_limit = _wip_limit_for_lane(
-            automation_config,
-            executor,
-            lane,
-            fallback=per_executor_wip_limit,
-        )
-    else:
-        current_wip = wip_counts.get(executor, 0)
-        lane_limit = per_executor_wip_limit
-    if current_wip >= lane_limit:
-        decision.deferred_wip.append(ref)
-        return
-
-    if mode == "claim":
-        changed, _old = _transition_issue_status(
-            ref,
-            {"Ready"},
-            "In Progress",
-            config,
-            project_owner,
-            project_number,
-            dry_run=dry_run,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        if not changed:
-            return
-        decision.claimed.append(ref)
-    else:
-        decision.claimable.append(ref)
-
-    if automation_config is not None:
-        lane_wip_counts[(executor, lane)] = current_wip + 1
-    else:
-        wip_counts[executor] = current_wip + 1
 
 
 def schedule_ready_items(
@@ -2996,234 +2789,44 @@ def schedule_ready_items(
     All Ready items in selected scope are considered. Dependency gating is
     applied only to issues that are members of a critical-path graph.
     """
-    if mode not in {"advisory", "claim"}:
-        raise ConfigError(
-            f"Invalid schedule mode '{mode}'. Use advisory or claim."
-        )
-
-    decision = SchedulingDecision()
-    (
-        use_ports,
-        ready_items,
-        wip_counts,
-        lane_wip_counts,
-    ) = _load_schedule_ready_state(
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        automation_config=automation_config,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
         gh_runner=gh_runner,
     )
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    status_mutator = board_mutator
+    if status_mutator is None and board_info_resolver is not None:
+        status_mutator = _legacy_board_status_mutator(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-
-    for snapshot in ready_items:
-        _process_schedule_ready_snapshot(
-            snapshot,
-            use_ports=use_ports,
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            this_repo_prefix=this_repo_prefix,
-            all_prefixes=all_prefixes,
-            mode=mode,
-            per_executor_wip_limit=per_executor_wip_limit,
-            automation_config=automation_config,
-            missing_executor_block_cap=missing_executor_block_cap,
-            dry_run=dry_run,
-            decision=decision,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            status_resolver=status_resolver,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-            wip_counts=wip_counts,
-            lane_wip_counts=lane_wip_counts,
-        )
-
-    return decision
-
-
-def _load_claim_ready_state(
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    automation_config: BoardAutomationConfig | None,
-    this_repo_prefix: str | None,
-    all_prefixes: bool,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[
-    bool,
-    dict[str, object],
-    dict[str, int],
-    dict[tuple[str, str], int],
-]:
-    """Load Ready items and current WIP state for one claim attempt."""
-    use_ports = (
-        board_info_resolver is None
-        and board_mutator is None
-    ) or review_state_port is not None or board_port is not None
-    state_port = review_state_port or _default_review_state_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    ready_items = state_port.list_issues_by_status("Ready")
-    wip_items = state_port.list_issues_by_status("In Progress")
-    wip_counts = _count_wip_by_executor(wip_items)
-    lane_wip_counts = {}
-    if automation_config is not None:
-        lane_wip_counts = _count_wip_by_executor_lane(
-            config,
-            wip_items,
-        )
-
-    ready_by_ref: dict[str, object] = {}
-    for snapshot in ready_items:
-        ref = snapshot.issue_ref
-        if not all_prefixes and this_repo_prefix:
-            parsed = parse_issue_ref(ref)
-            if parsed.prefix != this_repo_prefix:
-                continue
-        ready_by_ref[ref] = snapshot
-    return use_ports, ready_by_ref, wip_counts, lane_wip_counts
-
-
-def _claim_ready_candidates(
-    ready_by_ref: dict[str, object],
-    *,
-    norm_executor: str,
-    issue_ref: str | None,
-    next_issue: bool,
-) -> tuple[list[str], ClaimReadyResult | None]:
-    """Resolve the candidate issue refs for one claim request."""
-    if issue_ref:
-        return [issue_ref], None
-    if not next_issue:
-        return [], ClaimReadyResult(reason="missing-target")
-    candidates = sorted(
-        [
-            ref
-            for ref, snapshot in ready_by_ref.items()
-            if snapshot.executor.strip().lower() == norm_executor
-        ],
-        key=_issue_sort_key,
-    )
-    if not candidates:
-        return [], ClaimReadyResult(reason="no-ready-for-executor")
-    return candidates, None
-
-
-def _attempt_claim_ready_candidate(
-    ref: str,
-    snapshot: object,
-    *,
-    issue_ref: str | None,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    status_resolver: Callable[..., str] | None,
-    per_executor_wip_limit: int,
-    automation_config: BoardAutomationConfig | None,
-    dry_run: bool,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    norm_executor: str,
-    lane_wip_counts: dict[tuple[str, str], int],
-    wip_counts: dict[str, int],
-) -> ClaimReadyResult | None:
-    """Attempt to claim one Ready candidate for the executor."""
-    item_executor = snapshot.executor.strip().lower()
-    if item_executor != norm_executor:
-        if issue_ref:
-            return ClaimReadyResult(
-                reason=f"executor-mismatch:{item_executor or 'unset'}"
-            )
-        return None
-
-    if in_any_critical_path(config, ref):
-        val_code, _val_output = evaluate_ready_promotion(
-            issue_ref=ref,
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            status_resolver=status_resolver,
-            require_in_graph=True,
-        )
-        if val_code != 0:
-            if issue_ref:
-                return ClaimReadyResult(reason="dependency-unmet")
-            return None
-
-    lane = parse_issue_ref(ref).prefix
-    if automation_config is not None:
-        current_wip = lane_wip_counts.get((norm_executor, lane), 0)
-        lane_limit = _wip_limit_for_lane(
-            automation_config,
-            norm_executor,
-            lane,
-            fallback=per_executor_wip_limit,
-        )
-    else:
-        current_wip = wip_counts.get(norm_executor, 0)
-        lane_limit = per_executor_wip_limit
-
-    if current_wip >= lane_limit:
-        return ClaimReadyResult(reason="wip-limit")
-
-    changed, old_status = _transition_issue_status(
-        ref,
-        {"Ready"},
-        "In Progress",
+    return _app_schedule_ready_items(
         config,
         project_owner,
         project_number,
-        dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        mode=mode,
+        per_executor_wip_limit=per_executor_wip_limit,
+        automation_config=automation_config,
+        missing_executor_block_cap=missing_executor_block_cap,
+        dry_run=dry_run,
+        status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
+        board_mutator=status_mutator,
         gh_runner=gh_runner,
     )
-    if not changed:
-        return ClaimReadyResult(reason=f"status-not-ready:{old_status}")
-
-    if not dry_run:
-        try:
-            _post_claim_comment(
-                ref,
-                norm_executor,
-                config,
-                board_port=board_port,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
-            )
-        except GhQueryError:
-            pass
-
-    return ClaimReadyResult(claimed=ref)
 
 
 def claim_ready_issue(
@@ -3249,74 +2852,47 @@ def claim_ready_issue(
     gh_runner: Callable[..., str] | None = None,
 ) -> ClaimReadyResult:
     """Claim one Ready issue for a specific executor."""
-    norm_executor = executor.strip().lower()
-    if norm_executor not in VALID_EXECUTORS:
-        return ClaimReadyResult(reason=f"invalid-executor:{executor}")
-
-    use_ports, ready_by_ref, wip_counts, lane_wip_counts = _load_claim_ready_state(
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        automation_config=automation_config,
-        this_repo_prefix=this_repo_prefix,
-        all_prefixes=all_prefixes,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
         gh_runner=gh_runner,
     )
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    status_mutator = board_mutator
+    if status_mutator is None and board_info_resolver is not None:
+        status_mutator = _legacy_board_status_mutator(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-
-    candidates, early_result = _claim_ready_candidates(
-        ready_by_ref,
-        norm_executor=norm_executor,
+    return _app_claim_ready_issue(
+        config,
+        project_owner,
+        project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        executor=executor,
         issue_ref=issue_ref,
         next_issue=next_issue,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        per_executor_wip_limit=per_executor_wip_limit,
+        automation_config=automation_config,
+        dry_run=dry_run,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=status_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
     )
-    if early_result is not None:
-        return early_result
-
-    for ref in candidates:
-        snapshot = ready_by_ref.get(ref)
-        if snapshot is None:
-            if issue_ref:
-                return ClaimReadyResult(reason="issue-not-ready")
-            continue
-
-        result = _attempt_claim_ready_candidate(
-            ref,
-            snapshot,
-            issue_ref=issue_ref,
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            status_resolver=status_resolver,
-            per_executor_wip_limit=per_executor_wip_limit,
-            automation_config=automation_config,
-            dry_run=dry_run,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
-            norm_executor=norm_executor,
-            lane_wip_counts=lane_wip_counts,
-            wip_counts=wip_counts,
-        )
-        if result is None:
-            continue
-        return result
-
-    return ClaimReadyResult(reason="no-eligible-ready")
 
 
 # ---------------------------------------------------------------------------

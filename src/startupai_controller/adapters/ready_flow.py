@@ -21,7 +21,36 @@ class BoardAutomationReadyFlowAdapter:
 
         return admission_summary_payload(*args, **kwargs)
 
-    def claim_ready_issue(self, *args, **kwargs):
-        from startupai_controller.board_automation import claim_ready_issue
+    def claim_ready_issue(
+        self,
+        config,
+        project_owner: str,
+        project_number: int,
+        **kwargs,
+    ):
+        from startupai_controller.application.automation.ready_claim import (
+            claim_ready_issue,
+        )
+        from startupai_controller.runtime.wiring import build_github_port_bundle
 
-        return claim_ready_issue(*args, **kwargs)
+        gh_runner = kwargs.get("gh_runner")
+        review_state_port = kwargs.get("review_state_port")
+        board_port = kwargs.get("board_port")
+        if review_state_port is None or board_port is None:
+            bundle = build_github_port_bundle(
+                project_owner,
+                project_number,
+                config=config,
+                gh_runner=gh_runner,
+            )
+            review_state_port = review_state_port or bundle.review_state
+            board_port = board_port or bundle.board_mutations
+            kwargs["review_state_port"] = review_state_port
+            kwargs["board_port"] = board_port
+
+        return claim_ready_issue(
+            config,
+            project_owner,
+            project_number,
+            **kwargs,
+        )
