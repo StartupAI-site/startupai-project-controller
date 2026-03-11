@@ -117,6 +117,7 @@ from startupai_controller.consumer_review_handoff_helpers import (
     transition_claimed_session_to_review as _transition_claimed_session_to_review_helper,
 )
 import startupai_controller.consumer_claim_helpers as _claim_helpers
+import startupai_controller.consumer_cycle_wiring as _cycle_wiring
 import startupai_controller.consumer_recovery_helpers as _recovery_helpers
 import startupai_controller.consumer_review_queue_wiring as _review_queue_wiring
 import startupai_controller.consumer_runtime_wiring as _runtime_wiring
@@ -145,10 +146,7 @@ from startupai_controller.control_plane_rescue import (
     _drain_review_queue,
     _replay_deferred_actions,
 )
-from startupai_controller.application.consumer.cycle import (
-    PreparedCycleDeps,
-    run_prepared_cycle,
-)
+from startupai_controller.application.consumer.cycle import run_prepared_cycle
 from startupai_controller.application.consumer.preflight import (
     PrepareCyclePhasesDeps,
     ReconciliationDeps,
@@ -173,24 +171,6 @@ from startupai_controller.application.consumer.preflight_runtime import (
 from startupai_controller.application.consumer.reconciliation import (
     ReconciliationWiringDeps,
     wire_reconcile_board_truth as _wire_reconcile_board_truth_use_case,
-)
-from startupai_controller.application.consumer.launch import (
-    ClaimLaunchDeps,
-    PrepareLaunchDeps,
-    ResolveLaunchDeps,
-    claim_launch_context as _claim_launch_context_use_case,
-    prepare_launch_candidate as _prepare_launch_candidate_use_case,
-    resolve_launch_context_for_cycle as _resolve_launch_context_for_cycle_use_case,
-)
-from startupai_controller.application.consumer.execution import (
-    ExecutionDeps,
-    FinalizeClaimedSessionDeps,
-    execute_claimed_session as _execute_claimed_session_use_case,
-    finalize_claimed_session as _finalize_claimed_session_use_case,
-    ReviewHandoffDeps,
-    NonReviewOutcomeDeps,
-    handoff_execution_to_review as _handoff_execution_to_review_use_case,
-    handle_non_review_execution_outcome as _handle_non_review_execution_outcome_use_case,
 )
 from startupai_controller.application.consumer.recovery import (
     recover_interrupted_sessions as _recover_interrupted_sessions_use_case,
@@ -3467,14 +3447,14 @@ def _assemble_prepared_launch_context(
     branch_reconcile_error: str | None,
 ) -> PreparedLaunchContext:
     """Create the final launch context for a prepared candidate."""
-    return PreparedLaunchContext(
-        issue_ref=issue_ref,
-        repo_prefix=candidate_prefix,
+    return _cycle_wiring.assemble_prepared_launch_context(
+        issue_ref,
+        candidate_prefix=candidate_prefix,
         owner=owner,
         repo=repo,
         number=number,
         title=title,
-        issue_context=context,
+        context=context,
         session_kind=session_kind,
         repair_pr_url=repair_pr_url,
         repair_branch_name=repair_branch_name,
@@ -3505,23 +3485,11 @@ def _prepare_launch_candidate(
     worktree_port: WorktreePort | None = None,
 ) -> PreparedLaunchContext:
     """Prepare local launch state for an issue before board claim."""
-    return _prepare_launch_candidate_use_case(
+    return _cycle_wiring.prepare_launch_candidate(
         issue_ref,
         config=config,
         prepared=prepared,
         db=db,
-        deps=PrepareLaunchDeps(
-            build_session_store=build_session_store,
-            build_github_port_bundle=build_github_port_bundle,
-            build_worktree_port=build_worktree_port,
-            resolve_launch_candidate_metadata=_resolve_launch_candidate_metadata,
-            resolve_launch_issue_context=_resolve_launch_issue_context,
-            setup_launch_worktree=_setup_launch_worktree,
-            resolve_launch_runtime=_resolve_launch_runtime,
-            run_launch_workspace_hooks=_run_launch_workspace_hooks,
-            build_dependency_summary=_build_dependency_summary,
-            assemble_prepared_launch_context=_assemble_prepared_launch_context,
-        ),
         subprocess_runner=subprocess_runner,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
@@ -3531,6 +3499,16 @@ def _prepare_launch_candidate(
         issue_context_port=issue_context_port,
         session_store=session_store,
         worktree_port=worktree_port,
+        build_session_store=build_session_store,
+        build_github_port_bundle=build_github_port_bundle,
+        build_worktree_port=build_worktree_port,
+        resolve_launch_candidate_metadata=_resolve_launch_candidate_metadata,
+        resolve_launch_issue_context=_resolve_launch_issue_context,
+        setup_launch_worktree=_setup_launch_worktree,
+        resolve_launch_runtime=_resolve_launch_runtime,
+        run_launch_workspace_hooks=_run_launch_workspace_hooks,
+        build_dependency_summary=_build_dependency_summary,
+        assemble_prepared_launch_context=_assemble_prepared_launch_context,
     )
 
 
@@ -3713,14 +3691,10 @@ def _resolve_launch_context_for_cycle(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
-    return _resolve_launch_context_for_cycle_use_case(
+    return _cycle_wiring.resolve_launch_context_for_cycle(
         config=config,
         db=db,
         prepared=prepared,
-        deps=ResolveLaunchDeps(
-            select_launch_candidate_for_cycle=_select_launch_candidate_for_cycle,
-            prepare_selected_launch_candidate=_prepare_selected_launch_candidate,
-        ),
         launch_context=launch_context,
         target_issue=target_issue,
         dry_run=dry_run,
@@ -3729,10 +3703,9 @@ def _resolve_launch_context_for_cycle(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        log_dry_run=lambda issue_ref: logger.info(
-            "[dry-run] Would prepare, claim, and execute: %s",
-            issue_ref,
-        ),
+        select_launch_candidate_for_cycle=_select_launch_candidate_for_cycle,
+        prepare_selected_launch_candidate=_prepare_selected_launch_candidate,
+        logger=logger,
     )
 
 
@@ -3976,16 +3949,10 @@ def _claim_launch_context(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
-    return _claim_launch_context_use_case(
+    return _cycle_wiring.claim_launch_context(
         config=config,
         db=db,
         prepared=prepared,
-        deps=ClaimLaunchDeps(
-            open_pending_claim_session=_open_pending_claim_session,
-            enforce_claim_retry_ceiling=_enforce_claim_retry_ceiling,
-            attempt_launch_context_claim=_attempt_launch_context_claim,
-            mark_claimed_session_running=_mark_claimed_session_running,
-        ),
         launch_context=launch_context,
         slot_id=slot_id,
         status_resolver=status_resolver,
@@ -3994,6 +3961,10 @@ def _claim_launch_context(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
+        open_pending_claim_session=_open_pending_claim_session,
+        enforce_claim_retry_ceiling=_enforce_claim_retry_ceiling,
+        attempt_launch_context_claim=_attempt_launch_context_claim,
+        mark_claimed_session_running=_mark_claimed_session_running,
     )
 
 
@@ -4050,18 +4021,10 @@ def _handoff_execution_to_review(
     gh_runner: Callable[..., str] | None,
 ) -> ReviewQueueDrainSummary:
     """Transition a claimed session into Review and perform immediate rescue."""
-    return _handoff_execution_to_review_use_case(
+    return _cycle_wiring.handoff_execution_to_review(
         config=config,
         db=db,
         prepared=prepared,
-        deps=ReviewHandoffDeps(
-            build_session_store=build_session_store,
-            transition_claimed_session_to_review=_transition_claimed_session_to_review,
-            post_claimed_session_verdict_marker=_post_claimed_session_verdict_marker,
-            queue_claimed_session_for_review=_queue_claimed_session_for_review,
-            run_immediate_review_handoff=_run_immediate_review_handoff,
-            record_metric=_record_metric,
-        ),
         launch_context=launch_context,
         session_id=session_id,
         pr_url=pr_url,
@@ -4069,6 +4032,12 @@ def _handoff_execution_to_review(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
+        build_session_store=build_session_store,
+        transition_claimed_session_to_review=_transition_claimed_session_to_review,
+        post_claimed_session_verdict_marker=_post_claimed_session_verdict_marker,
+        queue_claimed_session_for_review=_queue_claimed_session_for_review,
+        run_immediate_review_handoff=_run_immediate_review_handoff,
+        record_metric=_record_metric,
     )
 
 
@@ -4191,24 +4160,10 @@ def _handle_non_review_execution_outcome(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[str, ResolutionEvaluation | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
-    return _handle_non_review_execution_outcome_use_case(
+    return _cycle_wiring.handle_non_review_execution_outcome(
         config=config,
         db=db,
         prepared=prepared,
-        deps=NonReviewOutcomeDeps(
-            build_github_port_bundle=build_github_port_bundle,
-            verify_resolution_payload=_verify_resolution_payload,
-            apply_resolution_action=_apply_resolution_action,
-            return_issue_to_ready=_return_issue_to_ready,
-            record_successful_github_mutation=_record_successful_github_mutation,
-            mark_degraded=_mark_degraded,
-            queue_status_transition=_queue_status_transition,
-            record_metric=_record_metric,
-            log_ready_reset_failure=lambda err: logger.error(
-                "Ready reset failed after non-PR session: %s",
-                err,
-            ),
-        ),
         launch_context=launch_context,
         session_id=session_id,
         session_status=session_status,
@@ -4219,6 +4174,15 @@ def _handle_non_review_execution_outcome(
         comment_poster=comment_poster,
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
+        build_github_port_bundle=build_github_port_bundle,
+        verify_resolution_payload=_verify_resolution_payload,
+        apply_resolution_action=_apply_resolution_action,
+        return_issue_to_ready=_return_issue_to_ready,
+        record_successful_github_mutation=_record_successful_github_mutation,
+        mark_degraded=_mark_degraded,
+        queue_status_transition=_queue_status_transition,
+        record_metric=_record_metric,
+        logger=logger,
     )
 
 
@@ -4325,20 +4289,10 @@ def _execute_claimed_session(
     gh_runner: Callable[..., str] | None,
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
-    return _execute_claimed_session_use_case(
+    return _cycle_wiring.execute_claimed_session(
         config=config,
         db=db,
         prepared=prepared,
-        deps=ExecutionDeps(
-            assemble_codex_prompt=_assemble_codex_prompt,
-            run_codex_session=_run_codex_session,
-            parse_codex_result=_parse_codex_result,
-            session_status_from_codex_result=_session_status_from_codex_result,
-            create_pr_for_execution_result=_create_pr_for_execution_result,
-            handoff_execution_to_review=_handoff_execution_to_review,
-            handle_non_review_execution_outcome=_handle_non_review_execution_outcome,
-            build_session_execution_outcome=SessionExecutionOutcome,
-        ),
         launch_context=launch_context,
         claimed_context=claimed_context,
         subprocess_runner=subprocess_runner,
@@ -4348,6 +4302,13 @@ def _execute_claimed_session(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
+        assemble_codex_prompt=_assemble_codex_prompt,
+        run_codex_session=_run_codex_session,
+        parse_codex_result=_parse_codex_result,
+        session_status_from_codex_result=_session_status_from_codex_result,
+        create_pr_for_execution_result=_create_pr_for_execution_result,
+        handoff_execution_to_review=_handoff_execution_to_review,
+        handle_non_review_execution_outcome=_handle_non_review_execution_outcome,
     )
 
 
@@ -4365,16 +4326,10 @@ def _finalize_claimed_session(
     gh_runner: Callable[..., str] | None,
 ) -> CycleResult:
     """Persist final session state and return the cycle result."""
-    return _finalize_claimed_session_use_case(
+    return _cycle_wiring.finalize_claimed_session(
         config=config,
         db=db,
         prepared=prepared,
-        deps=FinalizeClaimedSessionDeps(
-            final_phase_for_claimed_session=_final_phase_for_claimed_session,
-            persist_claimed_session_completion=_persist_claimed_session_completion,
-            post_claimed_session_result_comment=_post_claimed_session_result_comment,
-            maybe_escalate_claimed_session_failure=_maybe_escalate_claimed_session_failure,
-        ),
         launch_context=launch_context,
         claimed_context=claimed_context,
         execution_outcome=execution_outcome,
@@ -4382,12 +4337,16 @@ def _finalize_claimed_session(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
+        final_phase_for_claimed_session=_final_phase_for_claimed_session,
+        persist_claimed_session_completion=_persist_claimed_session_completion,
+        post_claimed_session_result_comment=_post_claimed_session_result_comment,
+        maybe_escalate_claimed_session_failure=_maybe_escalate_claimed_session_failure,
     )
 
 
 def _prepared_cycle_deps() -> PreparedCycleDeps:
     """Bind board_consumer helpers for the extracted prepared-cycle slice."""
-    return PreparedCycleDeps(
+    return _cycle_wiring.prepared_cycle_deps(
         claim_suppression_state=_claim_suppression_state,
         next_available_slot=_next_available_slot,
         resolve_launch_context_for_cycle=_resolve_launch_context_for_cycle,
