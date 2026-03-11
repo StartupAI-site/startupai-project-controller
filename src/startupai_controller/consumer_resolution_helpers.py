@@ -8,6 +8,13 @@ import subprocess
 from typing import Any, Callable
 
 
+def _shell_module():
+    """Import the consumer shell lazily to avoid import cycles."""
+    from startupai_controller import board_consumer
+
+    return board_consumer
+
+
 def repo_root_for_issue_ref(
     config: Any,
     issue_ref: str,
@@ -494,3 +501,45 @@ def apply_resolution_action(
         mark_degraded(db, f"resolution-comment:{gh_reason_code(err)}:{err}")
         queue_issue_comment(db, issue_ref, comment_body)
     return "resolution_review"
+
+
+def apply_resolution_action_from_shell(
+    issue_ref: str,
+    evaluation: Any,
+    *,
+    session_id: str | None,
+    db: Any,
+    config: Any,
+    critical_path_config: Any,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> str:
+    """Apply a verified resolution decision using live shell seams."""
+    shell = _shell_module()
+    return apply_resolution_action(
+        issue_ref,
+        evaluation,
+        session_id=session_id,
+        db=db,
+        config=config,
+        critical_path_config=critical_path_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        resolve_issue_coordinates=shell._resolve_issue_coordinates,
+        build_resolution_comment=shell.build_resolution_comment,
+        mark_issues_done=shell.mark_issues_done,
+        record_successful_github_mutation=shell._record_successful_github_mutation,
+        mark_degraded=shell._mark_degraded,
+        gh_reason_code=shell.gh_reason_code,
+        queue_status_transition=shell._queue_status_transition,
+        runtime_comment_poster=shell._runtime_comment_poster,
+        runtime_issue_closer=shell._runtime_issue_closer,
+        set_blocked_with_reason=shell._set_blocked_with_reason,
+        set_issue_handoff_target_fn=shell._set_issue_handoff_target,
+        linked_issue_type=shell.LinkedIssue,
+        gh_query_error_type=shell.GhQueryError,
+    )

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from startupai_controller.board_automation import sync_review_state
+from startupai_controller import consumer_automation_bridge as _automation_bridge
+from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
 from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
     parse_issue_ref,
@@ -22,7 +23,7 @@ def transition_issue_to_review(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a successfully submitted issue from In Progress to Review."""
-    code, message = sync_review_state(
+    code, message = _automation_bridge.sync_review_state(
         event_kind="pr_ready_for_review",
         issue_ref=issue_ref,
         config=config,
@@ -317,3 +318,127 @@ def reconcile_stale_in_progress_items(
         else:
             moved_blocked.append(issue_ref)
     return moved_ready, moved_review, moved_blocked
+
+
+def _shell_module():
+    """Import the consumer shell lazily to avoid import cycles."""
+    from startupai_controller import board_consumer
+
+    return board_consumer
+
+
+def transition_issue_to_review_from_shell(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Move a successfully submitted issue from In Progress to Review."""
+    del review_state_port, board_port
+    return transition_issue_to_review(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+
+
+def transition_issue_to_in_progress_from_shell(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    from_statuses: set[str] | None = None,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Move an actively running local repair back into In Progress."""
+    del board_info_resolver, board_mutator
+    shell = _shell_module()
+    return transition_issue_to_in_progress(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        build_github_port_bundle=shell.build_github_port_bundle,
+        from_statuses=from_statuses,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        gh_runner=gh_runner,
+    )
+
+
+def return_issue_to_ready_from_shell(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    from_statuses: set[str] | None = None,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Move a non-running claimed issue back to Ready so the lane stays truthful."""
+    del board_info_resolver, board_mutator
+    shell = _shell_module()
+    return return_issue_to_ready(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        build_github_port_bundle=shell.build_github_port_bundle,
+        from_statuses=from_statuses,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        gh_runner=gh_runner,
+    )
+
+
+def escalate_to_claude_from_shell(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    reason: str = "",
+    *,
+    board_info_resolver: Callable[..., Any] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Block the issue for Claude handoff and post one escalation comment."""
+    shell = _shell_module()
+    return _execution_support_helpers.escalate_to_claude(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        reason,
+        board_info_resolver=board_info_resolver,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        marker_for=shell._marker_for,
+        resolve_issue_coordinates=shell._resolve_issue_coordinates,
+        set_blocked_with_reason=shell._set_blocked_with_reason,
+        set_issue_handoff_target=shell._set_issue_handoff_target,
+        default_review_comment_checker=shell._default_review_comment_checker,
+        runtime_comment_poster=shell._runtime_comment_poster,
+        logger=shell.logger,
+    )

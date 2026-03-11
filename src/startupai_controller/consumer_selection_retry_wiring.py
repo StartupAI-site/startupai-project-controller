@@ -9,6 +9,13 @@ import startupai_controller.consumer_claim_helpers as _claim_helpers
 from startupai_controller import consumer_selection_helpers as _selection_helpers
 
 
+def _shell_module():
+    """Import the consumer shell lazily to avoid import cycles."""
+    from startupai_controller import board_consumer
+
+    return board_consumer
+
+
 def effective_retry_backoff(
     config: Any,
     workflow: Any | None,
@@ -236,4 +243,71 @@ def select_launch_candidate_for_cycle(
         gh_reason_code=gh_reason_code,
         gh_query_error_type=gh_query_error_type,
         logger=logger,
+    )
+
+
+def select_best_candidate_from_shell(
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    executor: str = "codex",
+    this_repo_prefix: str | None = None,
+    repo_prefixes: tuple[str, ...] = ("crew",),
+    automation_config: Any | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    ready_items: tuple[Any, ...] | None = None,
+    github_memo: Any | None = None,
+    gh_runner: Callable[..., str] | None = None,
+    issue_filter: Callable[[str], bool] | None = None,
+) -> str | None:
+    """Select the highest-ranked ready issue for the consumer shell."""
+    del automation_config
+    shell = _shell_module()
+    return select_best_candidate(
+        config,
+        project_owner,
+        project_number,
+        executor=executor,
+        this_repo_prefix=this_repo_prefix,
+        repo_prefixes=repo_prefixes,
+        status_resolver=status_resolver,
+        ready_items=ready_items,
+        github_memo=github_memo,
+        gh_runner=gh_runner,
+        issue_filter=issue_filter,
+        build_github_port_bundle=shell.build_github_port_bundle,
+        parse_issue_ref=shell.parse_issue_ref,
+        config_error_type=shell.ConfigError,
+        snapshot_to_issue_ref=shell._snapshot_to_issue_ref,
+        in_any_critical_path=shell.in_any_critical_path,
+        evaluate_ready_promotion=shell.evaluate_ready_promotion,
+        ready_snapshot_rank=shell._ready_snapshot_rank,
+    )
+
+
+def select_candidate_for_cycle_from_shell(
+    config: Any,
+    db: Any,
+    prepared: Any,
+    *,
+    target_issue: str | None = None,
+    status_resolver: Callable[..., str] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+    excluded_issue_refs: set[str] | None = None,
+) -> str | None:
+    """Select the next eligible issue for one consumer cycle slot."""
+    shell = _shell_module()
+    return select_candidate_for_cycle(
+        config,
+        db,
+        prepared,
+        target_issue=target_issue,
+        status_resolver=status_resolver,
+        gh_runner=gh_runner,
+        excluded_issue_refs=excluded_issue_refs,
+        parse_issue_ref=shell.parse_issue_ref,
+        effective_retry_backoff=shell._effective_retry_backoff,
+        retry_backoff_active=shell._retry_backoff_active,
+        select_best_candidate=shell._select_best_candidate,
     )
