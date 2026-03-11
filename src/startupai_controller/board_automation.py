@@ -165,6 +165,25 @@ from startupai_controller.application.automation.review_rescue import (
 from startupai_controller.application.automation.review_sync import (
     sync_review_state as _app_sync_review_state,
 )
+from startupai_controller.application.automation.event_resolution import (
+    resolve_issues_from_event as _app_resolve_issues_from_event,
+    resolve_pr_to_issues as _app_resolve_pr_to_issues,
+)
+from startupai_controller.application.automation.blocker_propagation import (
+    propagate_blocker as _app_propagate_blocker,
+)
+from startupai_controller.application.automation.handoff_reconciliation import (
+    reconcile_handoffs as _app_reconcile_handoffs,
+)
+from startupai_controller.application.automation.admission_helpers import (
+    AdmissionPipelineDeps as _AdmissionPipelineDeps,
+    admission_summary_payload as _app_admission_summary_payload,
+    load_admission_source_items as _app_load_admission_source_items,
+    partition_admission_source_items as _app_partition_admission_source_items,
+    build_provisional_admission_candidates as _app_build_provisional_admission_candidates,
+    evaluate_admission_candidates as _app_evaluate_admission_candidates,
+    apply_admitted_backlog_candidates as _app_apply_admitted_backlog_candidates,
+)
 from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
     GitHubPortBundle,
@@ -1483,169 +1502,30 @@ def propagate_blocker(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Propagate blocker info to successors. Returns list of commented refs."""
-    check_comment = comment_checker or _comment_exists
-    post_comment = comment_poster or _post_comment
-    commented: list[str] = []
-
-    use_ports = (board_info_resolver is None) or review_state_port is not None or board_port is not None
-    if use_ports:
-        review_state_port = review_state_port or _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        if comment_poster is None:
-            board_port = board_port or _default_board_mutation_port(
-                project_owner,
-                project_number,
-                config,
-                gh_runner=gh_runner,
-            )
-
-    if sweep_blocked:
-        # Sweep mode: scan all Blocked items
-        if use_ports:
-            blocked_items = review_state_port.list_issues_by_status("Blocked")
-        else:
-            blocked_items = _list_project_items_by_status(
-                "Blocked", project_owner, project_number, gh_runner=gh_runner
-            )
-        for snapshot in blocked_items:
-            if use_ports:
-                ref = snapshot.issue_ref
-            else:
-                ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
-                if ref is None:
-                    continue
-
-            if not all_prefixes and this_repo_prefix:
-                parsed = parse_issue_ref(ref)
-                if parsed.prefix != this_repo_prefix:
-                    continue
-
-            if use_ports:
-                blocked_reason = review_state_port.get_issue_fields(
-                    ref
-                ).blocked_reason
-            else:
-                blocked_reason = _query_project_item_field(
-                    ref,
-                    "Blocked Reason",
-                    config,
-                    project_owner,
-                    project_number,
-                    gh_runner=gh_runner,
-                )
-            if not blocked_reason:
-                continue
-
-            new_comments = _propagate_single_blocker(
-                ref,
-                blocked_reason,
-                config,
-                check_comment=check_comment,
-                post_comment=post_comment,
-                board_port=board_port,
-                project_owner=project_owner,
-                project_number=project_number,
-                gh_runner=gh_runner,
-                dry_run=dry_run,
-            )
-            commented.extend(new_comments)
-    else:
-        # Single-issue mode
-        if issue_ref is None:
-            return commented
-
-        if use_ports:
-            blocked_reason = review_state_port.get_issue_fields(
-                issue_ref
-            ).blocked_reason
-        else:
-            blocked_reason = _query_project_item_field(
-                issue_ref,
-                "Blocked Reason",
-                config,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
-        if not blocked_reason:
-            return commented
-
-        commented = _propagate_single_blocker(
-            issue_ref,
-            blocked_reason,
-            config,
-            check_comment=check_comment,
-            post_comment=post_comment,
-            board_port=board_port,
-            project_owner=project_owner,
-            project_number=project_number,
-            gh_runner=gh_runner,
-            dry_run=dry_run,
-        )
-
-    return commented
-
-
-def _propagate_single_blocker(
-    issue_ref: str,
-    blocked_reason: str,
-    config: CriticalPathConfig,
-    *,
-    check_comment: Callable[..., bool],
-    post_comment: Callable[..., None],
-    board_port: _BoardMutationPort | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    gh_runner: Callable[..., str] | None = None,
-    dry_run: bool = False,
-) -> list[str]:
-    """Post advisory comments on successors of a single blocked issue."""
-    commented: list[str] = []
-    successors = direct_successors(config, issue_ref)
-
-    for successor_ref in sorted(successors):
-        marker = _marker_for("blocker", issue_ref)
-        succ_owner, succ_repo, succ_number = _issue_ref_to_repo_parts(
-            successor_ref, config
-        )
-
-        if check_comment(succ_owner, succ_repo, succ_number, marker):
-            continue
-
-        if not dry_run:
-            body = (
-                f"{marker}\n"
-                f"**Upstream blocker**: `{issue_ref}` is Blocked "
-                f"(reason: {blocked_reason}).\n"
-                f"This may affect `{successor_ref}`."
-            )
-            try:
-                if board_port is not None:
-                    board_port.post_issue_comment(
-                        f"{succ_owner}/{succ_repo}",
-                        succ_number,
-                        body,
-                    )
-                else:
-                    post_comment(succ_owner, succ_repo, succ_number, body)
-            except Exception:
-                # Cross-repo comment failure is non-fatal — log and continue
-                import sys
-
-                print(
-                    f"WARNING: Failed posting blocker comment on "
-                    f"{successor_ref}",
-                    file=sys.stderr,
-                )
-                continue
-
-        commented.append(successor_ref)
-
-    return commented
+    return _app_propagate_blocker(
+        issue_ref,
+        config,
+        this_repo_prefix,
+        project_owner,
+        project_number,
+        sweep_blocked=sweep_blocked,
+        all_prefixes=all_prefixes,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        board_info_resolver=board_info_resolver,
+        gh_runner=gh_runner,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        list_project_items_by_status_fn=_list_project_items_by_status,
+        snapshot_to_issue_ref_fn=_snapshot_to_issue_ref,
+        query_project_item_field_fn=_query_project_item_field,
+        comment_exists_fn=_comment_exists,
+        post_comment_fn=_post_comment,
+        issue_ref_to_repo_parts_fn=_issue_ref_to_repo_parts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1667,104 +1547,20 @@ def reconcile_handoffs(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, int]:
     """Reconcile handoff jobs. Returns {completed, retried, escalated, pending}."""
-    now = datetime.now(timezone.utc)
-    ack_timeout = timedelta(minutes=max(0, ack_timeout_minutes))
-    counters = {
-        "completed": 0,
-        "retried": 0,
-        "escalated": 0,
-        "pending": 0,
-    }
-    github_bundle = _ensure_github_bundle(
-        github_bundle,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
+    return _app_reconcile_handoffs(
+        config,
+        project_owner,
+        project_number,
+        ack_timeout_minutes=ack_timeout_minutes,
+        max_retries=max_retries,
+        dry_run=dry_run,
+        github_bundle=github_bundle,
+        review_state_port=review_state_port,
+        board_port=board_port,
         gh_runner=gh_runner,
+        ensure_github_bundle_fn=_ensure_github_bundle,
+        set_blocked_with_reason_fn=_set_blocked_with_reason,
     )
-    review_state_port = review_state_port or github_bundle.review_state
-    board_port = board_port or github_bundle.board_mutations
-
-    # Scan all issue prefixes for handoff markers
-    for prefix, repo_slug in config.issue_prefixes.items():
-        try:
-            issue_numbers = review_state_port.search_open_issue_numbers_with_comment_marker(
-                repo_slug,
-                f"{MARKER_PREFIX}:handoff:job=",
-            )
-        except GhQueryError:
-            continue
-
-        for issue_number in issue_numbers:
-            issue_ref = f"{prefix}#{issue_number}"
-
-            # Check if this issue has been acknowledged (moved past Backlog)
-            current_status = review_state_port.get_issue_status(issue_ref)
-
-            ack_statuses = {"Ready", "In Progress", "Review", "Done"}
-            if current_status in ack_statuses:
-                counters["completed"] += 1
-                continue
-
-            try:
-                comments = review_state_port.list_issue_comment_bodies(
-                    repo_slug,
-                    issue_number,
-                )
-            except GhQueryError:
-                counters["pending"] += 1
-                continue
-
-            retry_marker = f"{MARKER_PREFIX}:handoff-retry:{issue_ref}:"
-            retry_count = 0
-            for body in comments:
-                if retry_marker in body:
-                    retry_count += 1
-
-            latest_signal = review_state_port.latest_matching_comment_timestamp(
-                repo_slug,
-                issue_number,
-                (
-                    f"{MARKER_PREFIX}:handoff:job=",
-                    f"{MARKER_PREFIX}:handoff-retry:{issue_ref}:",
-                ),
-            )
-            if latest_signal is None or (now - latest_signal) < ack_timeout:
-                counters["pending"] += 1
-                continue
-
-            if retry_count < max_retries:
-                if not dry_run:
-                    retry_id = (
-                        f"{retry_marker}"
-                        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-                    )
-                    body = (
-                        f"<!-- {retry_id} -->\n"
-                        f"**Handoff retry**: `{issue_ref}` has an unacknowledged "
-                        f"handoff. Retry #{retry_count + 1} of {max_retries}.\n\n"
-                        f"Run:\n```\nmake promote-ready ISSUE={issue_ref}\n```"
-                    )
-                    board_port.post_issue_comment(repo_slug, issue_number, body)
-                counters["retried"] += 1
-            else:
-                if not dry_run:
-                    try:
-                        _set_blocked_with_reason(
-                            issue_ref,
-                            "handoff-timeout:retries-exhausted",
-                            config,
-                            project_owner,
-                            project_number,
-                            review_state_port=review_state_port,
-                            board_port=board_port,
-                            gh_runner=gh_runner,
-                        )
-                    except GhQueryError:
-                        pass
-                counters["escalated"] += 1
-
-    return counters
 
 
 # ---------------------------------------------------------------------------
@@ -1889,192 +1685,6 @@ def _controller_owned_admission(
     return prefix in automation_config.execution_authority_repos
 
 
-def _deterministic_issue_branch_pattern(issue_ref: str) -> re.Pattern[str]:
-    """Return the canonical issue branch naming pattern."""
-    parsed = parse_issue_ref(issue_ref)
-    return re.compile(rf"^feat/{parsed.number}-[a-z0-9-]+$")
-
-
-def _parse_consumer_provenance(text: str) -> dict[str, str] | None:
-    """Parse the consumer provenance marker from text."""
-    match = re.search(
-        rf"<!--\s*{re.escape(MARKER_PREFIX)}:consumer:"
-        r"session=(?P<session>[^\s]+)\s+"
-        r"issue=(?P<issue>[^\s]+)\s+"
-        r"repo=(?P<repo>[^\s]+)\s+"
-        r"branch=(?P<branch>[^\s]+)\s+"
-        r"executor=(?P<executor>[^\s]+)\s*-->",
-        text,
-    )
-    if not match:
-        return None
-    return {
-        "session_id": match.group("session"),
-        "issue_ref": match.group("issue"),
-        "repo_prefix": match.group("repo"),
-        "branch_name": match.group("branch"),
-        "executor": match.group("executor"),
-    }
-
-
-def _extract_closing_issue_numbers(body: str) -> set[int]:
-    """Return issue numbers referenced by common auto-close keywords."""
-    matches = re.findall(
-        r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b",
-        body,
-        flags=re.IGNORECASE,
-    )
-    results: set[int] = set()
-    for match in matches:
-        try:
-            results.add(int(match))
-        except ValueError:
-            continue
-    return results
-
-
-def _query_open_prs_by_prefix(
-    config: CriticalPathConfig,
-    repo_prefixes: tuple[str, ...],
-    *,
-    pr_port: _PullRequestPort | None = None,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> dict[str, list[OpenPullRequest]]:
-    """Return open PRs keyed by governed repo prefix."""
-    result: dict[str, list[OpenPullRequest]] = {}
-    for repo_prefix in repo_prefixes:
-        repo_slug = config.issue_prefixes.get(repo_prefix)
-        if not repo_slug:
-            result[repo_prefix] = []
-            continue
-        if github_memo is not None:
-            cached = github_memo.open_pull_requests.get(repo_slug)
-            if cached is None:
-                if pr_port is not None:
-                    cached = pr_port.list_open_prs(repo_slug)
-                else:
-                    cached = query_open_pull_requests(
-                        repo_slug,
-                        gh_runner=gh_runner,
-                    )
-                github_memo.open_pull_requests[repo_slug] = list(cached)
-            result[repo_prefix] = list(cached)
-        else:
-            if pr_port is not None:
-                result[repo_prefix] = pr_port.list_open_prs(repo_slug)
-            else:
-                result[repo_prefix] = query_open_pull_requests(
-                    repo_slug,
-                    gh_runner=gh_runner,
-                )
-    return result
-
-
-def _classify_admission_pr_state(
-    issue_ref: str,
-    issue_number: int,
-    candidates: list[OpenPullRequest],
-    automation_config: BoardAutomationConfig,
-) -> str:
-    """Classify PR state for backlog admission without extra per-issue queries."""
-    linked_candidates = [
-        pr for pr in candidates if issue_number in _extract_closing_issue_numbers(pr.body)
-    ]
-    if not linked_candidates:
-        return "none"
-
-    branch_pattern = _deterministic_issue_branch_pattern(issue_ref)
-    local_count = 0
-    ambiguous = False
-    for candidate in linked_candidates:
-        provenance = _parse_consumer_provenance(candidate.body)
-        is_local = (
-            provenance is not None
-            and provenance.get("issue_ref") == issue_ref
-            and provenance.get("executor") == "codex"
-            and candidate.author in automation_config.trusted_local_authors
-            and bool(branch_pattern.match(candidate.head_ref_name))
-        )
-        if is_local:
-            local_count += 1
-        else:
-            ambiguous = True
-
-    if local_count == 1 and not ambiguous:
-        return "existing_local_pr"
-    if local_count > 1 or (local_count and ambiguous):
-        return "ambiguous_pr"
-    return "non_local_pr"
-
-
-def _latest_resolution_signal(
-    issue_ref: str,
-    owner: str,
-    repo: str,
-    number: int,
-    *,
-    review_state_port: _ReviewStatePort | None = None,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> dict[str, object] | None:
-    """Return the latest machine-readable resolution signal, if any."""
-    if github_memo is not None:
-        key = (owner, repo, number)
-        cached = github_memo.issue_comment_bodies.get(key)
-        if cached is None:
-            if review_state_port is not None:
-                cached = review_state_port.list_issue_comment_bodies(
-                    f"{owner}/{repo}",
-                    number,
-                )
-            else:
-                cached = list_issue_comment_bodies(
-                    owner,
-                    repo,
-                    number,
-                    gh_runner=gh_runner,
-                )
-            github_memo.issue_comment_bodies[key] = list(cached)
-        comment_bodies = list(cached)
-    else:
-        if review_state_port is not None:
-            comment_bodies = list(
-                review_state_port.list_issue_comment_bodies(
-                    f"{owner}/{repo}",
-                    number,
-                )
-            )
-        else:
-            comment_bodies = list_issue_comment_bodies(
-                owner,
-                repo,
-                number,
-                gh_runner=gh_runner,
-            )
-
-    for body in reversed(comment_bodies):
-        parsed = parse_resolution_comment(body)
-        if parsed is None or parsed.issue_ref != issue_ref:
-            continue
-        payload = parsed.payload
-        resolution_kind = str(payload.get("resolution_kind") or "").strip()
-        verification_class = str(payload.get("verification_class") or "").strip()
-        final_action = str(payload.get("final_action") or "").strip()
-        summary = str(payload.get("summary") or "").strip()
-        evidence = payload.get("evidence")
-        if not isinstance(evidence, dict):
-            evidence = {}
-        return {
-            "resolution_kind": resolution_kind,
-            "verification_class": verification_class,
-            "final_action": final_action,
-            "summary": summary,
-            "evidence": evidence,
-        }
-    return None
-
-
 def _set_handoff_target(
     issue_ref: str,
     target: str,
@@ -2108,138 +1718,20 @@ def _set_handoff_target(
     board_port.set_issue_field(issue_ref, "Handoff To", target)
 
 
-def _apply_prior_resolution_signal(
-    issue_ref: str,
-    signal: dict[str, object],
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    dry_run: bool = False,
-    gh_runner: Callable[..., str] | None = None,
-) -> str:
-    """Apply a prior machine-verified resolution signal before admission."""
-    owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-    verification_class = str(signal.get("verification_class") or "")
-    final_action = str(signal.get("final_action") or "")
-    resolution_kind = str(signal.get("resolution_kind") or "")
-    blocked_reason = f"resolution-review-required:{resolution_kind or 'prior-signal'}"
-
-    if verification_class == "strong" and final_action == "closed_as_already_resolved":
-        if not dry_run:
-            mark_issues_done(
-                [LinkedIssue(owner=owner, repo=repo, number=number, ref=issue_ref)],
-                config,
-                project_owner,
-                project_number,
-                review_state_port=review_state_port,
-                board_port=board_port,
-                gh_runner=gh_runner,
-            )
-            close_issue(
-                owner,
-                repo,
-                number,
-                board_port=board_port,
-                project_owner=project_owner,
-                project_number=project_number,
-                config=config,
-                gh_runner=gh_runner,
-            )
-        return "resolved"
-
-    if not dry_run:
-        _set_blocked_with_reason(
-            issue_ref,
-            blocked_reason,
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            gh_runner=gh_runner,
-        )
-        _set_handoff_target(
-            issue_ref,
-            "claude",
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            gh_runner=gh_runner,
-        )
-    return "blocked"
-
-
-def _admit_backlog_item(
-    candidate: AdmissionCandidate,
-    *,
-    executor: str,
-    assignment_owner: str,
-    board_port: _BoardMutationPort,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Mutate one backlog card into a controller-owned Ready card."""
-    _set_single_select_field(
-        candidate.project_id,
-        candidate.item_id,
-        "Status",
-        "Ready",
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
-    )
-    _set_single_select_field(
-        candidate.project_id,
-        candidate.item_id,
-        "Executor",
-        executor,
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
-    )
-    _set_text_field(
-        candidate.project_id,
-        candidate.item_id,
-        "Owner",
-        assignment_owner,
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
-    )
-    _set_single_select_field(
-        candidate.project_id,
-        candidate.item_id,
-        "Handoff To",
-        "none",
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
-    )
-    _set_text_field(
-        candidate.project_id,
-        candidate.item_id,
-        "Blocked Reason",
-        "",
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
+def _build_admission_pipeline_deps() -> _AdmissionPipelineDeps:
+    """Build the wiring deps for the admission pipeline."""
+    return _AdmissionPipelineDeps(
+        query_open_pull_requests=query_open_pull_requests,
+        list_issue_comment_bodies=list_issue_comment_bodies,
+        memoized_query_issue_body=memoized_query_issue_body,
+        mark_issues_done=mark_issues_done,
+        close_issue=close_issue,
+        set_blocked_with_reason=_set_blocked_with_reason,
+        set_handoff_target=_set_handoff_target,
+        default_board_mutation_port=_default_board_mutation_port,
+        set_single_select_field=_set_single_select_field,
+        set_text_field=_set_text_field,
+        list_project_items=_list_project_items,
     )
 
 
@@ -2249,42 +1741,7 @@ def admission_summary_payload(
     enabled: bool,
 ) -> dict[str, object]:
     """Convert an AdmissionDecision into a JSON-friendly payload."""
-    return {
-        "enabled": enabled,
-        "ready_count": decision.ready_count,
-        "ready_floor": decision.ready_floor,
-        "ready_cap": decision.ready_cap,
-        "needed": decision.needed,
-        "scanned_backlog": decision.scanned_backlog,
-        "eligible_count": decision.eligible_count,
-        "admitted": list(decision.admitted),
-        "resolved": list(decision.resolved),
-        "blocked": list(decision.blocked),
-        "skip_reason_counts": decision.skip_reason_counts,
-        "top_candidates": [
-            {
-                "issue_ref": candidate.issue_ref,
-                "priority": candidate.priority,
-                "title": candidate.title,
-                "graph_member": candidate.is_graph_member,
-            }
-            for candidate in decision.eligible[:10]
-        ],
-        "top_skipped": [
-            {
-                "issue_ref": skip.issue_ref,
-                "reason": skip.reason_code,
-            }
-            for skip in decision.skipped[:10]
-        ],
-        "partial_failure": decision.partial_failure,
-        "error": decision.error,
-        "deep_evaluation_performed": decision.deep_evaluation_performed,
-        "deep_evaluation_truncated": decision.deep_evaluation_truncated,
-        "controller_owned_admission_rejections": decision.skip_reason_counts.get(
-            "controller_owned_admission", 0
-        ),
-    }
+    return _app_admission_summary_payload(decision, enabled=enabled)
 
 
 def _load_admission_source_items(
@@ -2295,22 +1752,13 @@ def _load_admission_source_items(
     gh_runner: Callable[..., str] | None,
 ) -> list[_ProjectItemSnapshot]:
     """Load backlog/ready items needed for one admission pass."""
-    statuses = set(automation_config.admission.source_statuses)
-    statuses.add("Ready")
-    if board_snapshot is None:
-        if review_state_port is not None:
-            return [
-                item
-                for item in review_state_port.build_board_snapshot().items
-                if item.status in statuses
-            ]
-        return _list_project_items(
-            DEFAULT_PROJECT_OWNER,
-            DEFAULT_PROJECT_NUMBER,
-            statuses=statuses,
-            gh_runner=gh_runner,
-        )
-    return [item for item in board_snapshot.items if item.status in statuses]
+    return _app_load_admission_source_items(
+        automation_config,
+        deps=_build_admission_pipeline_deps(),
+        review_state_port=review_state_port,
+        board_snapshot=board_snapshot,
+        gh_runner=gh_runner,
+    )
 
 
 def _partition_admission_source_items(
@@ -2321,20 +1769,12 @@ def _partition_admission_source_items(
     target_executor: str,
 ) -> tuple[int, list[_ProjectItemSnapshot]]:
     """Count governed ready items and collect governed backlog items."""
-    ready_count = 0
-    backlog_items: list[_ProjectItemSnapshot] = []
-    for item in items:
-        issue_ref = _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
-        if issue_ref is None:
-            continue
-        repo_prefix = parse_issue_ref(issue_ref).prefix
-        if repo_prefix not in automation_config.execution_authority_repos:
-            continue
-        if item.status == "Ready" and item.executor.strip().lower() == target_executor:
-            ready_count += 1
-        elif item.status in automation_config.admission.source_statuses:
-            backlog_items.append(item)
-    return ready_count, backlog_items
+    return _app_partition_admission_source_items(
+        items,
+        config=config,
+        automation_config=automation_config,
+        target_executor=target_executor,
+    )
 
 
 def _build_provisional_admission_candidates(
@@ -2346,55 +1786,13 @@ def _build_provisional_admission_candidates(
     active_lease_issue_refs: tuple[str, ...],
 ) -> tuple[list[_ProjectItemSnapshot], list[AdmissionSkip]]:
     """Apply cheap exact admission filters to backlog items."""
-    dispatchable = set(dispatchable_repo_prefixes)
-    active_leases = set(active_lease_issue_refs)
-    provisional_candidates: list[_ProjectItemSnapshot] = []
-    skipped: list[AdmissionSkip] = []
-
-    for item in backlog_items:
-        issue_ref = _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
-        if issue_ref is None:
-            skipped.append(AdmissionSkip(item.issue_ref, "unknown_repo_prefix"))
-            continue
-        repo_prefix = parse_issue_ref(issue_ref).prefix
-        if repo_prefix not in automation_config.execution_authority_repos:
-            skipped.append(AdmissionSkip(issue_ref, "not_governed"))
-            continue
-        if item.status != "Backlog":
-            skipped.append(AdmissionSkip(issue_ref, "status_not_backlog"))
-            continue
-        if repo_prefix not in dispatchable:
-            skipped.append(AdmissionSkip(issue_ref, "repo_dispatch_disabled"))
-            continue
-        if issue_ref in active_leases:
-            skipped.append(AdmissionSkip(issue_ref, "already_active_locally"))
-            continue
-        if not item.priority.strip():
-            skipped.append(AdmissionSkip(issue_ref, "missing_priority"))
-            continue
-        if _priority_rank(item.priority)[0] == 99:
-            skipped.append(AdmissionSkip(issue_ref, "invalid_priority"))
-            continue
-        if not item.sprint.strip():
-            skipped.append(AdmissionSkip(issue_ref, "missing_sprint"))
-            continue
-        if not item.agent.strip():
-            skipped.append(AdmissionSkip(issue_ref, "missing_agent"))
-            continue
-        provisional_candidates.append(item)
-
-    provisional_candidates.sort(
-        key=lambda item: _admission_candidate_rank(
-            _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes) or item.issue_ref,
-            priority=item.priority,
-            is_graph_member=in_any_critical_path(
-                config,
-                _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
-                or item.issue_ref,
-            ),
-        )
+    return _app_build_provisional_admission_candidates(
+        backlog_items,
+        config=config,
+        automation_config=automation_config,
+        dispatchable_repo_prefixes=dispatchable_repo_prefixes,
+        active_lease_issue_refs=active_lease_issue_refs,
     )
-    return provisional_candidates, skipped
 
 
 def _evaluate_admission_candidates(
@@ -2421,117 +1819,21 @@ def _evaluate_admission_candidates(
     bool,
 ]:
     """Run the expensive admission checks needed to choose candidates."""
-    eligible: list[AdmissionCandidate] = []
-    resolved: list[str] = []
-    blocked: list[str] = []
-    partial_failure = False
-    error: str | None = None
-    deep_evaluation_truncated = False
-
-    for item in provisional_candidates:
-        if len(eligible) >= needed:
-            deep_evaluation_truncated = True
-            break
-        issue_ref = _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
-        assert issue_ref is not None
-        repo_prefix = parse_issue_ref(issue_ref).prefix
-        owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-        body = item.body or memoized_query_issue_body(
-            memo,
-            owner,
-            repo,
-            number,
-            gh_runner=gh_runner,
-        )
-        if not has_structured_acceptance_criteria(
-            body,
-            automation_config.admission.acceptance_headings,
-        ):
-            skipped.append(AdmissionSkip(issue_ref, "missing_acceptance_criteria"))
-            continue
-
-        pr_state = _classify_admission_pr_state(
-            issue_ref,
-            item.issue_number,
-            _query_open_prs_by_prefix(
-                config,
-                (repo_prefix,),
-                pr_port=pr_port,
-                github_memo=memo,
-                gh_runner=gh_runner,
-            ).get(repo_prefix, []),
-            automation_config,
-        )
-        if pr_state != "none":
-            skipped.append(AdmissionSkip(issue_ref, pr_state))
-            continue
-        is_graph_member = in_any_critical_path(config, issue_ref)
-        if is_graph_member:
-            is_ready = memo.dependency_ready.get(issue_ref)
-            if is_ready is None:
-                val_code, _ = evaluate_ready_promotion(
-                    issue_ref=issue_ref,
-                    config=config,
-                    project_owner=project_owner,
-                    project_number=project_number,
-                    require_in_graph=True,
-                )
-                is_ready = val_code == 0
-                memo.dependency_ready[issue_ref] = is_ready
-            if not is_ready:
-                skipped.append(AdmissionSkip(issue_ref, "dependency_unmet"))
-                continue
-        prior_resolution = _latest_resolution_signal(
-            issue_ref,
-            owner,
-            repo,
-            number,
-            review_state_port=review_state_port,
-            github_memo=memo,
-            gh_runner=gh_runner,
-        )
-        if prior_resolution is not None:
-            try:
-                signal_action = _apply_prior_resolution_signal(
-                    issue_ref,
-                    prior_resolution,
-                    config,
-                    project_owner,
-                    project_number,
-                    review_state_port=review_state_port,
-                    board_port=board_port,
-                    dry_run=dry_run,
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError as exc:
-                partial_failure = True
-                error = str(exc)
-                break
-            if signal_action == "resolved":
-                resolved.append(issue_ref)
-            else:
-                blocked.append(issue_ref)
-            skipped.append(AdmissionSkip(issue_ref, "prior_resolution_signal"))
-            continue
-        eligible.append(
-            AdmissionCandidate(
-                issue_ref=issue_ref,
-                repo_prefix=repo_prefix,
-                item_id=item.item_id,
-                project_id=item.project_id,
-                priority=item.priority,
-                title=item.title,
-                is_graph_member=is_graph_member,
-            )
-        )
-
-    return (
-        eligible,
-        resolved,
-        blocked,
-        partial_failure,
-        error,
-        deep_evaluation_truncated,
+    return _app_evaluate_admission_candidates(
+        provisional_candidates,
+        deps=_build_admission_pipeline_deps(),
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        needed=needed,
+        dry_run=dry_run,
+        memo=memo,
+        skipped=skipped,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        gh_runner=gh_runner,
     )
 
 
@@ -2548,35 +1850,18 @@ def _apply_admitted_backlog_candidates(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[list[str], bool, str | None]:
     """Apply backlog-to-ready mutations for the selected candidates."""
-    admitted: list[str] = []
-    partial_failure = False
-    error: str | None = None
-    if dry_run:
-        return admitted, partial_failure, error
-    board_port = board_port or _default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
+    return _app_apply_admitted_backlog_candidates(
+        selected,
+        deps=_build_admission_pipeline_deps(),
+        executor=executor,
+        assignment_owner=assignment_owner,
+        board_port=board_port,
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        dry_run=dry_run,
         gh_runner=gh_runner,
     )
-    for candidate in selected:
-        try:
-            _admit_backlog_item(
-                candidate,
-                executor=executor,
-                assignment_owner=assignment_owner,
-                board_port=board_port,
-                project_owner=project_owner,
-                project_number=project_number,
-                config=config,
-                gh_runner=gh_runner,
-            )
-        except GhQueryError as exc:
-            partial_failure = True
-            error = str(exc)
-            break
-        admitted.append(candidate.issue_ref)
-    return admitted, partial_failure, error
 
 
 def admit_backlog_items(
@@ -3189,159 +2474,15 @@ def resolve_issues_from_event(
     pr_port: _PullRequestPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[tuple[str, str, list[str] | None]]:
-    """Parse GITHUB_EVENT_PATH -> list of (issue_ref, event_kind, failed_checks).
-
-    failed_checks is populated for check_suite failure events (names of failed
-    check runs queried from the API). None for all other event types.
-    """
-    try:
-        event_data = json.loads(Path(event_path).read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as error:
-        raise ConfigError(
-            f"Failed reading event file {event_path}: {error}"
-        ) from error
-
-    results: list[tuple[str, str, list[str] | None]] = []
-
-    # Determine event type from structure
-    if "pull_request" in event_data:
-        pr = event_data["pull_request"]
-        pr_number = pr.get("number")
-        pr_repo = pr.get("base", {}).get("repo", {}).get("full_name", "")
-        merged = pr.get("merged", False)
-        action = event_data.get("action", "")
-
-        if not pr_number or not pr_repo:
-            return results
-
-        if "/" not in pr_repo:
-            return results
-        owner, repo = pr_repo.split("/", maxsplit=1)
-
-        if pr_port is not None:
-            linked = tuple(
-                LinkedIssue(
-                    owner=owner,
-                    repo=repo,
-                    number=parse_issue_ref(issue_ref).number,
-                    ref=issue_ref,
-                )
-                for issue_ref in pr_port.linked_issue_refs(f"{owner}/{repo}", pr_number)
-            )
-        else:
-            linked = query_closing_issues(
-                owner, repo, pr_number, config, gh_runner=gh_runner
-            )
-
-        if action in ("opened", "reopened", "synchronize"):
-            event_kind = "pr_open"
-        elif action == "ready_for_review":
-            event_kind = "pr_ready_for_review"
-        elif action == "closed" and merged:
-            event_kind = "pr_close_merged"
-        elif action == "closed" and not merged:
-            return results  # Closed without merge, no state change
-        else:
-            return results
-
-        for issue in linked:
-            results.append((issue.ref, event_kind, None))
-
-    elif "review" in event_data:
-        review = event_data["review"]
-        review_state = review.get("state", "")
-        pr = event_data.get("pull_request", {})
-        pr_number = pr.get("number")
-        pr_repo = pr.get("base", {}).get("repo", {}).get("full_name", "")
-
-        if not pr_number or not pr_repo:
-            return results
-
-        if "/" not in pr_repo:
-            return results
-        owner, repo = pr_repo.split("/", maxsplit=1)
-
-        if pr_port is not None:
-            linked = tuple(
-                LinkedIssue(
-                    owner=owner,
-                    repo=repo,
-                    number=parse_issue_ref(issue_ref).number,
-                    ref=issue_ref,
-                )
-                for issue_ref in pr_port.linked_issue_refs(f"{owner}/{repo}", pr_number)
-            )
-        else:
-            linked = query_closing_issues(
-                owner, repo, pr_number, config, gh_runner=gh_runner
-            )
-
-        if review_state == "changes_requested":
-            for issue in linked:
-                results.append((issue.ref, "changes_requested", None))
-        elif review_state in {"approved", "commented"}:
-            for issue in linked:
-                results.append((issue.ref, "review_submitted", None))
-
-    elif "check_suite" in event_data:
-        check_suite = event_data["check_suite"]
-        conclusion = check_suite.get("conclusion", "")
-        head_sha = check_suite.get("head_sha", "")
-        pull_requests = check_suite.get("pull_requests", [])
-
-        for pr_info in pull_requests:
-            pr_number = pr_info.get("number")
-            pr_repo_full = (
-                pr_info.get("base", {}).get("repo", {}).get("full_name", "")
-            )
-
-            if not pr_number or not pr_repo_full:
-                continue
-
-            if "/" not in pr_repo_full:
-                continue
-            owner, repo = pr_repo_full.split("/", maxsplit=1)
-
-            if pr_port is not None:
-                linked = tuple(
-                    LinkedIssue(
-                        owner=owner,
-                        repo=repo,
-                        number=parse_issue_ref(issue_ref).number,
-                        ref=issue_ref,
-                    )
-                    for issue_ref in pr_port.linked_issue_refs(
-                        f"{owner}/{repo}",
-                        pr_number,
-                    )
-                )
-            else:
-                linked = query_closing_issues(
-                    owner, repo, pr_number, config, gh_runner=gh_runner
-                )
-
-            if conclusion == "failure":
-                event_kind = "checks_failed"
-            elif conclusion == "success":
-                event_kind = "checks_passed"
-            else:
-                continue
-
-            # For failure events, query the actual failed check run names
-                failed_names: list[str] | None = None
-            if event_kind == "checks_failed" and head_sha:
-                failed_names = _query_failed_check_runs(
-                    owner,
-                    repo,
-                    head_sha,
-                    pr_port=pr_port,
-                    gh_runner=gh_runner,
-                )
-
-            for issue in linked:
-                results.append((issue.ref, event_kind, failed_names))
-
-    return results
+    """Parse GITHUB_EVENT_PATH -> list of (issue_ref, event_kind, failed_checks)."""
+    return _app_resolve_issues_from_event(
+        event_path,
+        config,
+        pr_port=pr_port,
+        gh_runner=gh_runner,
+        query_closing_issues_fn=query_closing_issues,
+        query_failed_check_runs_fn=_query_failed_check_runs,
+    )
 
 
 def resolve_pr_to_issues(
@@ -3353,15 +2494,14 @@ def resolve_pr_to_issues(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Resolve PR -> linked issue refs using closingIssuesReferences."""
-    if "/" not in pr_repo:
-        raise ConfigError(f"pr_repo must be 'owner/repo', got '{pr_repo}'.")
-    owner, repo = pr_repo.split("/", maxsplit=1)
-    if pr_port is not None:
-        return list(pr_port.linked_issue_refs(pr_repo, pr_number))
-    linked = query_closing_issues(
-        owner, repo, pr_number, config, gh_runner=gh_runner
+    return _app_resolve_pr_to_issues(
+        pr_repo,
+        pr_number,
+        config,
+        pr_port=pr_port,
+        gh_runner=gh_runner,
+        query_closing_issues_fn=query_closing_issues,
     )
-    return [issue.ref for issue in linked]
 
 
 def sync_review_state(
