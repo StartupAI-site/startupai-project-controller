@@ -36,11 +36,10 @@ from startupai_controller.domain.models import (
 )
 from startupai_controller.domain.scheduling_policy import (
     PROTECTED_QUEUE_ROUTING_STATUSES,
+    controller_owned_admission as _domain_controller_owned_admission,
 )
 from startupai_controller.validate_critical_path_promotion import (
-    ConfigError,
     CriticalPathConfig,
-    parse_issue_ref,
 )
 from startupai_controller.runtime.wiring import (
     GitHubPortBundle,
@@ -330,15 +329,12 @@ def _controller_owned_admission(
     """Return True when protected Backlog -> Ready is controller-owned."""
     if automation_config is None:
         return False
-    if not automation_config.admission.enabled:
-        return False
-    if automation_config.execution_authority_mode != "single_machine":
-        return False
-    try:
-        prefix = parse_issue_ref(issue_ref).prefix
-    except ConfigError:
-        return False
-    return prefix in automation_config.execution_authority_repos
+    return _domain_controller_owned_admission(
+        issue_ref,
+        admission_enabled=automation_config.admission.enabled,
+        execution_authority_mode=automation_config.execution_authority_mode,
+        execution_authority_repos=automation_config.execution_authority_repos,
+    )
 
 
 def auto_promote_successors(

@@ -61,6 +61,24 @@ def protected_queue_executor_target(
     return target
 
 
+def controller_owned_admission(
+    issue_ref: str,
+    *,
+    admission_enabled: bool,
+    execution_authority_mode: str | None,
+    execution_authority_repos: tuple[str, ...],
+) -> bool:
+    """Return True when protected Backlog -> Ready is controller-owned."""
+    if not admission_enabled:
+        return False
+    if execution_authority_mode != "single_machine":
+        return False
+    prefix, sep, number = issue_ref.partition("#")
+    if not sep or not number.isdigit():
+        return False
+    return prefix in execution_authority_repos
+
+
 # ---------------------------------------------------------------------------
 # Priority ranking
 # ---------------------------------------------------------------------------
