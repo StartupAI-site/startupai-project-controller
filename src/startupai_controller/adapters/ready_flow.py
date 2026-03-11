@@ -20,3 +20,8 @@ class BoardAutomationReadyFlowAdapter:
         from startupai_controller.board_automation import admission_summary_payload
 
         return admission_summary_payload(*args, **kwargs)
+
+    def claim_ready_issue(self, *args, **kwargs):
+        from startupai_controller.board_automation import claim_ready_issue
+
+        return claim_ready_issue(*args, **kwargs)

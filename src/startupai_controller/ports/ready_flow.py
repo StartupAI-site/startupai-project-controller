@@ -44,3 +44,29 @@ class ReadyFlowPort(Protocol):
     def admission_summary_payload(self, decision, *, enabled: bool):
         """Convert admission results into a JSON-friendly payload."""
         ...
+
+    def claim_ready_issue(
+        self,
+        config,
+        project_owner: str,
+        project_number: int,
+        *,
+        executor: str,
+        issue_ref: str | None = None,
+        next_issue: bool = False,
+        this_repo_prefix: str | None = None,
+        all_prefixes: bool = False,
+        per_executor_wip_limit: int = 3,
+        automation_config=None,
+        dry_run: bool = False,
+        review_state_port=None,
+        board_port=None,
+        status_resolver=None,
+        board_info_resolver=None,
+        board_mutator=None,
+        comment_checker=None,
+        comment_poster=None,
+        gh_runner=None,
+    ):
+        """Claim one Ready issue for a specific executor."""
+        ...

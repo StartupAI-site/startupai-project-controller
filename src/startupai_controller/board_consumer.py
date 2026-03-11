@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, Any, Callable
 from startupai_controller.board_automation import (
     mark_issues_done,
     _set_blocked_with_reason,
-    claim_ready_issue,
     review_rescue,
     sync_review_state,
 )
@@ -217,6 +216,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("board-consumer")
 
+
+def claim_ready_issue(
+    config,
+    project_owner: str,
+    project_number: int,
+    **kwargs,
+):
+    """Compatibility wrapper around the ready-flow port claim operation."""
+    ready_flow_port = kwargs.pop("ready_flow_port", None) or build_ready_flow_port()
+    return ready_flow_port.claim_ready_issue(
+        config,
+        project_owner,
+        project_number,
+        **kwargs,
+    )
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -248,6 +263,7 @@ class PreparedCycleContext:
     global_limit: int
     board_snapshot: CycleBoardSnapshot
     github_memo: CycleGitHubMemo
+    ready_flow_port: ReadyFlowPort
     admission_summary: dict[str, Any]
     review_queue_summary: ReviewQueueDrainSummary = field(
         default_factory=ReviewQueueDrainSummary
@@ -4596,6 +4612,7 @@ def _prepare_cycle(
         global_limit=runtime.global_limit,
         board_snapshot=board_snapshot,
         github_memo=runtime.github_memo,
+        ready_flow_port=runtime.ready_flow_port,
         admission_summary=admission_summary,
         review_queue_summary=review_queue_summary,
         timings_ms=timings_ms,
@@ -5862,6 +5879,7 @@ def _claim_launch_ready_issue(
         prepared.cp_config,
         config.project_owner,
         config.project_number,
+        ready_flow_port=prepared.ready_flow_port,
         executor=config.executor,
         issue_ref=candidate,
         all_prefixes=True,
