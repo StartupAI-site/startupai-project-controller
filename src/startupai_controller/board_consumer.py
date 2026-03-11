@@ -53,6 +53,10 @@ from startupai_controller.board_graph import (
     _resolve_issue_coordinates,
     admission_watermarks,
 )
+from startupai_controller.application.consumer.cycle import (
+    PreparedCycleDeps,
+    run_prepared_cycle,
+)
 from startupai_controller.consumer_workflow import (
     DEFAULT_WORKFLOW_FILENAME,
     WorkflowConfigError,
@@ -7102,6 +7106,18 @@ def _finalize_claimed_session(
     )
 
 
+def _prepared_cycle_deps() -> PreparedCycleDeps:
+    """Bind board_consumer helpers for the extracted prepared-cycle slice."""
+    return PreparedCycleDeps(
+        claim_suppression_state=_claim_suppression_state,
+        next_available_slot=_next_available_slot,
+        resolve_launch_context_for_cycle=_resolve_launch_context_for_cycle,
+        claim_launch_context=_claim_launch_context,
+        execute_claimed_session=_execute_claimed_session,
+        finalize_claimed_session=_finalize_claimed_session,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core: run_one_cycle
 # ---------------------------------------------------------------------------
@@ -7158,92 +7174,23 @@ def run_one_cycle(
         return CycleResult(action="error", reason=f"control-plane:{err}")
 
     assert prepared is not None
-    cp_config = prepared.cp_config
-    auto_config = prepared.auto_config
-    config.poll_interval_seconds = prepared.effective_interval
-
-    suppression_state = _claim_suppression_state(db)
-    if suppression_state is not None and launch_context is None:
-        return CycleResult(
-            action="idle",
-            reason=f"claim-suppressed:{suppression_state['scope']}",
-        )
-
-    if slot_id_override is None:
-        if db.active_lease_count() >= prepared.global_limit:
-            return CycleResult(action="idle", reason="lease-cap")
-        slot_id = _next_available_slot(db, prepared.global_limit)
-        if slot_id is None:
-            return CycleResult(action="idle", reason="lease-cap")
-    else:
-        slot_id = slot_id_override
-
-    launch_context, cycle_result = _resolve_launch_context_for_cycle(
+    return run_prepared_cycle(
         config=config,
         db=db,
         prepared=prepared,
+        deps=_prepared_cycle_deps(),
+        dry_run=dry_run,
         launch_context=launch_context,
         target_issue=target_issue,
-        dry_run=dry_run,
-        status_resolver=status_resolver,
-        subprocess_runner=subprocess_runner,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
+        slot_id_override=slot_id_override,
         gh_runner=gh_runner,
-    )
-    if cycle_result is not None:
-        return cycle_result
-
-    assert launch_context is not None
-    candidate = launch_context.issue_ref
-    candidate_prefix = launch_context.repo_prefix
-
-    claimed_context, cycle_result = _claim_launch_context(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        slot_id=slot_id,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-    )
-    if cycle_result is not None:
-        return cycle_result
-
-    assert claimed_context is not None
-    session_id = claimed_context.session_id
-    effective_max_retries = claimed_context.effective_max_retries
-
-    execution_outcome = _execute_claimed_session(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        claimed_context=claimed_context,
         subprocess_runner=subprocess_runner,
         file_reader=file_reader,
+        status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
-        gh_runner=gh_runner,
-    )
-
-    return _finalize_claimed_session(
-        config=config,
-        db=db,
-        prepared=prepared,
-        launch_context=launch_context,
-        claimed_context=claimed_context,
-        execution_outcome=execution_outcome,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
     )
 
 

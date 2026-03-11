@@ -15,6 +15,7 @@ ORCHESTRATOR_MODULES = (
     SRC_ROOT / "board_control_plane.py",
 )
 GRAPH_MODULE = SRC_ROOT / "board_graph.py"
+APPLICATION_ROOT = SRC_ROOT / "application"
 DOMAIN_ROOT = SRC_ROOT / "domain"
 PORTS_ROOT = SRC_ROOT / "ports"
 
@@ -26,6 +27,11 @@ SHIM_MODULES = {
 ADAPTER_PREFIX = "startupai_controller.adapters"
 PORTS_PREFIX = "startupai_controller.ports"
 RUNTIME_PREFIX = "startupai_controller.runtime"
+ENTRYPOINT_MODULES = {
+    "startupai_controller.board_consumer",
+    "startupai_controller.board_automation",
+    "startupai_controller.board_control_plane",
+}
 
 def _is_type_checking_test(node: ast.expr) -> bool:
     return isinstance(node, ast.Name) and node.id == "TYPE_CHECKING"
@@ -95,6 +101,20 @@ def test_domain_has_no_port_adapter_or_shim_imports() -> None:
             if module in SHIM_MODULES
             or module.startswith(ADAPTER_PREFIX)
             or module.startswith(PORTS_PREFIX)
+        )
+        assert offending == [], f"{path.name} imports outer layers: {offending}"
+
+
+def test_application_has_no_entrypoint_adapter_or_shim_imports() -> None:
+    for path in APPLICATION_ROOT.rglob("*.py"):
+        imported = _runtime_imported_modules(path)
+        offending = sorted(
+            module
+            for module in imported
+            if module in SHIM_MODULES
+            or module.startswith(ADAPTER_PREFIX)
+            or module.startswith(RUNTIME_PREFIX)
+            or module in ENTRYPOINT_MODULES
         )
         assert offending == [], f"{path.name} imports outer layers: {offending}"
 
