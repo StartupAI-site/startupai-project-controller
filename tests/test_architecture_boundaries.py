@@ -124,6 +124,7 @@ def test_application_has_no_entrypoint_adapter_or_shim_imports() -> None:
             or module.startswith(ADAPTER_PREFIX)
             or module.startswith(RUNTIME_PREFIX)
             or module in ENTRYPOINT_MODULES
+            or module in {"sqlite3", "subprocess"}
         )
         assert offending == [], f"{path.name} imports outer layers: {offending}"
 

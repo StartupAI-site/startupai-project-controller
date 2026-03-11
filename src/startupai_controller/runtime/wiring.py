@@ -34,6 +34,7 @@ from startupai_controller.adapters.sqlite_store import (
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.process_runner import ProcessRunnerPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.service_control import ServiceControlPort
 from startupai_controller.ports.session_store import SessionStorePort
@@ -111,6 +112,18 @@ def build_worktree_port(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> WorktreePort:
     """Build the local worktree/process adapter."""
+    return LocalProcessAdapter(
+        gh_runner=gh_runner,
+        subprocess_runner=subprocess_runner,
+    )
+
+
+def build_process_runner_port(
+    *,
+    gh_runner: Callable[..., str] | None = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> ProcessRunnerPort:
+    """Build the local process runner port."""
     return LocalProcessAdapter(
         gh_runner=gh_runner,
         subprocess_runner=subprocess_runner,

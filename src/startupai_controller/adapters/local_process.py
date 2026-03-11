@@ -33,6 +33,10 @@ class LocalProcessAdapter:
             lambda args, **kw: subprocess.run(args, **kw)
         )
 
+    def run(self, args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        """Execute one local process command."""
+        return self._subprocess_runner(args, **kwargs)
+
     # -- WorktreePort methods --
 
     def list_worktrees(self, repo_root: str) -> list[WorktreeEntry]:

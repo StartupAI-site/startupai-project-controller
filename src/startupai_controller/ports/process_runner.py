@@ -1,11 +1,16 @@
-"""GhRunnerPort — typed gh CLI runner.
-
-Port protocol replacing bare Callable for gh CLI execution.
-"""
+"""Process and gh runner ports for local command execution."""
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
+
+
+class ProcessRunnerPort(Protocol):
+    """Typed local process runner."""
+
+    def run(self, args: list[str], **kwargs: Any) -> Any:
+        """Execute a local process command."""
+        ...
 
 
 class GhRunnerPort(Protocol):

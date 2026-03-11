@@ -21,6 +21,31 @@ def test_run_gh_passes_args_list_without_splatting() -> None:
     assert recorded == [(["api", "/rate_limit"], False)]
 
 
+def test_run_delegates_to_subprocess_runner() -> None:
+    recorded: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_subprocess_runner(args, **kwargs):
+        recorded.append((list(args), dict(kwargs)))
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    adapter = LocalProcessAdapter(subprocess_runner=fake_subprocess_runner)
+
+    result = adapter.run(["git", "status"], capture_output=True, text=True)
+
+    assert result.stdout == "ok"
+    assert recorded == [
+        (
+            ["git", "status"],
+            {"capture_output": True, "text": True},
+        )
+    ]
+
+
 def test_list_worktrees_parses_porcelain_output() -> None:
     def fake_subprocess_runner(args, **kwargs):
         return subprocess.CompletedProcess(

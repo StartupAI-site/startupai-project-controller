@@ -104,6 +104,7 @@ from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.runtime.wiring import (
     begin_runtime_request_stats,
     build_github_port_bundle,
+    build_process_runner_port,
     build_session_store,
     build_worktree_port,
     clear_github_runtime_caches,
@@ -6911,6 +6912,10 @@ def run_one_cycle(
         return CycleResult(action="error", reason=f"control-plane:{err}")
 
     assert prepared is not None
+    process_runner = build_process_runner_port(
+        gh_runner=gh_runner,
+        subprocess_runner=subprocess_runner,
+    )
     return run_prepared_cycle(
         config=config,
         db=db,
@@ -6921,7 +6926,7 @@ def run_one_cycle(
         target_issue=target_issue,
         slot_id_override=slot_id_override,
         gh_runner=gh_runner,
-        subprocess_runner=subprocess_runner,
+        process_runner=process_runner,
         file_reader=file_reader,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import subprocess
 from typing import Any, Callable
 
 from startupai_controller.domain.models import CycleResult
+from startupai_controller.ports.process_runner import ProcessRunnerPort
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ def run_prepared_cycle(
     launch_context: Any | None = None,
     slot_id_override: int | None = None,
     gh_runner: Callable[..., str] | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    process_runner: ProcessRunnerPort | None = None,
     file_reader: Callable[[Path], str] | None = None,
     status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
@@ -68,7 +68,7 @@ def run_prepared_cycle(
         target_issue=target_issue,
         dry_run=dry_run,
         status_resolver=status_resolver,
-        subprocess_runner=subprocess_runner,
+        subprocess_runner=process_runner.run if process_runner is not None else None,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
@@ -100,7 +100,7 @@ def run_prepared_cycle(
         prepared=prepared,
         launch_context=launch_context,
         claimed_context=claimed_context,
-        subprocess_runner=subprocess_runner,
+        subprocess_runner=process_runner.run if process_runner is not None else None,
         file_reader=file_reader,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
