@@ -45,6 +45,7 @@ from startupai_controller import consumer_deferred_action_helpers as _deferred_a
 import startupai_controller.consumer_execution_outcome_wiring as _execution_outcome_wiring
 from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
+import startupai_controller.consumer_preflight_wiring as _preflight_wiring
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
@@ -126,30 +127,9 @@ from startupai_controller.control_plane_rescue import (
     _replay_deferred_actions,
 )
 from startupai_controller.application.consumer.cycle import run_prepared_cycle
-from startupai_controller.application.consumer.preflight import (
-    PrepareCyclePhasesDeps,
-    ReconciliationDeps,
-    ReconciliationResult,
-    execute_prepare_cycle_phases as _execute_prepare_cycle_phases_use_case,
-    reconcile_board_truth as _reconcile_board_truth_use_case,
-)
+from startupai_controller.application.consumer.preflight import ReconciliationResult
 from startupai_controller.application.consumer.preflight_runtime import (
     CycleRuntimeContext as _AppCycleRuntimeContext,
-    InitializeCycleRuntimeDeps,
-    PhaseHelperDeps,
-    PrepareCycleDeps,
-    initialize_cycle_runtime as _initialize_cycle_runtime_use_case,
-    run_deferred_replay_phase as _run_deferred_replay_phase_use_case,
-    load_board_snapshot_phase as _load_board_snapshot_phase_use_case,
-    run_executor_routing_phase as _run_executor_routing_phase_use_case,
-    run_reconciliation_phase as _run_reconciliation_phase_use_case,
-    run_review_queue_phase as _run_review_queue_phase_use_case,
-    run_admission_phase as _run_admission_phase_use_case,
-    prepare_cycle as _prepare_cycle_use_case,
-)
-from startupai_controller.application.consumer.reconciliation import (
-    ReconciliationWiringDeps,
-    wire_reconcile_board_truth as _wire_reconcile_board_truth_use_case,
 )
 from startupai_controller.application.consumer.recovery import (
     recover_interrupted_sessions as _recover_interrupted_sessions_use_case,
@@ -1453,246 +1433,39 @@ def _update_board_snapshot_statuses(
     )
 
 
-def _prepare_review_queue_batch(
-    *,
-    config: ConsumerConfig,
-    store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
-    board_snapshot: CycleBoardSnapshot,
-    pr_port: PullRequestPort,
-    now: datetime,
-    dry_run: bool,
-) -> tuple[PreparedReviewQueueBatch | None, ReviewQueueDrainSummary | None]:
-    """Prepare the bounded review-queue workset for one drain cycle."""
-    return _review_queue_wiring.prepare_review_queue_batch(
-        config=config,
-        store=store,
-        critical_path_config=critical_path_config,
-        board_snapshot=board_snapshot,
-        pr_port=pr_port,
-        now=now,
-        dry_run=dry_run,
-        deps=_build_review_queue_wiring_deps(),
-        review_queue_helpers=_review_queue_helpers,
-    )
+_prepare_review_queue_batch = _review_queue_wiring.prepare_review_queue_batch_from_shell
 
 
-def _prepare_due_review_processing(
-    *,
-    store: SessionStorePort,
-    automation_config: BoardAutomationConfig,
-    pr_port: PullRequestPort,
-    prepared_batch: PreparedReviewQueueBatch,
-    now: datetime,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-) -> PreparedDueReviewProcessing:
-    """Prepare the changed due-review groups and snapshots for rescue processing."""
-    return _review_queue_wiring.prepare_due_review_processing(
-        store=store,
-        automation_config=automation_config,
-        pr_port=pr_port,
-        prepared_batch=prepared_batch,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        deps=_build_review_queue_wiring_deps(),
-        review_queue_helpers=_review_queue_helpers,
-    )
+_prepare_due_review_processing = (
+    _review_queue_wiring.prepare_due_review_processing_from_shell
+)
 
 
-def _process_due_review_group(
-    *,
-    config: ConsumerConfig,
-    store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    pr_port: PullRequestPort,
-    pr_repo: str,
-    pr_number: int,
-    entries: tuple[ReviewQueueEntry, ...],
-    snapshot: ReviewSnapshot | None,
-    updated_snapshot: CycleBoardSnapshot,
-    now: datetime,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-) -> ReviewGroupProcessingOutcome:
-    """Process one due PR group from the review queue."""
-    return _review_queue_wiring.process_due_review_group(
-        config=config,
-        store=store,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        pr_port=pr_port,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        entries=entries,
-        snapshot=snapshot,
-        updated_snapshot=updated_snapshot,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        deps=_build_review_queue_wiring_deps(),
-        review_queue_helpers=_review_queue_helpers,
-    )
+_process_due_review_group = _review_queue_wiring.process_due_review_group_from_shell
 
 
 ReviewRescueExecution = _review_queue_helpers.ReviewRescueExecution
 
 
-def _build_review_queue_wiring_deps() -> _review_queue_wiring.ReviewQueueWiringDeps:
-    """Build shell-facing review-queue wiring dependencies."""
-    return _review_queue_wiring.ReviewQueueWiringDeps(
-        prepared_batch_factory=PreparedReviewQueueBatch,
-        summary_factory=ReviewQueueDrainSummary,
-        prepared_due_processing_factory=PreparedDueReviewProcessing,
-        review_group_outcome_factory=ReviewGroupProcessingOutcome,
-        review_queue_processing_outcome_factory=ReviewQueueProcessingOutcome,
-        post_pr_codex_verdict=_post_pr_codex_verdict,
-        review_rescue_fn=review_rescue,
-        escalate_to_claude=_escalate_to_claude,
-        gh_reason_code=gh_reason_code,
-        log_probe_warning=lambda err: logger.warning(
-            "Review queue wakeup probe failed: %s",
-            err,
-        ),
-        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
-            "Pre-backfill verdict failed for %s: %s",
-            issue_ref,
-            err,
-        ),
-        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
-            "Review verdict backfill failed for %s (%s): %s",
-            issue_ref,
-            session_id,
-            err,
-        ),
-    )
+_build_review_queue_wiring_deps = _review_queue_wiring.build_review_queue_wiring_deps
 
 
-def _run_review_rescue_for_group(
-    *,
-    config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    pr_port: PullRequestPort,
-    pr_repo: str,
-    pr_number: int,
-    snapshot: ReviewSnapshot,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-) -> ReviewRescueExecution:
-    """Run rescue logic for one due review group."""
-    return _review_queue_helpers.run_review_rescue_for_group(
-        config=config,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        pr_port=pr_port,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        snapshot=snapshot,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        review_rescue_fn=review_rescue,
-    )
+_run_review_rescue_for_group = _review_queue_wiring.run_review_rescue_for_group_from_shell
 
 
-def _apply_review_queue_group_result(
-    *,
-    store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    pr_port: PullRequestPort,
-    pr_repo: str,
-    pr_number: int,
-    entries: tuple[ReviewQueueEntry, ...],
-    result: ReviewRescueResult,
-    now: datetime,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[str, ...]:
-    """Persist one review-group result and return escalated issue refs."""
-    return _review_queue_wiring.apply_review_queue_group_result(
-        store=store,
-        critical_path_config=critical_path_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        pr_port=pr_port,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        entries=entries,
-        result=result,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        deps=_build_review_queue_wiring_deps(),
-        review_queue_helpers=_review_queue_helpers,
-    )
+_apply_review_queue_group_result = (
+    _review_queue_wiring.apply_review_queue_group_result_from_shell
+)
 
 
-def _summarize_review_group_outcome(
-    *,
-    critical_path_config: CriticalPathConfig,
-    store: SessionStorePort,
-    project_owner: str,
-    project_number: int,
-    pr_repo: str,
-    pr_number: int,
-    entries: tuple[ReviewQueueEntry, ...],
-    result: ReviewRescueResult,
-    updated_snapshot: CycleBoardSnapshot,
-    escalated: tuple[str, ...],
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-) -> ReviewGroupProcessingOutcome:
-    """Build the public outcome for one processed review group."""
-    return _review_queue_wiring.summarize_review_group_outcome(
-        critical_path_config=critical_path_config,
-        store=store,
-        project_owner=project_owner,
-        project_number=project_number,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        entries=entries,
-        result=result,
-        updated_snapshot=updated_snapshot,
-        escalated=escalated,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        deps=_build_review_queue_wiring_deps(),
-        review_queue_helpers=_review_queue_helpers,
-    )
+_summarize_review_group_outcome = (
+    _review_queue_wiring.summarize_review_group_outcome_from_shell
+)
 
 
-def _process_review_queue_due_groups(
-    *,
-    config: ConsumerConfig,
-    store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    pr_port: PullRequestPort,
-    prepared_batch: PreparedReviewQueueBatch,
-    board_snapshot: CycleBoardSnapshot,
-    now: datetime,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None = None,
-) -> ReviewQueueProcessingOutcome:
-    """Process the due PR groups for a prepared review-queue batch."""
-    return _review_queue_wiring.process_review_queue_due_groups(
-        config=config,
-        store=store,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        pr_port=pr_port,
-        prepared_batch=prepared_batch,
-        board_snapshot=board_snapshot,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        deps=_build_review_queue_wiring_deps(),
-        review_queue_helpers=_review_queue_helpers,
-    )
+_process_review_queue_due_groups = (
+    _review_queue_wiring.process_review_queue_due_groups_from_shell
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1718,33 +1491,7 @@ def _prune_stale_review_entries(
     return removed
 
 
-def _seed_new_review_entries(
-    store: SessionStorePort,
-    review_refs: set[str],
-    existing_refs: set[str],
-    *,
-    dry_run: bool = False,
-    now: datetime | None = None,
-) -> list[str]:
-    """Seed queue entries for Review issues not yet tracked."""
-    seeded: list[str] = []
-    for issue_ref in sorted(review_refs):
-        if issue_ref in existing_refs:
-            continue
-        latest_session = store.latest_session_for_issue(issue_ref)
-        if latest_session is None or not latest_session.pr_url:
-            continue
-        if not dry_run:
-            if _queue_review_item(
-                store,
-                issue_ref,
-                latest_session.pr_url,
-                session_id=latest_session.id,
-                now=now,
-            ) is None:
-                continue
-        seeded.append(issue_ref)
-    return seeded
+_seed_new_review_entries = _review_queue_wiring.seed_new_review_entries_from_shell
 
 
 def _reconcile_review_queue_identity(
@@ -1765,72 +1512,12 @@ def _reconcile_review_queue_identity(
     )
 
 
-def _replay_deferred_action(
-    *,
-    action: DeferredAction,
-    config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    pr_port: PullRequestPort | None,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Execute one deferred control-plane action."""
-    _deferred_action_helpers.replay_deferred_action(
-        action=action,
-        config=config,
-        critical_path_config=critical_path_config,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        transition_issue_to_review=_transition_issue_to_review,
-        transition_issue_to_in_progress=_transition_issue_to_in_progress,
-        return_issue_to_ready=_return_issue_to_ready,
-        post_pr_codex_verdict=_post_pr_codex_verdict,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        runtime_comment_poster=_runtime_comment_poster,
-        runtime_issue_closer=_runtime_issue_closer,
-        runtime_failed_check_rerun=_runtime_failed_check_rerun,
-        runtime_automerge_enabler=_runtime_automerge_enabler,
-    )
+_replay_deferred_action = _deferred_action_helpers.replay_deferred_action_from_shell
 
 
-def _replay_deferred_status_action(
-    *,
-    payload: dict[str, Any],
-    config: ConsumerConfig,
-    critical_path_config: CriticalPathConfig,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Replay a deferred issue status transition."""
-    _deferred_action_helpers.replay_deferred_status_action(
-        payload=payload,
-        config=config,
-        critical_path_config=critical_path_config,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        transition_issue_to_review=_transition_issue_to_review,
-        transition_issue_to_in_progress=_transition_issue_to_in_progress,
-        return_issue_to_ready=_return_issue_to_ready,
-    )
+_replay_deferred_status_action = (
+    _deferred_action_helpers.replay_deferred_status_action_from_shell
+)
 
 
 def _replay_deferred_verdict_marker(
@@ -2016,266 +1703,37 @@ _reconcile_stale_in_progress_items = _operational_wiring.reconcile_stale_in_prog
 _recover_interrupted_sessions = _operational_wiring.recover_interrupted_sessions
 
 
-def _build_init_cycle_runtime_deps() -> InitializeCycleRuntimeDeps:
-    """Build the deps for cycle runtime initialization."""
-    return InitializeCycleRuntimeDeps(
-        build_session_store=build_session_store,
-        load_config=load_config,
-        load_automation_config=load_automation_config,
-        apply_automation_runtime=_apply_automation_runtime,
-        current_main_workflows=_current_main_workflows,
-        build_github_port_bundle=build_github_port_bundle,
-        build_ready_flow_port=build_ready_flow_port,
-        cycle_github_memo_factory=CycleGitHubMemo,
-        config_error_type=ConfigError,
-        logger=logger,
-    )
+_build_init_cycle_runtime_deps = _preflight_wiring.build_init_cycle_runtime_deps
 
 
-def _build_phase_helper_deps() -> PhaseHelperDeps:
-    """Build the deps for preflight phase helpers."""
-    return PhaseHelperDeps(
-        replay_deferred_actions=_replay_deferred_actions,
-        drain_review_queue=_drain_review_queue,
-        reconcile_board_truth=_reconcile_board_truth,
-        record_successful_github_mutation=_record_successful_github_mutation,
-        record_successful_board_sync=_record_successful_board_sync,
-        clear_degraded=_clear_degraded,
-        mark_degraded=_mark_degraded,
-        persist_admission_summary=_persist_admission_summary,
-        logger=logger,
-    )
+_build_phase_helper_deps = _preflight_wiring.build_phase_helper_deps
 
 
-def _initialize_cycle_runtime(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> CycleRuntimeContext:
-    """Build cycle-scoped runtime wiring and effective config."""
-    return _initialize_cycle_runtime_use_case(
-        config,
-        db,
-        deps=_build_init_cycle_runtime_deps(),
-        gh_runner=gh_runner,
-    )
+_initialize_cycle_runtime = _preflight_wiring.initialize_cycle_runtime
 
 
-def _run_deferred_replay_phase(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    runtime: CycleRuntimeContext,
-    *,
-    timings_ms: dict[str, int],
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    dry_run: bool,
-) -> None:
-    """Replay deferred actions for the cycle when enabled."""
-    return _run_deferred_replay_phase_use_case(
-        config,
-        db,
-        runtime,
-        deps=_build_phase_helper_deps(),
-        timings_ms=timings_ms,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
+_run_deferred_replay_phase = _preflight_wiring.run_deferred_replay_phase
 
 
-def _load_board_snapshot_phase(
-    config: ConsumerConfig,
-    runtime: CycleRuntimeContext,
-    *,
-    timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
-) -> CycleBoardSnapshot:
-    """Load the cycle board snapshot."""
-    return _load_board_snapshot_phase_use_case(
-        config,
-        runtime,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
-    )
+_load_board_snapshot_phase = _preflight_wiring.load_board_snapshot_phase
 
 
-def _run_executor_routing_phase(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    runtime: CycleRuntimeContext,
-    *,
-    board_snapshot: CycleBoardSnapshot,
-    timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
-    dry_run: bool,
-) -> None:
-    """Normalize executor routing for the protected queue."""
-    return _run_executor_routing_phase_use_case(
-        config,
-        db,
-        runtime,
-        deps=_build_phase_helper_deps(),
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
+_run_executor_routing_phase = _preflight_wiring.run_executor_routing_phase
 
 
-def _run_reconciliation_phase(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    runtime: CycleRuntimeContext,
-    *,
-    board_snapshot: CycleBoardSnapshot,
-    timings_ms: dict[str, int],
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Run truthful board reconciliation for the cycle."""
-    return _run_reconciliation_phase_use_case(
-        config,
-        db,
-        runtime,
-        deps=_build_phase_helper_deps(),
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
+_run_reconciliation_phase = _preflight_wiring.run_reconciliation_phase
 
 
-def _run_review_queue_phase(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    runtime: CycleRuntimeContext,
-    *,
-    board_snapshot: CycleBoardSnapshot,
-    timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
-    dry_run: bool,
-) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
-    """Drain the review queue for the current cycle."""
-    return _run_review_queue_phase_use_case(
-        config,
-        db,
-        runtime,
-        deps=_build_phase_helper_deps(),
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
+_run_review_queue_phase = _preflight_wiring.run_review_queue_phase
 
 
-def _run_admission_phase(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    runtime: CycleRuntimeContext,
-    *,
-    board_snapshot: CycleBoardSnapshot,
-    timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
-    dry_run: bool,
-) -> dict[str, Any]:
-    """Run backlog admission for the current cycle."""
-    return _run_admission_phase_use_case(
-        config,
-        db,
-        runtime,
-        deps=_build_phase_helper_deps(),
-        board_snapshot=board_snapshot,
-        timings_ms=timings_ms,
-        gh_runner=gh_runner,
-        dry_run=dry_run,
-    )
+_run_admission_phase = _preflight_wiring.run_admission_phase
 
 
-def _execute_prepare_cycle_phases(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    runtime: CycleRuntimeContext,
-    *,
-    dry_run: bool = False,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[CycleBoardSnapshot, ReviewQueueDrainSummary, dict[str, Any], dict[str, int]]:
-    """Execute the preflight phases for one cycle."""
-    result = _execute_prepare_cycle_phases_use_case(
-        config,
-        db,
-        runtime=runtime,
-        deps=PrepareCyclePhasesDeps(
-            run_deferred_replay_phase=_run_deferred_replay_phase,
-            load_board_snapshot_phase=_load_board_snapshot_phase,
-            run_executor_routing_phase=_run_executor_routing_phase,
-            run_reconciliation_phase=_run_reconciliation_phase,
-            run_review_queue_phase=_run_review_queue_phase,
-            run_admission_phase=_run_admission_phase,
-        ),
-        dry_run=dry_run,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-    )
-    return (
-        result.board_snapshot,
-        result.review_queue_summary,
-        result.admission_summary,
-        result.timings_ms,
-    )
+_execute_prepare_cycle_phases = _preflight_wiring.execute_prepare_cycle_phases
 
 
-def _prepare_cycle(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    *,
-    dry_run: bool = False,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> PreparedCycleContext:
-    """Run control-plane preflight once for a daemon tick."""
-    return _prepare_cycle_use_case(
-        config,
-        db,
-        deps=PrepareCycleDeps(
-            initialize_cycle_runtime_deps=_build_init_cycle_runtime_deps(),
-            phase_helper_deps=_build_phase_helper_deps(),
-            begin_runtime_request_stats=begin_runtime_request_stats,
-            end_runtime_request_stats=end_runtime_request_stats,
-            snapshot_to_issue_ref=_snapshot_to_issue_ref,
-            parse_issue_ref=parse_issue_ref,
-            record_metric=_record_metric,
-            control_key_degraded=CONTROL_KEY_DEGRADED,
-            prepare_cycle_phases_deps_factory=PrepareCyclePhasesDeps,
-            execute_prepare_cycle_phases=_execute_prepare_cycle_phases_use_case,
-        ),
-        prepared_cycle_context_factory=PreparedCycleContext,
-        dry_run=dry_run,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-    )
+_prepare_cycle = _preflight_wiring.prepare_cycle
 
 
 def _select_candidate_for_cycle(
@@ -2540,60 +1998,7 @@ _prepared_cycle_deps = _operational_wiring.prepared_cycle_deps
 # ---------------------------------------------------------------------------
 
 
-def run_one_cycle(
-    config: ConsumerConfig,
-    db: ConsumerDB,
-    *,
-    dry_run: bool = False,
-    target_issue: str | None = None,
-    prepared: PreparedCycleContext | None = None,
-    launch_context: PreparedLaunchContext | None = None,
-    slot_id_override: int | None = None,
-    skip_control_plane: bool = False,
-    # DI points
-    gh_runner: Callable[..., str] | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    file_reader: Callable[[Path], str] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-) -> CycleResult:
-    """Execute one poll-claim-execute cycle.
-
-    Returns a CycleResult describing what happened.
-    """
-    return _runtime_wiring.run_one_cycle(
-        config=config,
-        db=db,
-        dry_run=dry_run,
-        target_issue=target_issue,
-        prepared=prepared,
-        launch_context=launch_context,
-        slot_id_override=slot_id_override,
-        skip_control_plane=skip_control_plane,
-        gh_runner=gh_runner,
-        subprocess_runner=subprocess_runner,
-        file_reader=file_reader,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        prepare_cycle=_prepare_cycle,
-        config_error_type=ConfigError,
-        workflow_config_error_type=WorkflowConfigError,
-        gh_query_error_type=GhQueryError,
-        mark_degraded=_mark_degraded,
-        gh_reason_code=gh_reason_code,
-        cycle_result_factory=CycleResult,
-        build_gh_runner_port=build_gh_runner_port,
-        build_process_runner_port=build_process_runner_port,
-        run_prepared_cycle=run_prepared_cycle,
-        prepared_cycle_deps=_prepared_cycle_deps(),
-        logger=logger,
-    )
+run_one_cycle = _runtime_wiring.run_one_cycle_from_shell
 
 
 def _run_worker_cycle(
