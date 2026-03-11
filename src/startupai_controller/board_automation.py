@@ -132,6 +132,9 @@ from startupai_controller.application.automation.ready_claim import (
     claim_ready_issue as _app_claim_ready_issue,
     schedule_ready_items as _app_schedule_ready_items,
 )
+from startupai_controller.application.automation.audit_in_progress import (
+    audit_in_progress as _app_audit_in_progress,
+)
 from startupai_controller.application.automation.codex_gate import (
     codex_review_gate as _app_codex_review_gate,
 )
@@ -2985,9 +2988,6 @@ def audit_in_progress(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Escalate stale In Progress issues with no linked PR."""
-    now = datetime.now(timezone.utc)
-    stale_refs: list[str] = []
-
     use_ports = (
         board_info_resolver is None
     ) or review_state_port is not None or board_port is not None
@@ -3011,92 +3011,77 @@ def audit_in_progress(
         )
     checker = comment_checker or _comment_exists
     resolve_info = board_info_resolver or _query_issue_board_info
+    info_cache: dict[str, BoardInfo] = {}
 
-    for snapshot in in_progress_items:
+    def _resolve_status(ref: str) -> str:
         if use_ports:
-            ref = snapshot.issue_ref
-        else:
-            ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
-            if ref is None:
-                continue
-        if not all_prefixes and this_repo_prefix:
-            parsed = parse_issue_ref(ref)
-            if parsed.prefix != this_repo_prefix:
-                continue
-
-        pr_field = _query_project_item_field(
-            ref,
-            "PR",
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        ).strip()
-        if pr_field and pr_field.lower() not in {"n/a", "none"}:
-            continue
-
-        owner, repo, number = _resolve_issue_coordinates(ref, config)
-        updated_at = _query_issue_updated_at(
-            owner, repo, number, gh_runner=gh_runner
-        )
-        age_hours = (now - updated_at).total_seconds() / 3600
-        if age_hours < max_age_hours:
-            continue
-
-        stale_refs.append(ref)
-        if dry_run:
-            continue
-
-        marker = _marker_for("stale-in-progress", ref)
-        if use_ports:
-            current_status = review_state_port.get_issue_status(ref)
-            if current_status in {None, "NOT_ON_BOARD"}:
-                continue
-            try:
-                board_port.set_issue_field(ref, "Handoff To", "claude")
-            except GhQueryError:
-                pass
-        else:
+            return review_state_port.get_issue_status(ref)
+        info = info_cache.get(ref)
+        if info is None:
             info = resolve_info(ref, config, project_owner, project_number)
-            if info.status == "NOT_ON_BOARD":
-                continue
+            info_cache[ref] = info
+        return info.status
 
-            # Escalation signal for orchestrator reassignment
-            try:
-                _set_single_select_field(
-                    info.project_id,
-                    info.item_id,
-                    "Handoff To",
-                    "claude",
-                    project_owner=project_owner,
-                    project_number=project_number,
-                    config=config,
-                    gh_runner=gh_runner,
-                )
-            except GhQueryError:
-                pass
+    def _set_handoff(ref: str) -> None:
+        info = info_cache.get(ref)
+        if info is None:
+            info = resolve_info(ref, config, project_owner, project_number)
+            info_cache[ref] = info
+        _set_single_select_field(
+            info.project_id,
+            info.item_id,
+            "Handoff To",
+            "claude",
+            project_owner=project_owner,
+            project_number=project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
 
-        if not checker(owner, repo, number, marker, gh_runner=gh_runner):
-            body = (
-                f"{marker}\n"
-                f"Stale `In Progress` for ~{int(age_hours)}h with no linked PR. "
-                "Escalating handoff to `claude` (board field `Handoff To` updated)."
-            )
-            try:
-                if comment_poster is not None:
-                    comment_poster(owner, repo, number, body, gh_runner=gh_runner)
-                else:
-                    board_port = board_port or _default_board_mutation_port(
-                        project_owner,
-                        project_number,
-                        config,
-                        gh_runner=gh_runner,
-                    )
-                    board_port.post_issue_comment(f"{owner}/{repo}", number, body)
-            except GhQueryError:
-                pass
+    def _post_audit_comment(
+        owner: str,
+        repo: str,
+        number: int,
+        body: str,
+        *,
+        gh_runner: Callable[..., str] | None = None,
+    ) -> None:
+        if comment_poster is not None:
+            comment_poster(owner, repo, number, body, gh_runner=gh_runner)
+            return
+        _post_comment(
+            owner,
+            repo,
+            number,
+            body,
+            board_port=board_port,
+            project_owner=project_owner,
+            project_number=project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
 
-    return stale_refs
+    return _app_audit_in_progress(
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        in_progress_items=in_progress_items,
+        use_ports=use_ports,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        max_age_hours=max_age_hours,
+        this_repo_prefix=this_repo_prefix,
+        all_prefixes=all_prefixes,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+        resolve_issue_status=_resolve_status,
+        query_project_item_field=_query_project_item_field,
+        query_issue_updated_at=_query_issue_updated_at,
+        comment_exists=checker,
+        post_comment=_post_audit_comment,
+        set_handoff_target=_set_handoff,
+        snapshot_to_issue_ref=_snapshot_to_issue_ref,
+    )
 
 
 # ---------------------------------------------------------------------------
