@@ -132,7 +132,9 @@ from startupai_controller.application.automation.ready_claim import (
     schedule_ready_items as _app_schedule_ready_items,
 )
 from startupai_controller.application.automation.review_rescue import (
+    automerge_review as _app_automerge_review,
     review_rescue as _app_review_rescue,
+    review_rescue_all as _app_review_rescue_all,
 )
 from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
@@ -4399,20 +4401,6 @@ def review_rescue(
         automerge_runner=_automerge_runner,
     )
 
-
-def _execution_authority_repo_slugs(
-    config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-) -> tuple[str, ...]:
-    """Return full repo slugs governed by execution authority."""
-    slugs = {
-        repo_slug
-        for prefix, repo_slug in config.issue_prefixes.items()
-        if prefix in automation_config.execution_authority_repos
-    }
-    return tuple(sorted(slugs))
-
-
 def review_rescue_all(
     config: CriticalPathConfig,
     automation_config: BoardAutomationConfig,
@@ -4426,66 +4414,43 @@ def review_rescue_all(
     board_port: _BoardMutationPort | None = None,
 ) -> ReviewRescueSweep:
     """Run review rescue across all governed repos."""
-    if pr_port is None:
-        pr_port = _default_pr_port(project_owner, project_number, config, gh_runner)
-    if review_state_port is None:
-        review_state_port = _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner,
-        )
-    if board_port is None:
-        board_port = _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner,
-        )
-    repos = _execution_authority_repo_slugs(config, automation_config)
-    rerun: list[str] = []
-    auto_merge_enabled: list[str] = []
-    requeued: list[str] = []
-    blocked: list[str] = []
-    skipped: list[str] = []
-    scanned_prs = 0
+    pr_port = pr_port or _default_pr_port(project_owner, project_number, config, gh_runner)
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner,
+    )
+    board_port = board_port or _default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner,
+    )
 
-    for pr_repo in repos:
-        for pr in pr_port.list_open_prs(pr_repo):
-            scanned_prs += 1
-            result = review_rescue(
-                pr_repo=pr_repo,
-                pr_number=pr.number,
-                config=config,
-                automation_config=automation_config,
-                project_owner=project_owner,
-                project_number=project_number,
-                dry_run=dry_run,
-                gh_runner=gh_runner,
-                pr_port=pr_port,
-                review_state_port=review_state_port,
-                board_port=board_port,
-            )
-            ref = f"{pr_repo}#{pr.number}"
-            if result.rerun_checks:
-                rerun.append(f"{ref}:{','.join(result.rerun_checks)}")
-            elif result.auto_merge_enabled:
-                auto_merge_enabled.append(ref)
-            elif result.requeued_refs:
-                requeued.extend(result.requeued_refs)
-            elif result.blocked_reason:
-                blocked.append(f"{ref}:{result.blocked_reason}")
-            elif result.skipped_reason:
-                skipped.append(f"{ref}:{result.skipped_reason}")
+    def _review_rescue_runner(**kwargs) -> ReviewRescueResult:
+        return review_rescue(
+            pr_repo=kwargs["pr_repo"],
+            pr_number=kwargs["pr_number"],
+            config=config,
+            automation_config=automation_config,
+            project_owner=project_owner,
+            project_number=project_number,
+            dry_run=kwargs["dry_run"],
+            gh_runner=gh_runner,
+            pr_port=kwargs["pr_port"],
+            review_state_port=kwargs["review_state_port"],
+            board_port=kwargs["board_port"],
+        )
 
-    return ReviewRescueSweep(
-        scanned_repos=repos,
-        scanned_prs=scanned_prs,
-        rerun=tuple(rerun),
-        auto_merge_enabled=tuple(auto_merge_enabled),
-        requeued=tuple(requeued),
-        blocked=tuple(blocked),
-        skipped=tuple(skipped),
+    return _app_review_rescue_all(
+        config=config,
+        automation_config=automation_config,
+        dry_run=dry_run,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        review_rescue_runner=_review_rescue_runner,
     )
 
 
@@ -4511,98 +4476,39 @@ def automerge_review(
     review_state_port: _ReviewStatePort | None = None,
 ) -> tuple[int, str]:
     """Auto-merge PR when codex gate + required checks pass."""
-    if pr_port is None:
-        pr_port = _default_pr_port(project_owner, project_number, config, gh_runner)
-    if review_state_port is None:
-        review_state_port = _default_review_state_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner,
-        )
+    pr_port = pr_port or _default_pr_port(project_owner, project_number, config, gh_runner)
+    review_state_port = review_state_port or _default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner,
+    )
 
-    if snapshot is not None:
-        review_refs = list(snapshot.review_refs)
-        copilot_review_present = snapshot.copilot_review_present
-        gate_code = snapshot.codex_gate_code
-        gate_msg = snapshot.codex_gate_message
-        status = snapshot.gate_status
-    else:
-        review_refs = []
-        for issue_ref in pr_port.linked_issue_refs(pr_repo, pr_number):
-            if review_state_port.get_issue_status(issue_ref) == "Review":
-                review_refs.append(issue_ref)
-        if not review_refs:
-            return 2, (
-                f"{pr_repo}#{pr_number}: not in board Review scope; "
-                "automerge controller no-op"
-            )
-        copilot_review_present = pr_port.has_copilot_review_signal(
-            pr_repo,
-            pr_number,
-        )
-        gate_code, gate_msg = codex_review_gate(
-            pr_repo=pr_repo,
-            pr_number=pr_number,
+    def _codex_gate_evaluator(**kwargs) -> tuple[int, str]:
+        return codex_review_gate(
+            pr_repo=kwargs["pr_repo"],
+            pr_number=kwargs["pr_number"],
             config=config,
             automation_config=automation_config,
             project_owner=project_owner,
             project_number=project_number,
-            dry_run=dry_run,
+            dry_run=kwargs["dry_run"],
             apply_fail_routing=True,
             gh_runner=gh_runner,
         )
-        status = pr_port.get_gate_status(pr_repo, pr_number)
 
-    # Domain policy decision
-    code, msg, action = automerge_gate_decision(
+    return _app_automerge_review(
         pr_repo=pr_repo,
         pr_number=pr_number,
-        review_refs=tuple(review_refs),
-        copilot_review_present=copilot_review_present,
-        codex_gate_code=gate_code,
-        codex_gate_message=gate_msg,
-        pr_state=status.state,
-        is_draft=status.is_draft,
-        auto_merge_enabled=status.auto_merge_enabled,
-        required_failed=status.failed,
-        required_pending=status.pending,
-        mergeable=status.mergeable,
-        merge_state_status=status.merge_state_status,
-    )
-
-    if action in ("no_op", "already_enabled"):
-        return code, msg
-
-    # Execute branch update via port
-    if action == "update_branch_then_enable" and update_branch:
-        if dry_run:
-            return code, msg
-        pr_port.update_branch(pr_repo, pr_number)
-
-    # Post-update mergeable guard (preserves original fallthrough behavior)
-    if status.mergeable not in {"MERGEABLE", "UNKNOWN"}:
-        return 2, (
-            f"{pr_repo}#{pr_number}: mergeable={status.mergeable}, "
-            "cannot auto-merge"
-        )
-
-    if dry_run:
-        return 0, (
-            f"{pr_repo}#{pr_number}: would enable auto-merge "
-            "(squash, strict gates)"
-        )
-
-    # Execute automerge via port
-    merge_status = pr_port.enable_automerge(
-        pr_repo,
-        pr_number,
+        automation_config=automation_config,
+        dry_run=dry_run,
+        update_branch=update_branch,
         delete_branch=delete_branch,
+        snapshot=snapshot,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        codex_gate_evaluator=_codex_gate_evaluator,
     )
-    if merge_status == "confirmed":
-        return 0, f"{pr_repo}#{pr_number}: auto-merge enabled (verified)"
-    # merge_status == "pending"
-    return 2, f"{pr_repo}#{pr_number}: auto-merge pending verification"
 
 
 

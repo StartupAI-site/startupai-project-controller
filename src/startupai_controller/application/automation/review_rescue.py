@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Callable
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
-from startupai_controller.domain.models import ReviewRescueResult, ReviewSnapshot
+from startupai_controller.domain.automerge_policy import automerge_gate_decision
+from startupai_controller.domain.models import (
+    ReviewRescueResult,
+    ReviewRescueSweep,
+    ReviewSnapshot,
+)
 from startupai_controller.domain.repair_policy import parse_consumer_provenance
 from startupai_controller.domain.rescue_policy import rescue_decision
 from startupai_controller.ports.board_mutations import BoardMutationPort
@@ -184,6 +189,95 @@ def _apply_review_rescue_decision(
     )
 
 
+def automerge_review(
+    pr_repo: str,
+    pr_number: int,
+    automation_config: BoardAutomationConfig,
+    *,
+    dry_run: bool = False,
+    update_branch: bool = True,
+    delete_branch: bool = True,
+    snapshot: ReviewSnapshot | None = None,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    codex_gate_evaluator: Callable[..., tuple[int, str]] | None = None,
+) -> tuple[int, str]:
+    """Auto-merge a review PR when codex gate and required checks pass."""
+    if snapshot is not None:
+        review_refs = list(snapshot.review_refs)
+        copilot_review_present = snapshot.copilot_review_present
+        gate_code = snapshot.codex_gate_code
+        gate_msg = snapshot.codex_gate_message
+        status = snapshot.gate_status
+    else:
+        review_refs = []
+        for issue_ref in pr_port.linked_issue_refs(pr_repo, pr_number):
+            if review_state_port.get_issue_status(issue_ref) == "Review":
+                review_refs.append(issue_ref)
+        if not review_refs:
+            return 2, (
+                f"{pr_repo}#{pr_number}: not in board Review scope; "
+                "automerge controller no-op"
+            )
+        copilot_review_present = pr_port.has_copilot_review_signal(
+            pr_repo,
+            pr_number,
+        )
+        if codex_gate_evaluator is None:
+            return 4, f"{pr_repo}#{pr_number}: missing codex gate evaluator"
+        gate_code, gate_msg = codex_gate_evaluator(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            dry_run=dry_run,
+        )
+        status = pr_port.get_gate_status(pr_repo, pr_number)
+
+    code, msg, action = automerge_gate_decision(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        review_refs=tuple(review_refs),
+        copilot_review_present=copilot_review_present,
+        codex_gate_code=gate_code,
+        codex_gate_message=gate_msg,
+        pr_state=status.state,
+        is_draft=status.is_draft,
+        auto_merge_enabled=status.auto_merge_enabled,
+        required_failed=status.failed,
+        required_pending=status.pending,
+        mergeable=status.mergeable,
+        merge_state_status=status.merge_state_status,
+    )
+
+    if action in ("no_op", "already_enabled"):
+        return code, msg
+
+    if action == "update_branch_then_enable" and update_branch:
+        if dry_run:
+            return code, msg
+        pr_port.update_branch(pr_repo, pr_number)
+
+    if status.mergeable not in {"MERGEABLE", "UNKNOWN"}:
+        return 2, (
+            f"{pr_repo}#{pr_number}: mergeable={status.mergeable}, "
+            "cannot auto-merge"
+        )
+
+    if dry_run:
+        return 0, (
+            f"{pr_repo}#{pr_number}: would enable auto-merge "
+            "(squash, strict gates)"
+        )
+
+    merge_status = pr_port.enable_automerge(
+        pr_repo,
+        pr_number,
+        delete_branch=delete_branch,
+    )
+    if merge_status == "confirmed":
+        return 0, f"{pr_repo}#{pr_number}: auto-merge enabled (verified)"
+    return 2, f"{pr_repo}#{pr_number}: auto-merge pending verification"
+
+
 def review_rescue(
     pr_repo: str,
     pr_number: int,
@@ -235,4 +329,70 @@ def review_rescue(
         review_state_port=review_state_port,
         board_port=board_port,
         automerge_runner=automerge_runner,
+    )
+
+
+def _execution_authority_repo_slugs(
+    config,
+    automation_config: BoardAutomationConfig,
+) -> tuple[str, ...]:
+    """Return full repo slugs governed by execution authority."""
+    slugs = {
+        repo_slug
+        for prefix, repo_slug in config.issue_prefixes.items()
+        if prefix in automation_config.execution_authority_repos
+    }
+    return tuple(sorted(slugs))
+
+
+def review_rescue_all(
+    config,
+    automation_config: BoardAutomationConfig,
+    *,
+    dry_run: bool = False,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    review_rescue_runner: Callable[..., ReviewRescueResult],
+) -> ReviewRescueSweep:
+    """Run review rescue across all governed repos."""
+    repos = _execution_authority_repo_slugs(config, automation_config)
+    rerun: list[str] = []
+    auto_merge_enabled: list[str] = []
+    requeued: list[str] = []
+    blocked: list[str] = []
+    skipped: list[str] = []
+    scanned_prs = 0
+
+    for pr_repo in repos:
+        for pr in pr_port.list_open_prs(pr_repo):
+            scanned_prs += 1
+            result = review_rescue_runner(
+                pr_repo=pr_repo,
+                pr_number=pr.number,
+                dry_run=dry_run,
+                pr_port=pr_port,
+                review_state_port=review_state_port,
+                board_port=board_port,
+            )
+            ref = f"{pr_repo}#{pr.number}"
+            if result.rerun_checks:
+                rerun.append(f"{ref}:{','.join(result.rerun_checks)}")
+            elif result.auto_merge_enabled:
+                auto_merge_enabled.append(ref)
+            elif result.requeued_refs:
+                requeued.extend(result.requeued_refs)
+            elif result.blocked_reason:
+                blocked.append(f"{ref}:{result.blocked_reason}")
+            elif result.skipped_reason:
+                skipped.append(f"{ref}:{result.skipped_reason}")
+
+    return ReviewRescueSweep(
+        scanned_repos=repos,
+        scanned_prs=scanned_prs,
+        rerun=tuple(rerun),
+        auto_merge_enabled=tuple(auto_merge_enabled),
+        requeued=tuple(requeued),
+        blocked=tuple(blocked),
+        skipped=tuple(skipped),
     )
