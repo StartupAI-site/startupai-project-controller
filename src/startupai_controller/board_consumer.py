@@ -41,9 +41,10 @@ from startupai_controller.board_automation import (
     sync_review_state,
 )
 from startupai_controller import consumer_board_state_helpers as _board_state_helpers
-from startupai_controller import consumer_codex_helpers as _codex_helpers
+import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
 from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
 from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
+import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 from startupai_controller import consumer_selection_helpers as _selection_helpers
@@ -80,13 +81,6 @@ from startupai_controller.consumer_types import (
     SessionExecutionOutcome,
     WorktreePrepareError,
 )
-from startupai_controller.consumer_launch_helpers import (
-    resolve_launch_candidate_metadata as _resolve_launch_candidate_metadata_helper,
-    resolve_launch_issue_context as _resolve_launch_issue_context_helper,
-    resolve_launch_runtime as _resolve_launch_runtime_helper,
-    run_launch_workspace_hooks as _run_launch_workspace_hooks_helper,
-    setup_launch_worktree as _setup_launch_worktree_helper,
-)
 from startupai_controller.consumer_context_helpers import (
     fetch_issue_context as _fetch_issue_context_helper,
     hydrate_issue_context as _hydrate_issue_context_helper,
@@ -94,11 +88,7 @@ from startupai_controller.consumer_context_helpers import (
     snapshot_for_issue as _snapshot_for_issue_helper,
 )
 from startupai_controller.consumer_worktree_helpers import (
-    create_worktree as _create_worktree_helper,
-    fast_forward_existing_worktree as _fast_forward_existing_worktree_helper,
     list_repo_worktrees as _list_repo_worktrees_helper,
-    prepare_worktree as _prepare_worktree_helper,
-    reconcile_repair_branch as _reconcile_repair_branch_helper,
     worktree_is_clean as _worktree_is_clean_helper,
     worktree_ownership_is_safe as _worktree_ownership_is_safe_helper,
 )
@@ -1154,7 +1144,7 @@ def _prepare_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
-    return _prepare_worktree_helper(
+    return _launch_support_wiring.prepare_worktree(
         issue_ref,
         title,
         config,
@@ -1168,11 +1158,7 @@ def _prepare_worktree(
         create_worktree=_create_worktree,
         record_metric=_record_metric,
         error_cls=WorktreePrepareError,
-        log_warning=lambda ref, err: logger.warning(
-            "Worktree reuse lookup failed for %s (%s); falling back to create",
-            ref,
-            err,
-        ),
+        logger=logger,
         branch_name_override=branch_name_override,
         session_store=session_store,
         worktree_port=worktree_port,
@@ -1198,7 +1184,7 @@ def _create_worktree(
 
     Shells out to wt-create.sh.
     """
-    return _create_worktree_helper(
+    return _launch_support_wiring.create_worktree(
         issue_ref,
         title,
         config,
@@ -1217,7 +1203,7 @@ def _fast_forward_existing_worktree(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    _fast_forward_existing_worktree_helper(
+    _launch_support_wiring.fast_forward_existing_worktree(
         worktree_path,
         branch,
         build_worktree_port=build_worktree_port,
@@ -1239,7 +1225,7 @@ def _reconcile_repair_branch(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> RepairBranchReconcileOutcome:
     """Reconcile a repair branch against its remote and origin/main."""
-    return _reconcile_repair_branch_helper(
+    return _launch_support_wiring.reconcile_repair_branch(
         worktree_path,
         branch,
         build_worktree_port=build_worktree_port,
@@ -1272,7 +1258,7 @@ def _assemble_codex_prompt(
 
     Pure function — no I/O.
     """
-    return _codex_helpers.assemble_codex_prompt(
+    return _codex_runtime_wiring.assemble_codex_prompt(
         issue_context,
         issue_ref,
         config,
@@ -1355,7 +1341,7 @@ def _run_codex_session(
 
     Exit 124 = timeout (from coreutils timeout command).
     """
-    return _codex_helpers.run_codex_session(
+    return _codex_runtime_wiring.run_codex_session(
         worktree_path,
         prompt,
         schema_path,
@@ -1364,19 +1350,13 @@ def _run_codex_session(
         heartbeat_fn=heartbeat_fn,
         subprocess_runner=subprocess_runner,
         resolve_cli_command_fn=_resolve_cli_command,
-        popen_factory=subprocess.Popen,
-        sleep_fn=time.sleep,
         logger=logger,
     )
 
 
 def _resolve_cli_command(command: str) -> str:
     """Resolve a CLI binary without relying on interactive shell PATH setup."""
-    return _codex_helpers.resolve_cli_command(
-        command,
-        which=shutil.which,
-        home_getter=Path.home,
-    )
+    return _codex_runtime_wiring.resolve_cli_command(command)
 
 
 def _drain_requested(path: Path) -> bool:
@@ -1409,7 +1389,7 @@ def _parse_codex_result(
     file_reader: Callable[[Path], str] | None = None,
 ) -> dict[str, Any] | None:
     """Parse CodexSessionResult JSON from output file. Returns None on failure."""
-    return _codex_helpers.parse_codex_result(
+    return _codex_runtime_wiring.parse_codex_result(
         output_path,
         file_reader=file_reader,
     )
@@ -1439,7 +1419,7 @@ def _create_or_update_pr(
     2. If yes -> verify body contains required fields; gh pr edit if needed.
     3. If no -> gh pr create with required body fields.
     """
-    return _codex_helpers.create_or_update_pr(
+    return _codex_runtime_wiring.create_or_update_pr(
         worktree_path,
         branch,
         issue_number,
@@ -1467,7 +1447,7 @@ def _build_pr_body(
     branch_name: str = "feat/0-legacy",
 ) -> str:
     """Build PR body with required tag-contract fields."""
-    return _codex_helpers.build_pr_body(
+    return _codex_runtime_wiring.build_pr_body(
         title,
         issue_number,
         issue_ref=issue_ref,
@@ -3302,7 +3282,7 @@ def _setup_launch_worktree(
     Returns (worktree_path, branch_name, reconcile_state, reconcile_error).
     Raises WorktreePrepareError on blocking failure.
     """
-    return _setup_launch_worktree_helper(
+    return _launch_support_wiring.setup_launch_worktree(
         issue_ref,
         title,
         session_kind,
@@ -3335,7 +3315,7 @@ def _resolve_launch_runtime(
 
     Returns (workflow_definition, effective_consumer_config).
     """
-    return _resolve_launch_runtime_helper(
+    return _launch_support_wiring.resolve_launch_runtime(
         candidate_prefix,
         worktree_path,
         config=config,
@@ -3363,7 +3343,7 @@ def _resolve_launch_candidate_metadata(
     str | None,
 ]:
     """Resolve launch candidate identity and repair-session metadata."""
-    return _resolve_launch_candidate_metadata_helper(
+    return _launch_support_wiring.resolve_launch_candidate_metadata(
         issue_ref,
         cp_config=cp_config,
         auto_config=auto_config,
@@ -3391,7 +3371,7 @@ def _resolve_launch_issue_context(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[IssueContext, str]:
     """Hydrate launch issue context and compute the launch title."""
-    return _resolve_launch_issue_context_helper(
+    return _launch_support_wiring.resolve_launch_issue_context(
         issue_ref,
         owner=owner,
         repo=repo,
@@ -3415,7 +3395,7 @@ def _run_launch_workspace_hooks(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
 ) -> None:
     """Run launch workspace hooks around the prepared worktree."""
-    _run_launch_workspace_hooks_helper(
+    _launch_support_wiring.run_launch_workspace_hooks(
         workflow_definition,
         worktree_path=worktree_path,
         issue_ref=issue_ref,
