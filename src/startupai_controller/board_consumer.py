@@ -40,6 +40,7 @@ from startupai_controller.board_automation import (
     review_rescue,
     sync_review_state,
 )
+from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
     load_automation_config,
@@ -2445,18 +2446,10 @@ def _build_review_snapshots_for_queue_entries(
     trusted_codex_actors: frozenset[str],
 ) -> dict[tuple[str, int], ReviewSnapshot]:
     """Build one review snapshot per unique PR for queued review entries."""
-    review_refs_by_pr: dict[tuple[str, int], list[str]] = {}
-    for entry in queue_entries:
-        if entry.issue_ref not in review_refs:
-            continue
-        review_refs_by_pr.setdefault((entry.pr_repo, entry.pr_number), []).append(
-            entry.issue_ref
-        )
-    return pr_port.review_snapshots(
-        {
-            pr_key: tuple(sorted(set(refs)))
-            for pr_key, refs in review_refs_by_pr.items()
-        },
+    return _review_queue_helpers.build_review_snapshots_for_queue_entries(
+        queue_entries=queue_entries,
+        review_refs=review_refs,
+        pr_port=pr_port,
         trusted_codex_actors=trusted_codex_actors,
     )
 
@@ -2471,62 +2464,21 @@ def _backfill_review_verdicts_from_snapshots(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Backfill missing verdict markers using already-fetched PR comment payloads."""
-    backfilled: list[str] = []
-    posted_markers: dict[tuple[str, int], set[str]] = {}
-    for entry in entries:
-        snapshot = snapshots.get((entry.pr_repo, entry.pr_number))
-        if snapshot is None:
-            continue
-        session = (
-            store.get_session(entry.source_session_id)
-            if entry.source_session_id
-            else store.latest_session_for_issue(entry.issue_ref)
-        )
-        if session is None:
-            continue
-        if not _is_session_verdict_eligible(
-            session_status=session.status,
-            session_phase=session.phase,
-            session_pr_url=session.pr_url,
-        ):
-            continue
-        marker = _verdict_marker_text(session.id)
-        seen_markers = posted_markers.setdefault(
-            (entry.pr_repo, entry.pr_number),
-            {
-                body
-                for body in snapshot.pr_comment_bodies
-                if isinstance(body, str)
-            },
-        )
-        if _marker_already_present(marker, seen_markers):
-            continue
-        try:
-            if comment_poster is None and gh_runner is None:
-                posted = pr_port.post_codex_verdict_if_missing(
-                    session.pr_url,
-                    session.id,
-                )
-            else:
-                posted = _post_pr_codex_verdict(
-                    session.pr_url,
-                    session.id,
-                    comment_checker=lambda *args, **kwargs: False,
-                    comment_poster=comment_poster,
-                    gh_runner=gh_runner,
-                )
-        except (GhQueryError, Exception) as err:
-            logger.warning(
-                "Review verdict backfill failed for %s (%s): %s",
-                entry.issue_ref,
-                session.id,
-                err,
-            )
-            continue
-        if posted:
-            seen_markers.add(marker)
-            backfilled.append(entry.issue_ref)
-    return tuple(backfilled)
+    return _review_queue_helpers.backfill_review_verdicts_from_snapshots(
+        store,
+        entries,
+        snapshots,
+        pr_port=pr_port,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        log_warning=lambda issue_ref, session_id, err: logger.warning(
+            "Review verdict backfill failed for %s (%s): %s",
+            issue_ref,
+            session_id,
+            err,
+        ),
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+    )
 
 
 def _pre_backfill_verdicts_for_due_prs(
@@ -2539,56 +2491,20 @@ def _pre_backfill_verdicts_for_due_prs(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Post missing verdicts BEFORE snapshot build for verdict-blocked and newly seeded entries."""
-    backfilled: list[str] = []
-    for entry in due_items:
-        if not _is_pre_backfill_eligible(
-            last_result=entry.last_result,
-            last_reason=entry.last_reason,
-        ):
-            continue
-        try:
-            session = (
-                store.get_session(entry.source_session_id)
-                if entry.source_session_id
-                else store.latest_session_for_issue(entry.issue_ref)
-            )
-            if session is None:
-                continue
-            if not _is_session_verdict_eligible(
-                session_status=session.status,
-                session_phase=session.phase,
-                session_pr_url=session.pr_url,
-                entry_pr_url=entry.pr_url,
-            ):
-                continue
-            if (
-                pr_port is not None
-                and comment_checker is None
-                and comment_poster is None
-                and gh_runner is None
-            ):
-                posted = pr_port.post_codex_verdict_if_missing(
-                    session.pr_url,
-                    session.id,
-                )
-            else:
-                posted = _post_pr_codex_verdict(
-                    session.pr_url,
-                    session.id,
-                    comment_checker=comment_checker,
-                    comment_poster=comment_poster,
-                    gh_runner=gh_runner,
-                )
-            if posted:
-                backfilled.append(entry.issue_ref)
-        except Exception as err:
-            logger.warning(
-                "Pre-backfill verdict failed for %s: %s",
-                entry.issue_ref,
-                err,
-            )
-            continue
-    return tuple(backfilled)
+    return _review_queue_helpers.pre_backfill_verdicts_for_due_prs(
+        store,
+        due_items,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        pr_port=pr_port,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        log_warning=lambda issue_ref, err: logger.warning(
+            "Pre-backfill verdict failed for %s: %s",
+            issue_ref,
+            err,
+        ),
+    )
 
 
 def _review_scope_issue_refs(
@@ -2690,92 +2606,14 @@ def _apply_review_queue_result(
     Returns True when blocked-streak escalation is needed (caller handles).
     Requeued results are NOT handled here — see _drain_review_queue().
     """
-    current = now or datetime.now(timezone.utc)
-    effective_state_digest = (
-        entry.last_state_digest if last_state_digest is None else last_state_digest
+    return _review_queue_helpers.apply_review_queue_result(
+        store,
+        entry,
+        result,
+        now=now,
+        retry_seconds=retry_seconds,
+        last_state_digest=last_state_digest,
     )
-    effective_retry_seconds = (
-        retry_seconds
-        if retry_seconds is not None
-        else _review_queue_retry_seconds_for_result(result)
-    )
-    next_attempt_at = _review_queue_next_attempt_at(
-        now=current,
-        delay_seconds=effective_retry_seconds,
-    )
-
-    if result.requeued_refs:
-        # Requeue handling is done entirely in _drain_review_queue()
-        return False
-
-    if result.auto_merge_enabled:
-        store.update_review_queue_item(
-            entry.issue_ref,
-            next_attempt_at=next_attempt_at,
-            last_result="auto_merge_enabled",
-            last_reason=None,
-            last_state_digest=effective_state_digest,
-            blocked_streak=0,
-            blocked_class=None,
-            now=current,
-        )
-        return False
-
-    if result.rerun_checks:
-        store.update_review_queue_item(
-            entry.issue_ref,
-            next_attempt_at=next_attempt_at,
-            last_result="rerun_checks",
-            last_reason=",".join(result.rerun_checks),
-            last_state_digest=effective_state_digest,
-            blocked_streak=0,
-            blocked_class=None,
-            now=current,
-        )
-        return False
-
-    if result.blocked_reason:
-        new_class, new_streak, needs_escalation = _blocked_streak_needs_escalation(
-            result.blocked_reason,
-            entry.blocked_streak,
-            entry.blocked_class,
-        )
-        store.update_review_queue_item(
-            entry.issue_ref,
-            next_attempt_at=next_attempt_at,
-            last_result="blocked",
-            last_reason=result.blocked_reason,
-            last_state_digest=effective_state_digest,
-            blocked_streak=new_streak,
-            blocked_class=new_class,
-            now=current,
-        )
-        return needs_escalation
-
-    if result.skipped_reason:
-        store.update_review_queue_item(
-            entry.issue_ref,
-            next_attempt_at=next_attempt_at,
-            last_result="skipped",
-            last_reason=result.skipped_reason,
-            last_state_digest=effective_state_digest,
-            blocked_streak=0,
-            blocked_class=None,
-            now=current,
-        )
-        return False
-
-    store.update_review_queue_item(
-        entry.issue_ref,
-        next_attempt_at=next_attempt_at,
-        last_result="processed",
-        last_reason=None,
-        last_state_digest=effective_state_digest,
-        blocked_streak=0,
-        blocked_class=None,
-        now=current,
-    )
-    return False
 
 
 def _apply_review_queue_partial_failure(
@@ -2787,24 +2625,14 @@ def _apply_review_queue_partial_failure(
     now: datetime | None = None,
 ) -> None:
     """Back off queued review entries after a partial-failure cycle."""
-    if not entries:
-        return
-    current = now or datetime.now(timezone.utc)
-    next_attempt_at = _review_queue_next_attempt_at(
-        now=current,
-        delay_seconds=_review_queue_retry_seconds_for_partial_failure(config, error),
+    _review_queue_helpers.apply_review_queue_partial_failure(
+        store,
+        entries,
+        config=config,
+        error=error,
+        gh_reason_code=gh_reason_code,
+        now=now,
     )
-    for entry in entries:
-        store.update_review_queue_item(
-            entry.issue_ref,
-            next_attempt_at=next_attempt_at,
-            last_result="partial_failure",
-            last_reason=error,
-            last_state_digest=entry.last_state_digest,
-            blocked_streak=0,
-            blocked_class=None,
-            now=current,
-        )
 
 
 def _update_board_snapshot_statuses(
@@ -2844,93 +2672,17 @@ def _prepare_review_queue_batch(
     dry_run: bool,
 ) -> tuple[PreparedReviewQueueBatch | None, ReviewQueueDrainSummary | None]:
     """Prepare the bounded review-queue workset for one drain cycle."""
-    review_refs = frozenset(
-        _review_scope_issue_refs(
-            config,
-            critical_path_config,
-            board_snapshot,
-        )
-    )
-    existing_entries = store.list_review_queue_items()
-    existing_refs = {entry.issue_ref for entry in existing_entries}
-
-    removed = tuple(
-        _prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
-    )
-    seeded = tuple(
-        _seed_new_review_entries(
-            store,
-            review_refs,
-            existing_refs,
-            dry_run=dry_run,
-            now=now,
-        )
-    )
-    if not dry_run:
-        _reconcile_review_queue_identity(store, review_refs, now=now)
-
-    queue_items = tuple(
-        entry
-        for entry in store.list_review_queue_items()
-        if entry.issue_ref in review_refs
-    )
-    if not review_refs and not queue_items:
-        return None, ReviewQueueDrainSummary(
-            queued_count=0,
-            due_count=0,
-            removed=removed,
-            skipped=("control-plane:no-review-items",),
-        )
-
-    try:
-        _wakeup_changed_review_queue_entries(
-            store,
-            list(queue_items),
-            now=now,
-            pr_port=pr_port,
-            dry_run=dry_run,
-        )
-    except GhQueryError as err:
-        logger.warning("Review queue wakeup probe failed: %s", err)
-
-    if not dry_run:
-        queue_items = tuple(
-            entry
-            for entry in store.list_review_queue_items()
-            if entry.issue_ref in review_refs
-        )
-
-    queue_pr_groups = dict(_group_review_queue_entries_by_pr(list(queue_items)))
-    due_items = tuple(
-        entry for entry in queue_items if entry.next_attempt_datetime() <= now
-    )
-    due_pr_groups_list = _group_review_queue_entries_by_pr(list(due_items))[
-        :DEFAULT_REVIEW_QUEUE_BATCH_SIZE
-    ]
-    due_items = tuple(
-        entry for _pr_key, entries in due_pr_groups_list for entry in entries
-    )
-    due_pr_keys = {pr_key for pr_key, _entries in due_pr_groups_list}
-    selected_snapshot_entries = tuple(
-        entry
-        for pr_key, entries in queue_pr_groups.items()
-        if pr_key in due_pr_keys
-        for entry in entries
-    )
-
-    return (
-        PreparedReviewQueueBatch(
-            review_refs=review_refs,
-            queue_items=queue_items,
-            due_items=due_items,
-            due_pr_groups=tuple(
-                (pr_key, tuple(entries)) for pr_key, entries in due_pr_groups_list
-            ),
-            selected_snapshot_entries=selected_snapshot_entries,
-            seeded=seeded,
-            removed=removed,
-        ),
-        None,
+    return _review_queue_helpers.prepare_review_queue_batch(
+        config=config,
+        store=store,
+        critical_path_config=critical_path_config,
+        board_snapshot=board_snapshot,
+        pr_port=pr_port,
+        now=now,
+        dry_run=dry_run,
+        prepared_batch_factory=PreparedReviewQueueBatch,
+        summary_factory=ReviewQueueDrainSummary,
+        log_warning=lambda err: logger.warning("Review queue wakeup probe failed: %s", err),
     )
 
 
@@ -2945,88 +2697,27 @@ def _prepare_due_review_processing(
     gh_runner: Callable[..., str] | None,
 ) -> PreparedDueReviewProcessing:
     """Prepare the changed due-review groups and snapshots for rescue processing."""
-    due_items = list(prepared_batch.due_items)
-    due_pr_groups = [
-        (pr_key, list(entries)) for pr_key, entries in prepared_batch.due_pr_groups
-    ]
-    selected_snapshot_entries = list(prepared_batch.selected_snapshot_entries)
-
-    pre_backfilled: tuple[str, ...] = ()
-    if not dry_run and due_items:
-        pre_backfilled = _pre_backfill_verdicts_for_due_prs(
-            store,
-            due_items,
-            pr_port=pr_port,
-            gh_runner=gh_runner,
-        )
-
-    verdict_backfilled: tuple[str, ...] = ()
-    partial_failure = False
-    error: str | None = None
-    snapshots: dict[tuple[str, int], ReviewSnapshot] = {}
-
-    if due_pr_groups:
-        try:
-            changed_due_items, unchanged_due_items = (
-                _partition_review_queue_entries_by_probe_change(
-                    due_items,
-                    pr_port=pr_port,
-                )
-            )
-            if unchanged_due_items and not dry_run:
-                _repark_unchanged_review_queue_entries(
-                    store,
-                    unchanged_due_items,
-                    now=now,
-                )
-            due_pr_keys = {
-                (entry.pr_repo, entry.pr_number) for entry in changed_due_items
-            }
-            due_pr_groups = [
-                (pr_key, entries)
-                for pr_key, entries in due_pr_groups
-                if pr_key in due_pr_keys
-            ]
-            selected_snapshot_entries = [
-                entry
-                for entry in selected_snapshot_entries
-                if (entry.pr_repo, entry.pr_number) in due_pr_keys
-            ]
-            due_items = changed_due_items
-            if due_pr_groups:
-                snapshots = _build_review_snapshots_for_queue_entries(
-                    queue_entries=selected_snapshot_entries,
-                    review_refs=set(prepared_batch.review_refs),
-                    pr_port=pr_port,
-                    trusted_codex_actors=frozenset(
-                        automation_config.trusted_codex_actors
-                    ),
-                )
-        except GhQueryError as err:
-            partial_failure = True
-            error = str(err)
-
-        if not dry_run and not partial_failure:
-            secondary_backfilled = _backfill_review_verdicts_from_snapshots(
-                store,
-                due_items,
-                snapshots,
-                pr_port=pr_port,
-                gh_runner=gh_runner,
-            )
-            verdict_backfilled = tuple(
-                dict.fromkeys(pre_backfilled + secondary_backfilled)
-            )
-
-    return PreparedDueReviewProcessing(
-        due_items=tuple(due_items),
-        due_pr_groups=tuple(
-            (pr_key, tuple(entries)) for pr_key, entries in due_pr_groups
+    return _review_queue_helpers.prepare_due_review_processing(
+        store=store,
+        automation_config=automation_config,
+        pr_port=pr_port,
+        prepared_batch=prepared_batch,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        prepared_due_processing_factory=PreparedDueReviewProcessing,
+        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
+            "Pre-backfill verdict failed for %s: %s",
+            issue_ref,
+            err,
         ),
-        snapshots=snapshots,
-        verdict_backfilled=verdict_backfilled,
-        partial_failure=partial_failure,
-        error=error,
+        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
+            "Review verdict backfill failed for %s (%s): %s",
+            issue_ref,
+            session_id,
+            err,
+        ),
     )
 
 
@@ -3047,70 +2738,23 @@ def _process_due_review_group(
     gh_runner: Callable[..., str] | None,
 ) -> ReviewGroupProcessingOutcome:
     """Process one due PR group from the review queue."""
-    if snapshot is None:
-        return ReviewGroupProcessingOutcome(
-            rerun=(),
-            auto_merge_enabled=(),
-            requeued=(),
-            blocked=(),
-            skipped=(),
-            escalated=(),
-            updated_snapshot=updated_snapshot,
-            partial_failure=True,
-            error=f"missing-review-snapshot:{pr_repo}#{pr_number}",
-        )
-
-    rescue_result = _run_review_rescue_for_group(
+    return _review_queue_helpers.process_due_review_group(
         config=config,
+        store=store,
         critical_path_config=critical_path_config,
         automation_config=automation_config,
         pr_port=pr_port,
         pr_repo=pr_repo,
         pr_number=pr_number,
-        snapshot=snapshot,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-    )
-    if rescue_result.partial_failure:
-        return ReviewGroupProcessingOutcome(
-            rerun=(),
-            auto_merge_enabled=(),
-            requeued=(),
-            blocked=(),
-            skipped=(),
-            escalated=(),
-            updated_snapshot=updated_snapshot,
-            partial_failure=True,
-            error=rescue_result.error,
-        )
-
-    escalated = _apply_review_queue_group_result(
-        store=store,
-        critical_path_config=critical_path_config,
-        project_owner=config.project_owner,
-        project_number=config.project_number,
-        pr_port=pr_port,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
         entries=entries,
-        result=rescue_result.result,
+        snapshot=snapshot,
+        updated_snapshot=updated_snapshot,
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-    )
-    return _summarize_review_group_outcome(
-        critical_path_config=critical_path_config,
-        store=store,
-        project_owner=config.project_owner,
-        project_number=config.project_number,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        entries=entries,
-        result=rescue_result.result,
-        updated_snapshot=updated_snapshot,
-        escalated=escalated,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
+        review_group_outcome_factory=ReviewGroupProcessingOutcome,
+        review_rescue_fn=review_rescue,
+        escalate_to_claude=_escalate_to_claude,
     )
 
 
@@ -3175,33 +2819,21 @@ def _apply_review_queue_group_result(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[str, ...]:
     """Persist one review-group result and return escalated issue refs."""
-    if dry_run:
-        return ()
-
-    escalated: list[str] = []
-    state_digest = pr_port.review_state_digests([(pr_repo, pr_number)]).get(
-        (pr_repo, pr_number)
+    return _review_queue_helpers.apply_review_queue_group_result(
+        store=store,
+        critical_path_config=critical_path_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        pr_port=pr_port,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        entries=entries,
+        result=result,
+        now=now,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+        escalate_to_claude=_escalate_to_claude,
     )
-    for entry in entries:
-        needs_escalation = _apply_review_queue_result(
-            store,
-            entry,
-            result,
-            now=now,
-            last_state_digest=state_digest,
-        )
-        if needs_escalation:
-            _escalate_to_claude(
-                entry.issue_ref,
-                critical_path_config,
-                project_owner,
-                project_number,
-                reason=f"review queue blocked escalation: {result.blocked_reason}",
-                gh_runner=gh_runner,
-            )
-            store.delete_review_queue_item(entry.issue_ref)
-            escalated.append(entry.issue_ref)
-    return tuple(escalated)
 
 
 def _summarize_review_group_outcome(
@@ -3220,63 +2852,21 @@ def _summarize_review_group_outcome(
     gh_runner: Callable[..., str] | None,
 ) -> ReviewGroupProcessingOutcome:
     """Build the public outcome for one processed review group."""
-    escalated_refs = list(escalated)
-    requeued: list[str] = []
-    blocked: list[str] = []
-    skipped: list[str] = []
-    rerun: list[str] = []
-    auto_merge_enabled: list[str] = []
-
-    pr_ref = f"{pr_repo}#{pr_number}"
-    if result.rerun_checks:
-        rerun.append(f"{pr_ref}:{','.join(result.rerun_checks)}")
-    elif result.auto_merge_enabled:
-        auto_merge_enabled.append(pr_ref)
-    elif result.requeued_refs:
-        for issue_ref in result.requeued_refs:
-            entry = next((e for e in entries if e.issue_ref == issue_ref), None)
-            pr_url = entry.pr_url if entry is not None else ""
-            requeue_count, _ = store.get_requeue_state(issue_ref)
-            if _requeue_or_escalate(requeue_count) == "escalate":
-                if not dry_run:
-                    _escalate_to_claude(
-                        issue_ref,
-                        critical_path_config,
-                        project_owner,
-                        project_number,
-                        reason=f"repair requeue ceiling ({requeue_count} cycles on same PR): "
-                        f"{result.blocked_reason or 'persistent check failure / conflict'}",
-                        gh_runner=gh_runner,
-                    )
-                    store.delete_review_queue_item(issue_ref)
-                escalated_refs.append(issue_ref)
-            else:
-                if not dry_run:
-                    store.increment_requeue_count(issue_ref, pr_url)
-                    store.delete_review_queue_item(issue_ref)
-                requeued.append(issue_ref)
-        requeued_this_group = [
-            ref for ref in result.requeued_refs if ref not in escalated_refs
-        ]
-        if requeued_this_group:
-            updated_snapshot = _update_board_snapshot_statuses(
-                updated_snapshot,
-                critical_path_config,
-                {ref: "Ready" for ref in requeued_this_group},
-            )
-    elif result.blocked_reason:
-        blocked.append(f"{pr_ref}:{result.blocked_reason}")
-    elif result.skipped_reason:
-        skipped.append(f"{pr_ref}:{result.skipped_reason}")
-
-    return ReviewGroupProcessingOutcome(
-        rerun=tuple(rerun),
-        auto_merge_enabled=tuple(auto_merge_enabled),
-        requeued=tuple(requeued),
-        blocked=tuple(blocked),
-        skipped=tuple(skipped),
-        escalated=tuple(escalated_refs),
+    return _review_queue_helpers.summarize_review_group_outcome(
+        critical_path_config=critical_path_config,
+        store=store,
+        project_owner=project_owner,
+        project_number=project_number,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        entries=entries,
+        result=result,
         updated_snapshot=updated_snapshot,
+        escalated=escalated,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+        escalate_to_claude=_escalate_to_claude,
+        review_group_outcome_factory=ReviewGroupProcessingOutcome,
     )
 
 
@@ -3294,77 +2884,35 @@ def _process_review_queue_due_groups(
     gh_runner: Callable[..., str] | None = None,
 ) -> ReviewQueueProcessingOutcome:
     """Process the due PR groups for a prepared review-queue batch."""
-    prepared_due_processing = _prepare_due_review_processing(
+    return _review_queue_helpers.process_review_queue_due_groups(
+        config=config,
         store=store,
+        critical_path_config=critical_path_config,
         automation_config=automation_config,
         pr_port=pr_port,
         prepared_batch=prepared_batch,
+        board_snapshot=board_snapshot,
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-    )
-
-    rerun: list[str] = []
-    auto_merge_enabled: list[str] = []
-    requeued: list[str] = []
-    blocked: list[str] = []
-    skipped: list[str] = []
-    escalated: list[str] = []
-    partial_failure = prepared_due_processing.partial_failure
-    error = prepared_due_processing.error
-    updated_snapshot = board_snapshot
-
-    for (pr_repo, pr_number), entries in prepared_due_processing.due_pr_groups:
-        if partial_failure:
-            break
-        group_outcome = _process_due_review_group(
-            config=config,
-            store=store,
-            critical_path_config=critical_path_config,
-            automation_config=automation_config,
-            pr_port=pr_port,
-            pr_repo=pr_repo,
-            pr_number=pr_number,
-            entries=entries,
-            snapshot=prepared_due_processing.snapshots.get((pr_repo, pr_number)),
-            updated_snapshot=updated_snapshot,
-            now=now,
-            dry_run=dry_run,
-            gh_runner=gh_runner,
-        )
-        if group_outcome.partial_failure:
-            partial_failure = True
-            error = group_outcome.error
-            break
-        rerun.extend(group_outcome.rerun)
-        auto_merge_enabled.extend(group_outcome.auto_merge_enabled)
-        requeued.extend(group_outcome.requeued)
-        blocked.extend(group_outcome.blocked)
-        skipped.extend(group_outcome.skipped)
-        escalated.extend(group_outcome.escalated)
-        updated_snapshot = group_outcome.updated_snapshot
-
-    if partial_failure and not dry_run:
-        _apply_review_queue_partial_failure(
-            store,
-            list(prepared_due_processing.due_items),
-            config=config,
-            error=error,
-            now=now,
-        )
-
-    return ReviewQueueProcessingOutcome(
-        due_count=len(prepared_due_processing.due_items),
-        verdict_backfilled=prepared_due_processing.verdict_backfilled,
-        rerun=tuple(rerun),
-        auto_merge_enabled=tuple(auto_merge_enabled),
-        requeued=tuple(requeued),
-        blocked=tuple(blocked),
-        skipped=tuple(skipped),
-        escalated=tuple(escalated),
-        partial_failure=partial_failure,
-        error=error,
-        updated_snapshot=updated_snapshot,
+        post_pr_codex_verdict=_post_pr_codex_verdict,
+        review_rescue_fn=review_rescue,
+        escalate_to_claude=_escalate_to_claude,
+        prepared_due_processing_factory=PreparedDueReviewProcessing,
+        review_group_outcome_factory=ReviewGroupProcessingOutcome,
+        review_queue_processing_outcome_factory=ReviewQueueProcessingOutcome,
+        gh_reason_code=gh_reason_code,
+        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
+            "Pre-backfill verdict failed for %s: %s",
+            issue_ref,
+            err,
+        ),
+        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
+            "Review verdict backfill failed for %s (%s): %s",
+            issue_ref,
+            session_id,
+            err,
+        ),
     )
 
 

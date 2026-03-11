@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.board_automation import review_rescue
 from startupai_controller.control_plane_runtime import (
     _clear_degraded,
     _record_successful_github_mutation,
@@ -74,57 +76,51 @@ def _drain_review_queue(
     ).review_state.build_board_snapshot()
 
     store = session_store or build_session_store(db)
-    now = datetime.now(timezone.utc)
-    effective_pr_port = pr_port or build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=critical_path_config,
+    return _review_queue_helpers.drain_review_queue(
+        config,
+        db,
+        critical_path_config,
+        automation_config,
+        pr_port=pr_port,
+        session_store=store,
+        board_snapshot=effective_board_snapshot,
+        dry_run=dry_run,
         github_memo=memo,
         gh_runner=gh_runner,
-    ).pull_requests
-
-    prepared_batch, empty_summary = consumer._prepare_review_queue_batch(
-        config=config,
-        store=store,
-        critical_path_config=critical_path_config,
-        board_snapshot=effective_board_snapshot,
-        pr_port=effective_pr_port,
-        now=now,
-        dry_run=dry_run,
+        build_github_port_bundle=build_github_port_bundle,
+        build_session_store=build_session_store,
+        github_memo_factory=CycleGitHubMemo,
+        prepared_batch_factory=consumer.PreparedReviewQueueBatch,
+        summary_factory=ReviewQueueDrainSummary,
+        prepared_due_processing_factory=consumer.PreparedDueReviewProcessing,
+        review_group_outcome_factory=consumer.ReviewGroupProcessingOutcome,
+        review_queue_processing_outcome_factory=consumer.ReviewQueueProcessingOutcome,
+        post_pr_codex_verdict=consumer._post_pr_codex_verdict,
+        review_rescue_fn=consumer.review_rescue,
+        escalate_to_claude=consumer._escalate_to_claude,
+        gh_reason_code=consumer.gh_reason_code,
+        log_probe_warning=lambda err: consumer.logger.warning(
+            "Review queue wakeup probe failed: %s",
+            err,
+        ),
+        log_pre_backfill_warning=lambda issue_ref, err: consumer.logger.warning(
+            "Pre-backfill verdict failed for %s: %s",
+            issue_ref,
+            err,
+        ),
+        log_backfill_warning=lambda issue_ref, session_id, err: consumer.logger.warning(
+            "Review verdict backfill failed for %s (%s): %s",
+            issue_ref,
+            session_id,
+            err,
+        ),
+        wakeup_changed_review_queue_entries_fn=consumer._wakeup_changed_review_queue_entries,
+        pre_backfill_verdicts_for_due_prs_fn=consumer._pre_backfill_verdicts_for_due_prs,
+        partition_review_queue_entries_by_probe_change_fn=consumer._partition_review_queue_entries_by_probe_change,
+        repark_unchanged_review_queue_entries_fn=consumer._repark_unchanged_review_queue_entries,
+        build_review_snapshots_for_queue_entries_fn=consumer._build_review_snapshots_for_queue_entries,
+        backfill_review_verdicts_from_snapshots_fn=consumer._backfill_review_verdicts_from_snapshots,
     )
-    if empty_summary is not None:
-        return empty_summary, effective_board_snapshot
-    assert prepared_batch is not None
-
-    processing_outcome = consumer._process_review_queue_due_groups(
-        config=config,
-        store=store,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        pr_port=effective_pr_port,
-        prepared_batch=prepared_batch,
-        board_snapshot=effective_board_snapshot,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-    )
-
-    summary = ReviewQueueDrainSummary(
-        queued_count=len(prepared_batch.queue_items),
-        due_count=processing_outcome.due_count,
-        seeded=prepared_batch.seeded,
-        removed=prepared_batch.removed,
-        verdict_backfilled=processing_outcome.verdict_backfilled,
-        rerun=processing_outcome.rerun,
-        auto_merge_enabled=processing_outcome.auto_merge_enabled,
-        requeued=processing_outcome.requeued,
-        blocked=processing_outcome.blocked,
-        skipped=processing_outcome.skipped,
-        escalated=processing_outcome.escalated,
-        partial_failure=processing_outcome.partial_failure,
-        error=processing_outcome.error,
-    )
-    return summary, processing_outcome.updated_snapshot
 
 
 def _replay_deferred_actions(
