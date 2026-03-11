@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
@@ -23,6 +23,9 @@ from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
     parse_issue_ref,
 )
+
+if TYPE_CHECKING:
+    from startupai_controller.validate_critical_path_promotion import BoardInfo as _BoardInfo
 
 
 def _select_execution_policy_issues(
@@ -369,4 +372,84 @@ def load_execution_policy_pr_context(
         state=state,
         url=url,
         provenance=_parse_consumer_provenance(body),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wiring entry-point (port materialisation + delegation)
+# ---------------------------------------------------------------------------
+
+
+def wire_enforce_execution_policy(
+    pr_repo: str,
+    pr_number: int,
+    config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None = None,
+    project_owner: str = DEFAULT_PROJECT_OWNER,
+    project_number: int = DEFAULT_PROJECT_NUMBER,
+    *,
+    allow_copilot_coding_agent: bool = False,
+    dry_run: bool = False,
+    board_info_resolver: Callable[..., _BoardInfo] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+    # Injected board-automation helpers
+    default_pr_port_fn: Callable[..., object] | None = None,
+    is_copilot_actor_fn: Callable[[str], bool] | None = None,
+    query_project_item_field_fn: Callable[..., str] | None = None,
+    set_status_if_changed_fn: Callable[..., tuple[bool, str]] | None = None,
+    query_issue_assignees_fn: Callable[..., list[str]] | None = None,
+    set_issue_assignees_fn: Callable[..., None] | None = None,
+    comment_exists_fn: Callable[..., bool] | None = None,
+    post_comment_fn: Callable[..., None] | None = None,
+    close_pull_request_fn: Callable[..., None] | None = None,
+    query_closing_issues_fn: Callable[..., Sequence[LinkedIssue]] | None = None,
+) -> ExecutionPolicyDecision:
+    """Wire PR context loading and helpers, then delegate to core policy."""
+    if "/" not in pr_repo:
+        raise ConfigError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
+
+    pr_context = load_execution_policy_pr_context(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        project_owner=project_owner,
+        project_number=project_number,
+        gh_runner=gh_runner,
+        default_pr_port_fn=default_pr_port_fn,
+    )
+    actor = pr_context.actor
+    state = pr_context.state
+    provenance = pr_context.provenance
+    owner, repo = pr_repo.split("/", maxsplit=1)
+    return enforce_execution_policy(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        actor=actor,
+        state=state,
+        pr_url=pr_context.url,
+        provenance=provenance,
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        allow_copilot_coding_agent=allow_copilot_coding_agent,
+        dry_run=dry_run,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        is_copilot_actor=is_copilot_actor_fn,
+        query_issue_executor=query_project_item_field_fn,
+        set_status_if_changed=set_status_if_changed_fn,
+        query_issue_assignees=query_issue_assignees_fn,
+        set_issue_assignees=set_issue_assignees_fn,
+        comment_exists=comment_exists_fn,
+        post_comment=post_comment_fn,
+        close_pull_request=close_pull_request_fn,
+        load_linked_issues=lambda: query_closing_issues_fn(
+            owner,
+            repo,
+            pr_number,
+            config,
+            gh_runner=gh_runner,
+        ),
     )
