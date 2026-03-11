@@ -322,9 +322,9 @@ def reconcile_stale_in_progress_items(
 
 def _shell_module():
     """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer
+    from startupai_controller import board_consumer_compat
 
-    return board_consumer
+    return board_consumer_compat
 
 
 def transition_issue_to_review_from_shell(

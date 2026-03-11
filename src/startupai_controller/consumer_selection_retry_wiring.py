@@ -12,9 +12,9 @@ from startupai_controller.board_graph import _ready_snapshot_rank
 
 def _shell_module():
     """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer
+    from startupai_controller import board_consumer_compat
 
-    return board_consumer
+    return board_consumer_compat
 
 
 def effective_retry_backoff(

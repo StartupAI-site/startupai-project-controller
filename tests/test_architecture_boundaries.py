@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import re
 
 from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.pull_requests import GitHubPullRequestAdapter
@@ -79,6 +80,10 @@ def _controller_runtime_imports(path: Path) -> set[str]:
         for module in _runtime_imported_modules(path)
         if module.startswith("startupai_controller")
     }
+
+
+def _source_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def test_orchestrators_use_canonical_runtime_boundaries() -> None:
@@ -203,6 +208,24 @@ def test_board_consumer_endgame_shell_avoids_lower_level_execution_mechanisms() 
     assert offending == [], (
         "board_consumer.py bypasses outer execution/launch wiring modules: "
         f"{offending}"
+    )
+
+
+def test_only_board_consumer_cli_imports_the_consumer_shell() -> None:
+    direct_importers: list[str] = []
+    direct_import_patterns = (
+        re.compile(r"\bfrom startupai_controller\.board_consumer import\b"),
+        re.compile(r"\bfrom startupai_controller import board_consumer(?:\s|$|,)"),
+    )
+    for path in sorted(SRC_ROOT.glob("*.py")):
+        if path.name == "board_consumer.py":
+            continue
+        source = _source_text(path)
+        if any(pattern.search(source) for pattern in direct_import_patterns):
+            direct_importers.append(path.name)
+    assert direct_importers == ["board_consumer_cli.py"], (
+        "board_consumer.py should only be imported directly by its CLI shell: "
+        f"{direct_importers}"
     )
 
 

@@ -22,9 +22,9 @@ from startupai_controller.consumer_worktree_helpers import (
 
 def _shell_module():
     """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer
+    from startupai_controller import board_consumer_compat
 
-    return board_consumer
+    return board_consumer_compat
 
 
 def git_command_detail(result: subprocess.CompletedProcess[str]) -> str:

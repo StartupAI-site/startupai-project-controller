@@ -36,9 +36,9 @@ from startupai_controller.validate_critical_path_promotion import (
 
 def _consumer_module():
     """Import the consumer module lazily to avoid entrypoint import cycles."""
-    from startupai_controller import board_consumer
+    from startupai_controller import board_consumer_compat
 
-    return board_consumer
+    return board_consumer_compat
 
 
 def _drain_review_queue(

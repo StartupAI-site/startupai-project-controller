@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from startupai_controller.board_consumer import (
+from startupai_controller.board_consumer_compat import (
     ActiveWorkerTask,
     ConsumerConfig,
     CycleResult,
@@ -588,11 +588,11 @@ class TestInterruptedSessionRecovery:
         transitioned_to_review: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._return_issue_to_ready",
+            "startupai_controller.board_consumer_compat._return_issue_to_ready",
             lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._transition_issue_to_review",
+            "startupai_controller.board_consumer_compat._transition_issue_to_review",
             lambda issue_ref, *args, **kwargs: transitioned_to_review.append(issue_ref),
         )
 
@@ -622,11 +622,11 @@ class TestInterruptedSessionRecovery:
         requeued: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._return_issue_to_ready",
+            "startupai_controller.board_consumer_compat._return_issue_to_ready",
             lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._transition_issue_to_review",
+            "startupai_controller.board_consumer_compat._transition_issue_to_review",
             lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
         )
 
@@ -655,11 +655,11 @@ class TestInterruptedSessionRecovery:
         transitioned: list[str] = []
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._return_issue_to_ready",
+            "startupai_controller.board_consumer_compat._return_issue_to_ready",
             lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._transition_issue_to_review",
+            "startupai_controller.board_consumer_compat._transition_issue_to_review",
             lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
         )
 
@@ -721,16 +721,16 @@ class TestInterruptedSessionRecovery:
         from unittest.mock import patch
 
         with patch(
-            "startupai_controller.board_consumer._return_issue_to_ready",
+            "startupai_controller.board_consumer_compat._return_issue_to_ready",
             side_effect=fake_return_ready,
         ), patch(
-            "startupai_controller.board_consumer._transition_issue_to_review",
+            "startupai_controller.board_consumer_compat._transition_issue_to_review",
             side_effect=fake_transition_review,
         ), patch(
-            "startupai_controller.board_consumer._set_blocked_with_reason",
+            "startupai_controller.board_consumer_compat._set_blocked_with_reason",
             side_effect=fake_set_blocked,
         ), patch(
-            "startupai_controller.board_consumer._classify_open_pr_candidates",
+            "startupai_controller.board_consumer_compat._classify_open_pr_candidates",
             return_value=("conflict", None, "branch mismatch"),
         ):
             recovered = _recover_interrupted_sessions(
@@ -814,7 +814,7 @@ class TestInterruptedSessionRecovery:
             requeued.append(issue_ref)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._return_issue_to_ready",
+            "startupai_controller.board_consumer_compat._return_issue_to_ready",
             return_ready_or_fail,
         )
 
@@ -890,15 +890,15 @@ class TestMultiWorkerDispatch:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._select_candidate_for_cycle",
+            "startupai_controller.board_consumer_compat._select_candidate_for_cycle",
             lambda *args, **kwargs: next(candidates),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._prepare_launch_candidate",
+            "startupai_controller.board_consumer_compat._prepare_launch_candidate",
             lambda issue_ref, **kwargs: SimpleNamespace(issue_ref=issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._record_metric",
+            "startupai_controller.board_consumer_compat._record_metric",
             lambda *args, **kwargs: None,
         )
 
@@ -915,7 +915,7 @@ class TestMultiWorkerDispatch:
             return CycleResult(action="claimed", issue_ref=target_issue)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._run_worker_cycle",
+            "startupai_controller.board_consumer_compat._run_worker_cycle",
             fake_worker,
         )
 
@@ -965,15 +965,15 @@ class TestMultiWorkerDispatch:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._select_candidate_for_cycle",
+            "startupai_controller.board_consumer_compat._select_candidate_for_cycle",
             lambda *args, **kwargs: next(candidates),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._prepare_launch_candidate",
+            "startupai_controller.board_consumer_compat._prepare_launch_candidate",
             lambda issue_ref, **kwargs: SimpleNamespace(issue_ref=issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._record_metric",
+            "startupai_controller.board_consumer_compat._record_metric",
             lambda *args, **kwargs: None,
         )
 
@@ -990,7 +990,7 @@ class TestMultiWorkerDispatch:
             return CycleResult(action="claimed", issue_ref=target_issue)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._run_worker_cycle",
+            "startupai_controller.board_consumer_compat._run_worker_cycle",
             fake_worker,
         )
 
@@ -1036,18 +1036,18 @@ class TestMultiWorkerDispatch:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._select_candidate_for_cycle",
+            "startupai_controller.board_consumer_compat._select_candidate_for_cycle",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 GhQueryError("simulated API failure")
             ),
         )
         degraded_reasons: list[str] = []
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._mark_degraded",
+            "startupai_controller.board_consumer_compat._mark_degraded",
             lambda db, reason: degraded_reasons.append(reason),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.gh_reason_code",
+            "startupai_controller.board_consumer_compat.gh_reason_code",
             lambda err: "test-reason",
         )
 
@@ -1151,7 +1151,7 @@ class TestMultiWorkerDispatch:
                 return _ImmediateFuture(fn(*args, **kwargs))
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer.ThreadPoolExecutor", _FakeExecutor
+            "startupai_controller.board_consumer_compat.ThreadPoolExecutor", _FakeExecutor
         )
 
         # First cycle: return one candidate (active → sleep 1s)
@@ -1163,15 +1163,15 @@ class TestMultiWorkerDispatch:
             return next(candidate_sequences[min(cycle_count, len(candidate_sequences) - 1)])
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._select_candidate_for_cycle",
+            "startupai_controller.board_consumer_compat._select_candidate_for_cycle",
             select_candidate,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._prepare_launch_candidate",
+            "startupai_controller.board_consumer_compat._prepare_launch_candidate",
             lambda issue_ref, **kwargs: SimpleNamespace(issue_ref=issue_ref),
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._record_metric",
+            "startupai_controller.board_consumer_compat._record_metric",
             lambda *args, **kwargs: None,
         )
 
@@ -1190,19 +1190,19 @@ class TestMultiWorkerDispatch:
             github_request_counts={},
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._prepare_cycle",
+            "startupai_controller.board_consumer_compat._prepare_cycle",
             lambda *args, **kwargs: prepared,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._recover_interrupted_sessions",
+            "startupai_controller.board_consumer_compat._recover_interrupted_sessions",
             lambda *args, **kwargs: [],
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._run_deferred_replay_phase",
+            "startupai_controller.board_consumer_compat._run_deferred_replay_phase",
             lambda *args, **kwargs: None,
         )
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._sleep_for_claim_suppression_if_needed",
+            "startupai_controller.board_consumer_compat._sleep_for_claim_suppression_if_needed",
             lambda *args, **kwargs: False,
         )
 
@@ -1211,7 +1211,7 @@ class TestMultiWorkerDispatch:
             return CycleResult(action="claimed", issue_ref=target_issue)
 
         monkeypatch.setattr(
-            "startupai_controller.board_consumer._run_worker_cycle",
+            "startupai_controller.board_consumer_compat._run_worker_cycle",
             fake_worker,
         )
 

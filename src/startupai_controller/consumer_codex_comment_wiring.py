@@ -13,9 +13,9 @@ import startupai_controller.consumer_review_queue_helpers as _review_queue_helpe
 
 def _shell_module():
     """Import the consumer shell lazily to avoid import cycles."""
-    from startupai_controller import board_consumer
+    from startupai_controller import board_consumer_compat
 
-    return board_consumer
+    return board_consumer_compat
 
 
 def assemble_codex_prompt(
