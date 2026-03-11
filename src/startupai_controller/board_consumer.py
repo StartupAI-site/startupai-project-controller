@@ -161,25 +161,9 @@ from startupai_controller.application.consumer.recovery import (
     recover_interrupted_sessions as _recover_interrupted_sessions_use_case,
 )
 from startupai_controller.application.consumer.daemon import (
-    DispatchMultiWorkerLaunchesDeps,
-    PrepareMultiWorkerCycleDeps,
-    PrepareMultiWorkerLaunchContextDeps,
-    dispatch_multi_worker_launches as _dispatch_multi_worker_launches_use_case,
     log_completed_worker_results as _log_completed_worker_results_use_case,
-    multi_worker_dispatch_state as _multi_worker_dispatch_state_use_case,
     next_available_slots as _next_available_slots_use_case,
-    prepare_multi_worker_cycle as _prepare_multi_worker_cycle_use_case,
-    prepare_multi_worker_launch_context as _prepare_multi_worker_launch_context_use_case,
-    RunDaemonLoopDeps,
-    RunMultiWorkerDaemonLoopDeps,
-    run_daemon_loop as _run_daemon_loop_use_case,
-    run_multi_worker_daemon_loop as _run_multi_worker_daemon_loop_use_case,
     run_worker_cycle as _run_worker_cycle_use_case,
-    sleep_for_claim_suppression_if_needed as _sleep_for_claim_suppression_if_needed_use_case,
-    submit_multi_worker_task as _submit_multi_worker_task_use_case,
-)
-from startupai_controller.application.consumer.status import (
-    collect_status_payload as _collect_status_payload_use_case,
 )
 from startupai_controller.consumer_workflow import (
     DEFAULT_WORKFLOW_FILENAME,
@@ -4291,21 +4275,13 @@ def _prepare_multi_worker_cycle(
     di_kwargs: dict[str, Any],
 ) -> PreparedCycleContext | None:
     """Run one bounded preflight pass for the multi-worker daemon."""
-    return _prepare_multi_worker_cycle_use_case(
+    return _runtime_wiring.prepare_multi_worker_cycle(
         config,
         db,
         dry_run=dry_run,
         sleeper=sleeper,
         di_kwargs=di_kwargs,
-        deps=PrepareMultiWorkerCycleDeps(
-            config_error_type=ConfigError,
-            workflow_config_error_type=WorkflowConfigError,
-            gh_query_error_type=GhQueryError,
-            prepare_cycle=_prepare_cycle,
-            mark_degraded=_mark_degraded,
-            gh_reason_code=gh_reason_code,
-            logger=logger,
-        ),
+        shell=sys.modules[__name__],
     )
 
 
@@ -4315,11 +4291,11 @@ def _multi_worker_dispatch_state(
     active_tasks: dict[Future[CycleResult], ActiveWorkerTask],
 ) -> tuple[list[int], set[str]]:
     """Compute currently available slots and active issue refs."""
-    return _multi_worker_dispatch_state_use_case(
+    return _runtime_wiring.multi_worker_dispatch_state(
         db,
         prepared,
         active_tasks,
-        next_available_slots_fn=_next_available_slots,
+        shell=sys.modules[__name__],
     )
 
 
@@ -4330,12 +4306,11 @@ def _sleep_for_claim_suppression_if_needed(
     sleeper: Callable[[float], None],
 ) -> bool:
     """Sleep until claim suppression clears, if active."""
-    return _sleep_for_claim_suppression_if_needed_use_case(
+    return _runtime_wiring.sleep_for_claim_suppression_if_needed(
         db,
         config,
         sleeper=sleeper,
-        claim_suppression_state=_claim_suppression_state,
-        parse_iso8601_timestamp=_parse_iso8601_timestamp,
+        shell=sys.modules[__name__],
     )
 
 
@@ -4352,24 +4327,14 @@ def _prepare_multi_worker_launch_context(
 
     Returns `(launch_context, stop_dispatch)`.
     """
-    return _prepare_multi_worker_launch_context_use_case(
+    return _runtime_wiring.prepare_multi_worker_launch_context(
         candidate,
         config=config,
         db=db,
         prepared=prepared,
         dry_run=dry_run,
         di_kwargs=di_kwargs,
-        deps=PrepareMultiWorkerLaunchContextDeps(
-            gh_query_error_type=GhQueryError,
-            workflow_config_error_type=WorkflowConfigError,
-            worktree_prepare_error_type=WorktreePrepareError,
-            record_metric=_record_metric,
-            prepare_launch_candidate=_prepare_launch_candidate,
-            maybe_activate_claim_suppression=_maybe_activate_claim_suppression,
-            mark_degraded=_mark_degraded,
-            gh_reason_code=gh_reason_code,
-            block_prelaunch_issue=_block_prelaunch_issue,
-        ),
+        shell=sys.modules[__name__],
     )
 
 
@@ -4386,7 +4351,7 @@ def _submit_multi_worker_task(
     di_kwargs: dict[str, Any],
 ) -> None:
     """Submit one prepared candidate to a worker slot."""
-    _submit_multi_worker_task_use_case(
+    _runtime_wiring.submit_multi_worker_task(
         executor,
         active_tasks,
         config=config,
@@ -4396,8 +4361,7 @@ def _submit_multi_worker_task(
         launch_context=launch_context,
         dry_run=dry_run,
         di_kwargs=di_kwargs,
-        run_worker_cycle=_run_worker_cycle,
-        active_worker_task_type=ActiveWorkerTask,
+        shell=sys.modules[__name__],
     )
 
 
@@ -4414,7 +4378,7 @@ def _dispatch_multi_worker_launches(
     di_kwargs: dict[str, Any],
 ) -> int:
     """Launch as many ready candidates as the current hydration budget allows."""
-    return _dispatch_multi_worker_launches_use_case(
+    return _runtime_wiring.dispatch_multi_worker_launches(
         executor,
         config,
         db,
@@ -4424,15 +4388,7 @@ def _dispatch_multi_worker_launches(
         active_tasks=active_tasks,
         dry_run=dry_run,
         di_kwargs=di_kwargs,
-        deps=DispatchMultiWorkerLaunchesDeps(
-            gh_query_error_type=GhQueryError,
-            select_candidate_for_cycle=_select_candidate_for_cycle,
-            prepare_multi_worker_launch_context=_prepare_multi_worker_launch_context,
-            submit_multi_worker_task=_submit_multi_worker_task,
-            mark_degraded=_mark_degraded,
-            gh_reason_code=gh_reason_code,
-            logger=logger,
-        ),
+        shell=sys.modules[__name__],
     )
 
 
@@ -4445,22 +4401,13 @@ def _run_multi_worker_daemon_loop(
     **di_kwargs: Any,
 ) -> None:
     """Run the daemon loop with multiple concurrent worker slots."""
-    _run_multi_worker_daemon_loop_use_case(
+    _runtime_wiring.run_multi_worker_daemon_loop(
         config,
         db,
         dry_run=dry_run,
         sleep_fn=sleep_fn,
         di_kwargs=di_kwargs,
-        deps=RunMultiWorkerDaemonLoopDeps(
-            executor_factory=ThreadPoolExecutor,
-            log_completed_worker_results=_log_completed_worker_results,
-            drain_requested=_drain_requested,
-            prepare_multi_worker_cycle=_prepare_multi_worker_cycle,
-            multi_worker_dispatch_state=_multi_worker_dispatch_state,
-            sleep_for_claim_suppression_if_needed=_sleep_for_claim_suppression_if_needed,
-            dispatch_multi_worker_launches=_dispatch_multi_worker_launches,
-            logger=logger,
-        ),
+        shell=sys.modules[__name__],
     )
 
 
@@ -4478,23 +4425,13 @@ def run_daemon_loop(
     **di_kwargs: Any,
 ) -> None:
     """Run continuous poll-claim-execute loop."""
-    _run_daemon_loop_use_case(
+    _runtime_wiring.run_daemon_loop(
         config,
         db,
         dry_run=dry_run,
         sleep_fn=sleep_fn,
         di_kwargs=di_kwargs,
-        deps=RunDaemonLoopDeps(
-            config_error_type=ConfigError,
-            load_automation_config=load_automation_config,
-            apply_automation_runtime=_apply_automation_runtime,
-            current_main_workflows=_current_main_workflows,
-            recover_interrupted_sessions=_recover_interrupted_sessions,
-            run_multi_worker_daemon_loop=_run_multi_worker_daemon_loop,
-            drain_requested=_drain_requested,
-            run_one_cycle=run_one_cycle,
-            logger=logger,
-        ),
+        shell=sys.modules[__name__],
     )
 
 
@@ -4512,32 +4449,7 @@ def _collect_status_payload(
     return _runtime_wiring.collect_status_payload(
         config,
         local_only=local_only,
-        collect_status_payload_use_case=_collect_status_payload_use_case,
-        config_error_type=ConfigError,
-        load_automation_config=load_automation_config,
-        apply_automation_runtime=_apply_automation_runtime,
-        current_main_workflows=_current_main_workflows,
-        read_workflow_snapshot=read_workflow_snapshot,
-        open_consumer_db=open_consumer_db,
-        load_config=load_config,
-        list_project_items_by_status=_list_project_items_by_status,
-        parse_issue_ref=parse_issue_ref,
-        load_admission_summary=_load_admission_summary,
-        control_plane_health_summary=_control_plane_health_summary,
-        drain_requested=_drain_requested,
-        workflow_status_payload=workflow_status_payload,
-        session_retry_state=_session_retry_state,
-        parse_iso8601_timestamp=_parse_iso8601_timestamp,
-        control_keys={
-            "degraded": CONTROL_KEY_DEGRADED,
-            "degraded_reason": CONTROL_KEY_DEGRADED_REASON,
-            "claim_suppressed_until": CONTROL_KEY_CLAIM_SUPPRESSED_UNTIL,
-            "claim_suppressed_reason": CONTROL_KEY_CLAIM_SUPPRESSED_REASON,
-            "claim_suppressed_scope": CONTROL_KEY_CLAIM_SUPPRESSED_SCOPE,
-            "last_rate_limit_at": CONTROL_KEY_LAST_RATE_LIMIT_AT,
-            "last_successful_board_sync_at": CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT,
-            "last_successful_github_mutation_at": CONTROL_KEY_LAST_SUCCESSFUL_GITHUB_MUTATION_AT,
-        },
+        shell=sys.modules[__name__],
     )
 
 
