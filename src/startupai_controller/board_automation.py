@@ -97,8 +97,6 @@ from startupai_controller.domain.scheduling_policy import (
     VALID_EXECUTION_AUTHORITY_MODES,
     VALID_EXECUTORS,
     PROTECTED_QUEUE_ROUTING_STATUSES,
-    admission_watermarks,
-    has_structured_acceptance_criteria,
     priority_rank as _priority_rank,
     snapshot_to_issue_ref as _snapshot_to_issue_ref,
     wip_limit_for_lane as _domain_wip_limit_for_lane,
@@ -127,21 +125,25 @@ from startupai_controller.domain.models import (
     IssueSnapshot,
 )
 from startupai_controller.application.automation.ready_claim import (
-    _post_claim_comment as _app_post_claim_comment,
     _set_blocked_with_reason as _app_set_blocked_with_reason,
     _transition_issue_status as _app_transition_issue_status,
     _wip_limit_for_lane as _app_wip_limit_for_lane,
     claim_ready_issue as _app_claim_ready_issue,
-    schedule_ready_items as _app_schedule_ready_items,
 )
-from startupai_controller.application.automation.auto_promote import (
-    auto_promote_successors as _app_auto_promote_successors,
-)
-from startupai_controller.application.automation.admit_backlog import (
-    admit_backlog_items as _app_admit_backlog_items,
-)
-from startupai_controller.application.automation.ready_dependencies import (
-    enforce_ready_dependency_guard as _app_enforce_ready_dependency_guard,
+from startupai_controller.application.automation.ready_wiring import (
+    promote_to_ready as _wiring_promote_to_ready,
+    auto_promote_successors as _wiring_auto_promote_successors,
+    admit_backlog_items as _wiring_admit_backlog_items,
+    admission_summary_payload as _wiring_admission_summary_payload,
+    build_admission_pipeline_deps as _wiring_build_admission_pipeline_deps,
+    load_admission_source_items as _wiring_load_admission_source_items,
+    partition_admission_source_items as _wiring_partition_admission_source_items,
+    build_provisional_admission_candidates as _wiring_build_provisional_admission_candidates,
+    evaluate_admission_candidates as _wiring_evaluate_admission_candidates,
+    apply_admitted_backlog_candidates as _wiring_apply_admitted_backlog_candidates,
+    enforce_ready_dependency_guard as _wiring_enforce_ready_dependency_guard,
+    schedule_ready_items as _wiring_schedule_ready_items,
+    post_claim_comment as _wiring_post_claim_comment,
 )
 from startupai_controller.application.automation.audit_in_progress import (
     audit_in_progress as _app_audit_in_progress,
@@ -193,12 +195,6 @@ from startupai_controller.application.automation.handoff_reconciliation import (
 )
 from startupai_controller.application.automation.admission_helpers import (
     AdmissionPipelineDeps as _AdmissionPipelineDeps,
-    admission_summary_payload as _app_admission_summary_payload,
-    load_admission_source_items as _app_load_admission_source_items,
-    partition_admission_source_items as _app_partition_admission_source_items,
-    build_provisional_admission_candidates as _app_build_provisional_admission_candidates,
-    evaluate_admission_candidates as _app_evaluate_admission_candidates,
-    apply_admitted_backlog_candidates as _app_apply_admitted_backlog_candidates,
 )
 from startupai_controller.application.automation.codex_fail_routing import (
     apply_codex_fail_routing as _app_apply_codex_fail_routing,
@@ -223,9 +219,6 @@ from startupai_controller.runtime.wiring import (
 # ---------------------------------------------------------------------------
 # Port wiring helpers
 # ---------------------------------------------------------------------------
-
-
-PROMOTABLE_STATUSES = frozenset({"Backlog", "Blocked"})
 
 
 @dataclass(frozen=True)
@@ -343,62 +336,19 @@ def promote_to_ready(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[int, str]:
     """Validate and promote an issue from Backlog/Blocked to Ready."""
-    parse_issue_ref(issue_ref)
-    if (
-        not dry_run
-        and controller_owned_resolver is not None
-        and controller_owned_resolver(issue_ref)
-    ):
-        return 2, (
-            "REJECTED: controller_owned_admission\n"
-            f"{issue_ref} is governed by the local admission controller."
-        )
-
-    resolve_info = board_info_resolver or _query_issue_board_info
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-
-    if info.status not in PROMOTABLE_STATUSES:
-        return 2, (
-            f"Current status: {info.status}\n"
-            f"REJECTED: {issue_ref} has Status={info.status}; "
-            "must be Backlog or Blocked."
-        )
-
-    val_code, val_output = evaluate_ready_promotion(
-        issue_ref=issue_ref,
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
+    return _wiring_promote_to_ready(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        dry_run=dry_run,
         status_resolver=status_resolver,
-        require_in_graph=True,
-    )
-    if val_code != 0:
-        lines = [f"Current status: {info.status}"]
-        if val_output:
-            lines.append(val_output)
-        return val_code, "\n".join(lines)
-
-    if dry_run:
-        return 0, (
-            f"Current status: {info.status}\n"
-            "Validator: PASS (all predecessors Done)\n"
-            f"Transition: {info.status} -> Ready (would promote)"
-        )
-
-    if board_mutator is not None:
-        board_mutator(info.project_id, info.item_id)
-    else:
-        _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        ).set_issue_status(issue_ref, "Ready")
-
-    return 0, (
-        f"Current status: {info.status}\n"
-        "Validator: PASS (all predecessors Done)\n"
-        f"Transition: {info.status} -> Ready (promoted)"
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        controller_owned_resolver=controller_owned_resolver,
+        gh_runner=gh_runner,
+        query_issue_board_info_fn=_query_issue_board_info,
+        default_board_mutation_port_fn=_default_board_mutation_port,
     )
 
 
@@ -1407,48 +1357,31 @@ def auto_promote_successors(
     gh_runner: Callable[..., str] | None = None,
 ) -> PromotionResult:
     """Promote eligible successors of a Done issue."""
-    check_comment = comment_checker or _comment_exists
-
-    def _post_bridge_comment(
-        owner: str,
-        repo: str,
-        number: int,
-        body: str,
-        *,
-        gh_runner: Callable[..., str] | None = None,
-    ) -> None:
-        if comment_poster is not None:
-            comment_poster(owner, repo, number, body)
-            return
-        target_board_port = board_port or _default_board_mutation_port(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        target_board_port.post_issue_comment(f"{owner}/{repo}", number, body)
-
-    return _app_auto_promote_successors(
-        issue_ref=issue_ref,
-        config=config,
-        this_repo_prefix=this_repo_prefix,
-        project_owner=project_owner,
-        project_number=project_number,
+    return _wiring_auto_promote_successors(
+        issue_ref,
+        config,
+        this_repo_prefix,
+        project_owner,
+        project_number,
         automation_config=automation_config,
         dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_poster=comment_poster,
         gh_runner=gh_runner,
-        promote_to_ready=promote_to_ready,
-        controller_owned_resolver=lambda ref: _controller_owned_admission(
+        promote_to_ready_fn=promote_to_ready,
+        controller_owned_resolver_fn=lambda ref: _controller_owned_admission(
             ref,
             automation_config,
         ),
-        comment_exists=check_comment,
-        post_cross_repo_comment=_post_bridge_comment,
-        resolve_issue_parts=_issue_ref_to_repo_parts,
-        new_handoff_job_id=_new_handoff_job_id,
+        comment_exists_fn=_comment_exists,
+        issue_ref_to_repo_parts_fn=_issue_ref_to_repo_parts,
+        new_handoff_job_id_fn=_new_handoff_job_id,
+        default_board_mutation_port_fn=_default_board_mutation_port,
     )
 
 
@@ -1627,18 +1560,18 @@ def _set_handoff_target(
 
 def _build_admission_pipeline_deps() -> _AdmissionPipelineDeps:
     """Build the wiring deps for the admission pipeline."""
-    return _AdmissionPipelineDeps(
-        query_open_pull_requests=query_open_pull_requests,
-        list_issue_comment_bodies=list_issue_comment_bodies,
-        memoized_query_issue_body=memoized_query_issue_body,
-        mark_issues_done=mark_issues_done,
-        close_issue=close_issue,
-        set_blocked_with_reason=_set_blocked_with_reason,
-        set_handoff_target=_set_handoff_target,
-        default_board_mutation_port=_default_board_mutation_port,
-        set_single_select_field=_set_single_select_field,
-        set_text_field=_set_text_field,
-        list_project_items=_list_project_items,
+    return _wiring_build_admission_pipeline_deps(
+        query_open_pull_requests_fn=query_open_pull_requests,
+        list_issue_comment_bodies_fn=list_issue_comment_bodies,
+        memoized_query_issue_body_fn=memoized_query_issue_body,
+        mark_issues_done_fn=mark_issues_done,
+        close_issue_fn=close_issue,
+        set_blocked_with_reason_fn=_set_blocked_with_reason,
+        set_handoff_target_fn=_set_handoff_target,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        set_single_select_field_fn=_set_single_select_field,
+        set_text_field_fn=_set_text_field,
+        list_project_items_fn=_list_project_items,
     )
 
 
@@ -1648,7 +1581,7 @@ def admission_summary_payload(
     enabled: bool,
 ) -> dict[str, object]:
     """Convert an AdmissionDecision into a JSON-friendly payload."""
-    return _app_admission_summary_payload(decision, enabled=enabled)
+    return _wiring_admission_summary_payload(decision, enabled=enabled)
 
 
 def _load_admission_source_items(
@@ -1659,7 +1592,7 @@ def _load_admission_source_items(
     gh_runner: Callable[..., str] | None,
 ) -> list[_ProjectItemSnapshot]:
     """Load backlog/ready items needed for one admission pass."""
-    return _app_load_admission_source_items(
+    return _wiring_load_admission_source_items(
         automation_config,
         deps=_build_admission_pipeline_deps(),
         review_state_port=review_state_port,
@@ -1676,7 +1609,7 @@ def _partition_admission_source_items(
     target_executor: str,
 ) -> tuple[int, list[_ProjectItemSnapshot]]:
     """Count governed ready items and collect governed backlog items."""
-    return _app_partition_admission_source_items(
+    return _wiring_partition_admission_source_items(
         items,
         config=config,
         automation_config=automation_config,
@@ -1693,7 +1626,7 @@ def _build_provisional_admission_candidates(
     active_lease_issue_refs: tuple[str, ...],
 ) -> tuple[list[_ProjectItemSnapshot], list[AdmissionSkip]]:
     """Apply cheap exact admission filters to backlog items."""
-    return _app_build_provisional_admission_candidates(
+    return _wiring_build_provisional_admission_candidates(
         backlog_items,
         config=config,
         automation_config=automation_config,
@@ -1726,7 +1659,7 @@ def _evaluate_admission_candidates(
     bool,
 ]:
     """Run the expensive admission checks needed to choose candidates."""
-    return _app_evaluate_admission_candidates(
+    return _wiring_evaluate_admission_candidates(
         provisional_candidates,
         deps=_build_admission_pipeline_deps(),
         config=config,
@@ -1757,7 +1690,7 @@ def _apply_admitted_backlog_candidates(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[list[str], bool, str | None]:
     """Apply backlog-to-ready mutations for the selected candidates."""
-    return _app_apply_admitted_backlog_candidates(
+    return _wiring_apply_admitted_backlog_candidates(
         selected,
         deps=_build_admission_pipeline_deps(),
         executor=executor,
@@ -1786,37 +1719,25 @@ def admit_backlog_items(
     gh_runner: Callable[..., str] | None = None,
 ) -> AdmissionDecision:
     """Autonomously admit governed Backlog items into Ready."""
-    if github_bundle is not None:
-        review_state_port = github_bundle.review_state
-        pr_port = github_bundle.pull_requests
-        board_port = github_bundle.board_mutations
-        memo = github_bundle.github_memo
-    else:
-        review_state_port = None
-        pr_port = None
-        board_port = None
-        memo = github_memo or CycleGitHubMemo()
-
-    return _app_admit_backlog_items(
-        config=config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
+    return _wiring_admit_backlog_items(
+        config,
+        automation_config,
+        project_owner,
+        project_number,
         dispatchable_repo_prefixes=dispatchable_repo_prefixes,
         active_lease_issue_refs=active_lease_issue_refs,
         dry_run=dry_run,
         board_snapshot=board_snapshot,
-        review_state_port=review_state_port,
-        pr_port=pr_port,
-        board_port=board_port,
-        memo=memo,
+        github_bundle=github_bundle,
+        github_memo=github_memo,
         gh_runner=gh_runner,
-        protected_queue_executor_target=_protected_queue_executor_target,
-        load_admission_source_items=_load_admission_source_items,
-        partition_admission_source_items=_partition_admission_source_items,
-        build_provisional_candidates=_build_provisional_admission_candidates,
-        evaluate_candidates=_evaluate_admission_candidates,
-        apply_candidates=_apply_admitted_backlog_candidates,
+        protected_queue_executor_target_fn=_protected_queue_executor_target,
+        load_admission_source_items_fn=_load_admission_source_items,
+        partition_admission_source_items_fn=_partition_admission_source_items,
+        build_provisional_candidates_fn=_build_provisional_admission_candidates,
+        evaluate_candidates_fn=_evaluate_admission_candidates,
+        apply_candidates_fn=_apply_admitted_backlog_candidates,
+        CycleGitHubMemo=CycleGitHubMemo,
     )
 
 
@@ -1831,27 +1752,17 @@ def _post_claim_comment(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post deterministic kickoff comment on successful claim."""
-    review_state_port = _default_review_state_port(
-        DEFAULT_PROJECT_OWNER,
-        DEFAULT_PROJECT_NUMBER,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or _default_board_mutation_port(
-        DEFAULT_PROJECT_OWNER,
-        DEFAULT_PROJECT_NUMBER,
-        config,
-        gh_runner=gh_runner,
-    )
-    _app_post_claim_comment(
+    _wiring_post_claim_comment(
         issue_ref,
         executor,
         config,
-        review_state_port=review_state_port,
         board_port=board_port,
-        comment_checker=comment_checker or _comment_exists,
+        comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
+        comment_exists_fn=_comment_exists,
     )
 
 
@@ -1874,11 +1785,7 @@ def schedule_ready_items(
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> SchedulingDecision:
-    """Classify and optionally claim Ready issues. Returns SchedulingDecision.
-
-    All Ready items in selected scope are considered. Dependency gating is
-    applied only to issues that are members of a critical-path graph.
-    """
+    """Classify and optionally claim Ready issues. Returns SchedulingDecision."""
     review_state_port = review_state_port or _default_review_state_port(
         project_owner,
         project_number,
@@ -1899,7 +1806,7 @@ def schedule_ready_items(
             config,
             gh_runner=gh_runner,
         )
-    return _app_schedule_ready_items(
+    return _wiring_schedule_ready_items(
         config,
         project_owner,
         project_number,
@@ -2005,17 +1912,10 @@ def enforce_ready_dependency_guard(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Block Ready issues with unmet predecessors. Returns corrected refs."""
-    review_state_port = review_state_port or _default_review_state_port(
+    return _wiring_enforce_ready_dependency_guard(
+        config,
         project_owner,
         project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    return _app_enforce_ready_dependency_guard(
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        ready_items=review_state_port.list_issues_by_status("Ready"),
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         dry_run=dry_run,
@@ -2023,8 +1923,10 @@ def enforce_ready_dependency_guard(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        find_unmet_dependencies=find_unmet_ready_dependencies,
-        set_blocked_with_reason=_set_blocked_with_reason,
+        review_state_port=review_state_port,
+        default_review_state_port_fn=_default_review_state_port,
+        find_unmet_dependencies_fn=find_unmet_ready_dependencies,
+        set_blocked_with_reason_fn=_set_blocked_with_reason,
     )
 
 
