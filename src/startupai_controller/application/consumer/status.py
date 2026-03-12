@@ -4,11 +4,76 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Protocol, TypedDict
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_workflow import (
+    WorkflowDefinition,
+    WorkflowRepoStatus,
+    WorkflowStateSnapshot,
+)
 from startupai_controller.domain.models import SessionInfo
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.status_store import MetricEventView, StatusStorePort
+from startupai_controller.validate_critical_path_promotion import IssueRef
+
+
+class CurrentMainWorkflowsFn(Protocol):
+    """Load the canonical workflow definitions/statuses for status reporting."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        *,
+        persist_snapshot: bool = True,
+    ) -> tuple[dict[str, WorkflowDefinition], dict[str, WorkflowRepoStatus], int]:
+        """Return main-checkout workflows, statuses, and effective interval."""
+        ...
+
+
+class ControlPlaneHealthSummaryFn(Protocol):
+    """Summarize current control-plane health for status JSON."""
+
+    def __call__(
+        self,
+        control_state: dict[str, str],
+        *,
+        deferred_action_count: int,
+        oldest_deferred_action_age_seconds: float | None,
+        poll_interval_seconds: int,
+    ) -> dict[str, Any]:
+        """Return the machine-readable health summary."""
+        ...
+
+
+class SessionRetryStateFn(Protocol):
+    """Render retry metadata for one recent session."""
+
+    def __call__(
+        self,
+        session: SessionInfo,
+        *,
+        config: ConsumerConfig,
+        workflows: dict[str, WorkflowDefinition],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return retry-state fields for one session."""
+        ...
+
+
+class StatusControlKeys(TypedDict):
+    """Control-plane state keys consumed by the status payload."""
+
+    degraded: str
+    degraded_reason: str
+    claim_suppressed_until: str
+    claim_suppressed_reason: str
+    claim_suppressed_scope: str
+    last_rate_limit_at: str
+    last_successful_board_sync_at: str
+    last_successful_github_mutation_at: str
 
 
 @dataclass(frozen=True)
@@ -16,18 +81,22 @@ class CollectStatusPayloadDeps:
     """Injected seams for consumer status collection."""
 
     config_error_type: type[Exception]
-    load_automation_config: Callable[[Any], Any]
-    apply_automation_runtime: Callable[[Any, Any | None], None]
-    current_main_workflows: Callable[..., tuple[dict[str, Any], dict[str, Any], int]]
-    read_workflow_snapshot: Callable[[Any], Any | None]
-    parse_issue_ref: Callable[[str], Any]
-    load_admission_summary: Callable[[dict[str, str], Any | None], dict[str, Any]]
-    control_plane_health_summary: Callable[..., Any]
-    drain_requested: Callable[[Any], bool]
-    workflow_status_payload: Callable[[Any], dict[str, Any]]
-    session_retry_state: Callable[..., dict[str, Any]]
+    load_automation_config: Callable[[Path], BoardAutomationConfig]
+    apply_automation_runtime: Callable[
+        [ConsumerConfig, BoardAutomationConfig | None], None
+    ]
+    current_main_workflows: CurrentMainWorkflowsFn
+    read_workflow_snapshot: Callable[[Path], WorkflowStateSnapshot | None]
+    parse_issue_ref: Callable[[str], IssueRef]
+    load_admission_summary: Callable[
+        [dict[str, str], BoardAutomationConfig | None], dict[str, Any]
+    ]
+    control_plane_health_summary: ControlPlaneHealthSummaryFn
+    drain_requested: Callable[[Path], bool]
+    workflow_status_payload: Callable[[WorkflowRepoStatus], dict[str, Any]]
+    session_retry_state: SessionRetryStateFn
     parse_iso8601_timestamp: Callable[[str], datetime | None]
-    control_keys: dict[str, str]
+    control_keys: StatusControlKeys
 
 
 def _local_review_summary(db: StatusStorePort) -> dict[str, Any]:
@@ -41,7 +110,7 @@ def _local_review_summary(db: StatusStorePort) -> dict[str, Any]:
 
 
 def _github_review_summary(
-    config: Any,
+    config: ConsumerConfig,
     db: StatusStorePort,
     *,
     deps: CollectStatusPayloadDeps,
@@ -211,7 +280,9 @@ def _augment_slo_window_payload(
     }
 
 
-def _lane_wip_limits_payload(auto_config: Any | None) -> dict[str, dict[str, int]]:
+def _lane_wip_limits_payload(
+    auto_config: BoardAutomationConfig | None,
+) -> dict[str, dict[str, int]]:
     """Render lane WIP limits grouped by executor."""
     if auto_config is None:
         return {}
@@ -225,7 +296,7 @@ def _lane_wip_limits_payload(auto_config: Any | None) -> dict[str, dict[str, int
     return lane_wip_limits
 
 
-def _worker_status_payload(worker: Any) -> dict[str, Any]:
+def _worker_status_payload(worker: SessionInfo) -> dict[str, Any]:
     """Render one active worker payload."""
     return {
         "id": worker.id,
@@ -300,10 +371,10 @@ def _worktree_reuse_status_payload(
 def _recent_session_status_payload(
     session: SessionInfo,
     *,
-    config: Any,
-    workflows: dict[str, Any],
+    config: ConsumerConfig,
+    workflows: dict[str, WorkflowDefinition],
     now: datetime,
-    session_retry_state: Callable[..., dict[str, Any]],
+    session_retry_state: SessionRetryStateFn,
 ) -> dict[str, Any]:
     """Render one recent session payload for status JSON."""
     return {
@@ -334,10 +405,16 @@ def _recent_session_status_payload(
 
 
 def _load_status_runtime(
-    config: Any,
+    config: ConsumerConfig,
     *,
     deps: CollectStatusPayloadDeps,
-) -> tuple[Any | None, dict[str, Any], dict[str, Any], int, str | None]:
+) -> tuple[
+    BoardAutomationConfig | None,
+    dict[str, WorkflowDefinition],
+    dict[str, WorkflowRepoStatus],
+    int,
+    str | None,
+]:
     """Load automation config and persisted workflow status for status reporting."""
     try:
         auto_config = deps.load_automation_config(config.automation_config_path)
@@ -363,9 +440,9 @@ def _load_status_runtime(
 
 
 def _collect_status_runtime_state(
-    config: Any,
+    config: ConsumerConfig,
     *,
-    auto_config: Any | None,
+    auto_config: BoardAutomationConfig | None,
     local_only: bool,
     status_now: datetime,
     db: StatusStorePort,
@@ -421,11 +498,11 @@ def _collect_status_runtime_state(
 
 
 def _build_status_payload(
-    config: Any,
+    config: ConsumerConfig,
     *,
-    auto_config: Any | None,
-    workflow_statuses: dict[str, Any],
-    main_workflows: dict[str, Any],
+    auto_config: BoardAutomationConfig | None,
+    workflow_statuses: dict[str, WorkflowRepoStatus],
+    main_workflows: dict[str, WorkflowDefinition],
     effective_interval: int,
     last_reload_at: str | None,
     status_now: datetime,
@@ -522,7 +599,7 @@ def _build_status_payload(
 
 
 def collect_status_payload(
-    config: Any,
+    config: ConsumerConfig,
     *,
     local_only: bool = False,
     db: StatusStorePort,
