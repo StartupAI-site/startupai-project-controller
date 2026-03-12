@@ -188,9 +188,9 @@ Three compatibility shims exist as transitional artifacts from the extraction:
 
 | Shim | Lines | Status |
 |------|-------|--------|
-| `board_io.py` | 1463 | Transitional — shrink on touch |
-| `consumer_db.py` | 1309 | Transitional — shrink on touch |
-| `github_http.py` | 1659 | Transitional — shrink on touch |
+| `board_io.py` | 1461 | Transitional — shrink on touch |
+| `consumer_db.py` | 1288 | Transitional — shrink on touch |
+| `github_http.py` | 1658 | Transitional — shrink on touch |
 
 **Rules:**
 - Shims may not grow in line count (ratchet test enforces this)

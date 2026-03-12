@@ -544,9 +544,9 @@ KNOWN_SHIM_IMPORTERS = {
 # Baselines: current line counts for each shim file.
 # When a PR shrinks a shim, update the baseline downward in the same PR.
 SHIM_SIZE_BASELINES = {
-    "board_io.py": 1532,
-    "consumer_db.py": 1335,
-    "github_http.py": 1673,
+    "board_io.py": 1461,
+    "consumer_db.py": 1288,
+    "github_http.py": 1658,
 }
 
 SHIM_FILENAMES = {m.rsplit(".", 1)[-1] + ".py" for m in SHIM_MODULES}
