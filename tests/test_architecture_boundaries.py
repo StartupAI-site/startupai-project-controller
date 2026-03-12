@@ -42,6 +42,7 @@ THIN_ENTRY_MODULES = (
     SRC_ROOT / "board_control_plane.py",
 )
 
+
 def _is_type_checking_test(node: ast.expr) -> bool:
     return isinstance(node, ast.Name) and node.id == "TYPE_CHECKING"
 
@@ -173,12 +174,12 @@ def test_application_has_no_entrypoint_adapter_or_shim_imports() -> None:
 
 def test_board_control_plane_does_not_import_private_consumer_helpers() -> None:
     imported = _runtime_imported_modules(SRC_ROOT / "board_control_plane.py")
-    assert "startupai_controller.board_consumer" not in imported, (
-        "board_control_plane.py still imports board_consumer.py at runtime"
-    )
-    assert "startupai_controller.board_automation" not in imported, (
-        "board_control_plane.py still imports board_automation.py at runtime"
-    )
+    assert (
+        "startupai_controller.board_consumer" not in imported
+    ), "board_control_plane.py still imports board_consumer.py at runtime"
+    assert (
+        "startupai_controller.board_automation" not in imported
+    ), "board_control_plane.py still imports board_automation.py at runtime"
 
 
 def test_board_control_plane_imports_stay_within_control_plane_stack() -> None:
@@ -186,7 +187,8 @@ def test_board_control_plane_imports_stay_within_control_plane_stack() -> None:
     offending = sorted(
         module
         for module in imported
-        if module not in {
+        if module
+        not in {
             "startupai_controller.board_automation_config",
             "startupai_controller.consumer_config",
             "startupai_controller.consumer_workflow",
@@ -202,12 +204,15 @@ def test_board_control_plane_imports_stay_within_control_plane_stack() -> None:
     )
 
 
-def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks() -> None:
+def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks() -> (
+    None
+):
     imported = _controller_runtime_imports(SRC_ROOT / "board_automation.py")
     offending = sorted(
         module
         for module in imported
-        if module in {
+        if module
+        in {
             "startupai_controller.board_consumer",
             "startupai_controller.board_control_plane",
         }
@@ -223,13 +228,14 @@ def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks()
 
 def test_board_consumer_endgame_shell_avoids_lower_level_execution_mechanisms() -> None:
     imported = _controller_runtime_imports(SRC_ROOT / "board_consumer.py")
-    assert "startupai_controller.board_automation" not in imported, (
-        "board_consumer.py still imports board_automation.py at runtime"
-    )
+    assert (
+        "startupai_controller.board_automation" not in imported
+    ), "board_consumer.py still imports board_automation.py at runtime"
     offending = sorted(
         module
         for module in imported
-        if module in {
+        if module
+        in {
             "startupai_controller.application.consumer.execution",
             "startupai_controller.application.consumer.launch",
             "startupai_controller.consumer_review_handoff_helpers",
@@ -278,7 +284,9 @@ def test_consumer_stack_has_no_compat_or_shell_service_locator_patterns() -> Non
     )
 
 
-def test_consumer_prepared_cycle_use_case_has_no_legacy_board_or_comment_callables() -> None:
+def test_consumer_prepared_cycle_use_case_has_no_legacy_board_or_comment_callables() -> (
+    None
+):
     params = _function_parameter_names(
         APPLICATION_ROOT / "consumer" / "cycle.py",
         "run_prepared_cycle",
@@ -382,8 +390,7 @@ def test_consumer_daemon_module_has_no_db_builder_fields() -> None:
     forbidden = ["open_consumer_db"]
     offending = [token for token in forbidden if token in source]
     assert offending == [], (
-        "application/consumer/daemon.py regained DB builder seams: "
-        f"{offending}"
+        "application/consumer/daemon.py regained DB builder seams: " f"{offending}"
     )
 
 
@@ -397,17 +404,21 @@ def test_consumer_launch_module_has_no_legacy_status_resolver_usage() -> None:
     )
 
 
-def test_rebalance_application_module_no_longer_contains_outer_wiring_entry_points() -> None:
+def test_rebalance_application_module_no_longer_contains_outer_wiring_entry_points() -> (
+    None
+):
     source = _source_text(APPLICATION_ROOT / "automation" / "rebalance.py")
-    assert "def load_rebalance_in_progress_items(" not in source, (
-        "application/automation/rebalance.py regained outer port-materialization helpers"
-    )
-    assert "def wire_rebalance_wip(" not in source, (
-        "application/automation/rebalance.py regained outer rebalance wiring"
-    )
+    assert (
+        "def load_rebalance_in_progress_items(" not in source
+    ), "application/automation/rebalance.py regained outer port-materialization helpers"
+    assert (
+        "def wire_rebalance_wip(" not in source
+    ), "application/automation/rebalance.py regained outer rebalance wiring"
 
 
-def test_automation_non_wiring_modules_have_no_default_port_or_wire_entrypoints() -> None:
+def test_automation_non_wiring_modules_have_no_default_port_or_wire_entrypoints() -> (
+    None
+):
     forbidden = [
         "default_pr_port_fn",
         "default_review_state_port_fn",
@@ -494,9 +505,9 @@ def test_thin_entrypoints_do_not_import_direct_mechanism_modules() -> None:
         offending = sorted(
             module for module in imported if module in DIRECT_MECHANISM_MODULES
         )
-        assert offending == [], (
-            f"{path.name} imports direct mechanism modules: {offending}"
-        )
+        assert (
+            offending == []
+        ), f"{path.name} imports direct mechanism modules: {offending}"
 
 
 def test_ports_do_not_import_adapters() -> None:
@@ -511,3 +522,59 @@ def test_ports_do_not_import_adapters() -> None:
 def test_capability_adapters_do_not_inherit_each_other() -> None:
     assert not issubclass(GitHubReviewStateAdapter, GitHubBoardMutationAdapter)
     assert not issubclass(GitHubPullRequestAdapter, GitHubReviewStateAdapter)
+
+
+# --- Shim governance tests ---
+
+# Frozen allowlist: only these files may import shim modules at runtime.
+# When a PR removes a shim caller, remove it from this dict in the same PR.
+KNOWN_SHIM_IMPORTERS = {
+    "validate_critical_path_promotion.py": {"startupai_controller.github_http"},
+    "github_transport.py": {"startupai_controller.github_http"},
+    "promote_ready.py": {"startupai_controller.github_http"},
+    "sqlite_store.py": {"startupai_controller.consumer_db"},
+    "github_http_adapter.py": {"startupai_controller.github_http"},
+}
+
+# Baselines: current line counts for each shim file.
+# When a PR shrinks a shim, update the baseline downward in the same PR.
+SHIM_SIZE_BASELINES = {
+    "board_io.py": 1463,
+    "consumer_db.py": 1309,
+    "github_http.py": 1659,
+}
+
+SHIM_FILENAMES = {m.rsplit(".", 1)[-1] + ".py" for m in SHIM_MODULES}
+
+
+def test_no_new_shim_importers() -> None:
+    """No file outside the frozen allowlist may import a shim module at runtime."""
+    violations: dict[str, set[str]] = {}
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        if path.name in SHIM_FILENAMES or path.name == "__init__.py":
+            continue
+        imported = _runtime_imported_modules(path)
+        shim_hits = imported & SHIM_MODULES
+        if not shim_hits:
+            continue
+        allowed = KNOWN_SHIM_IMPORTERS.get(path.name, set())
+        unexpected = shim_hits - allowed
+        if unexpected:
+            violations[path.name] = unexpected
+    assert violations == {}, (
+        "New shim importers detected (not in KNOWN_SHIM_IMPORTERS allowlist). "
+        "Migrate to ports/adapters instead of adding shim dependencies: "
+        f"{violations}"
+    )
+
+
+def test_shim_size_ratchet() -> None:
+    """Shim files may not grow beyond their recorded baselines."""
+    for filename, baseline in SHIM_SIZE_BASELINES.items():
+        path = SRC_ROOT / filename
+        actual = len(path.read_text(encoding="utf-8").splitlines())
+        assert actual <= baseline, (
+            f"{filename} has {actual} lines, exceeding baseline of {baseline}. "
+            "Shims must shrink monotonically. If you shrank it, update "
+            "SHIM_SIZE_BASELINES in this test."
+        )
