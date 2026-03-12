@@ -22,6 +22,7 @@ from startupai_controller.board_automation_config import (
 )
 from startupai_controller.board_graph import classify_parallelism_snapshot
 from startupai_controller.runtime.wiring import build_github_port_bundle
+from startupai_controller.automation_port_helpers import _default_review_state_port
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 
@@ -821,7 +822,7 @@ def _cmd_classify_parallelism(
 ) -> int:
     """Handler for classify-parallelism subcommand."""
     core = _core()
-    review_state_port = core._default_review_state_port(
+    review_state_port = _default_review_state_port(
         args.project_owner,
         args.project_number,
         config,

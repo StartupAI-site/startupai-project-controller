@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import startupai_controller.board_control_plane as control_plane
+import startupai_controller.control_plane_tick_runtime as tick_runtime
 from startupai_controller.board_automation import BoardAutomationConfig, ExecutorRoutingDecision, AdmissionConfig
 from startupai_controller.board_graph import AdmissionDecision
 from startupai_controller.adapters.github_types import CycleBoardSnapshot, CycleGitHubMemo
@@ -103,13 +104,13 @@ def test_tick_skips_review_rescue_when_no_review_items(
             return None
 
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "open_consumer_db",
         lambda db_path: FakeDB(db_path),
     )
-    monkeypatch.setattr(control_plane, "load_config", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(tick_runtime, "load_config", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "load_automation_config",
         lambda *_args, **_kwargs: BoardAutomationConfig(
             wip_limits={"codex": {"crew": 2}},
@@ -124,14 +125,14 @@ def test_tick_skips_review_rescue_when_no_review_items(
             admission=AdmissionConfig(enabled=True),
         ),
     )
-    monkeypatch.setattr(control_plane, "_apply_automation_runtime", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tick_runtime, "_apply_automation_runtime", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "_current_main_workflows",
         lambda *_args, **_kwargs: ({}, {}, 180),
     )
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "build_github_port_bundle",
         lambda *_args, **_kwargs: SimpleNamespace(
             pull_requests=SimpleNamespace(),
@@ -142,10 +143,10 @@ def test_tick_skips_review_rescue_when_no_review_items(
         ),
     )
     monkeypatch.setattr(
-        control_plane, "_replay_deferred_actions", lambda *_args, **_kwargs: ()
+        tick_runtime, "_replay_deferred_actions", lambda *_args, **_kwargs: ()
     )
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "build_ready_flow_port",
         lambda: SimpleNamespace(
             route_protected_queue_executors=lambda *_args, **_kwargs: ExecutorRoutingDecision(
@@ -178,9 +179,9 @@ def test_tick_skips_review_rescue_when_no_review_items(
             },
         ),
     )
-    monkeypatch.setattr(control_plane, "_persist_admission_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tick_runtime, "_persist_admission_summary", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "_drain_review_queue",
         lambda *_args, **_kwargs: (
             called.__setitem__("drain_review_queue", True) or True
@@ -203,15 +204,15 @@ def test_tick_skips_review_rescue_when_no_review_items(
             CycleBoardSnapshot(items=(), by_status={}),
         ),
     )
-    monkeypatch.setattr(control_plane, "_record_successful_board_sync", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(control_plane, "_clear_degraded", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tick_runtime, "_record_successful_board_sync", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tick_runtime, "_clear_degraded", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "build_service_control_port",
         lambda: SimpleNamespace(is_active=lambda _service_name, user=True: True),
     )
     monkeypatch.setattr(
-        control_plane,
+        tick_runtime,
         "_control_plane_health_summary",
         lambda *_args, **_kwargs: {"health": "healthy", "reason_code": "none"},
     )
@@ -246,3 +247,44 @@ def test_tick_skips_review_rescue_when_no_review_items(
     assert payload["executor_routing"]["skipped"] == [
         {"issue_ref": "app#109", "reason": "repo-not-governed"}
     ]
+
+
+def test_build_tick_runtime_assembles_tick_deps_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    closed: list[bool] = []
+
+    class FakeDB:
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(tick_runtime, "open_consumer_db", lambda _db_path: FakeDB())
+    monkeypatch.setattr(tick_runtime, "begin_runtime_request_stats", lambda: "token")
+    monkeypatch.setattr(
+        tick_runtime,
+        "end_runtime_request_stats",
+        lambda _token: SimpleNamespace(graphql=3, rest=5),
+    )
+    monkeypatch.setattr(tick_runtime, "build_ready_flow_port", lambda: "ready-port")
+    monkeypatch.setattr(
+        tick_runtime,
+        "build_service_control_port",
+        lambda: SimpleNamespace(is_active=lambda _name, user=True: True),
+    )
+
+    args = argparse.Namespace()
+    config = control_plane.ConsumerConfig(
+        critical_paths_path=Path("critical-paths.json"),
+        automation_config_path=Path("board-automation-config.json"),
+        db_path=tmp_path / "consumer.db",
+    )
+
+    runtime = tick_runtime.build_tick_runtime(args=args, config=config)
+
+    assert runtime.deps.ready_flow_port == "ready-port"
+    payload = runtime.finalize_payload({})
+    assert payload["github_request_counts"] == {"graphql": 3, "rest": 5}
+
+    runtime.cleanup()
+    assert closed == [True]

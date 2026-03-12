@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 import startupai_controller.board_automation as automation
+import startupai_controller.automation_port_helpers as automation_port_helpers
 import startupai_controller.board_io as board_io_mod
 from startupai_controller.board_automation import (
     ExecutorRoutingDecision,
@@ -4682,7 +4683,7 @@ class TestSetBlockedWithReasonCharacterization:
         )
 
         monkeypatch.setattr(
-            automation,
+            automation_port_helpers,
             "build_github_port_bundle",
             lambda *a, **k: (built_bundles.append("built"), fake_bundle)[1],
         )
@@ -4951,7 +4952,7 @@ class TestTransitionIssueStatusCharacterization:
         )
 
         monkeypatch.setattr(
-            automation,
+            automation_port_helpers,
             "build_github_port_bundle",
             lambda *a, **k: (built_bundles.append("built"), fake_bundle)[1],
         )
@@ -4968,6 +4969,23 @@ class TestTransitionIssueStatusCharacterization:
         assert len(built_bundles) >= 1
         assert changed is True
         assert old_status == "Ready"
+
+
+def test_port_helper_default_review_state_port_builds_from_bundle(monkeypatch) -> None:
+    bundle = SimpleNamespace(review_state="review-port")
+    monkeypatch.setattr(
+        automation_port_helpers,
+        "build_github_port_bundle",
+        lambda *a, **k: bundle,
+    )
+
+    port = automation_port_helpers._default_review_state_port(
+        "StartupAI-site",
+        1,
+        _load(Path("critical-paths.json")) if False else None,  # unreachable placeholder
+    )
+
+    assert port == "review-port"
 
 
 # ---------------------------------------------------------------------------

@@ -50,12 +50,17 @@ from startupai_controller.application.automation.rebalance import (
 from startupai_controller.application.automation.codex_fail_routing import (
     apply_codex_fail_routing as _app_apply_codex_fail_routing,
 )
-from startupai_controller.application.automation.ready_wiring import (
-    _wrap_board_port,
-    _wrap_review_state_port,
+from startupai_controller.automation_compat_ports import (
+    wrap_board_port,
+    wrap_review_state_port,
 )
 from startupai_controller.automation_board_state_helpers import (
     transition_issue_status as _helpers_transition_issue_status,
+)
+from startupai_controller.automation_port_helpers import (
+    _default_board_mutation_port,
+    _default_pr_port,
+    _default_review_state_port,
 )
 
 
@@ -105,8 +110,8 @@ def _transition_issue_status(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         legacy_board_status_mutator_fn=core._legacy_board_status_mutator,
         app_transition_issue_status_fn=core._app_transition_issue_status,
     )
@@ -134,14 +139,14 @@ def _apply_codex_fail_routing(
     """Route failed codex review back to In Progress with explicit handoff."""
     core = _core()
     if review_state_port is None:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if board_port is None:
-        board_port = core._default_board_mutation_port(
+        board_port = _default_board_mutation_port(
             project_owner,
             project_number,
             config,
@@ -187,21 +192,21 @@ def audit_in_progress(
     core = _core()
     del board_info_resolver, comment_checker, comment_poster
     if review_state_port is None:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if board_port is None:
-        board_port = core._default_board_mutation_port(
+        board_port = _default_board_mutation_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if pr_port is None:
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             project_owner,
             project_number,
             config,
@@ -244,14 +249,14 @@ def dispatch_agent(
     core = _core()
     del board_info_resolver, board_mutator
     if review_state_port is None:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if board_port is None:
-        board_port = core._default_board_mutation_port(
+        board_port = _default_board_mutation_port(
             project_owner,
             project_number,
             config,
@@ -293,21 +298,21 @@ def rebalance_wip(
     """Rebalance In Progress lanes with stale demotion and dependency blocking."""
     core = _core()
     if review_state_port is None:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if board_port is None:
-        board_port = core._default_board_mutation_port(
+        board_port = _default_board_mutation_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if pr_port is None:
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             project_owner,
             project_number,
             config,
@@ -315,7 +320,7 @@ def rebalance_wip(
         )
 
     in_progress = review_state_port.list_issues_by_status("In Progress")
-    review_state_port = _wrap_review_state_port(
+    review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
         project_owner=project_owner,
@@ -324,7 +329,7 @@ def rebalance_wip(
         comment_exists_fn=core._comment_exists,
         gh_runner=gh_runner,
     )
-    board_port = _wrap_board_port(
+    board_port = wrap_board_port(
         board_port,
         config=config,
         project_owner=project_owner,
@@ -377,21 +382,21 @@ def enforce_execution_policy(
     core = _core()
     del board_info_resolver, board_mutator
     if pr_port is None:
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             project_owner,
             project_number,
             config=config,
             gh_runner=gh_runner,
         )
     if review_state_port is None:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if board_port is None:
-        board_port = core._default_board_mutation_port(
+        board_port = _default_board_mutation_port(
             project_owner,
             project_number,
             config,
