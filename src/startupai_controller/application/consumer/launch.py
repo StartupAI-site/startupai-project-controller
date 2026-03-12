@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
+from startupai_controller.consumer_types import (
+    ClaimedSessionContext,
+    PendingClaimContext,
+    PreparedLaunchContext,
+    SelectedLaunchCandidate,
+)
 from startupai_controller.domain.models import CycleResult
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
@@ -15,29 +21,212 @@ from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
 
 
+class SelectLaunchCandidateForCycleFn(Protocol):
+    """Select a candidate to launch for the current cycle."""
+
+    def __call__(
+        self,
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        target_issue: str | None,
+    ) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]: ...
+
+
+class PrepareSelectedLaunchCandidateFn(Protocol):
+    """Turn a selected launch candidate into prepared local state."""
+
+    def __call__(
+        self,
+        *,
+        selected_candidate: SelectedLaunchCandidate,
+        config: Any,
+        db: Any,
+        prepared: Any,
+    ) -> tuple[PreparedLaunchContext | None, CycleResult | None]: ...
+
+
+class ResolveLaunchCandidateMetadataFn(Protocol):
+    """Resolve metadata needed to prepare a launch candidate."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        *,
+        cp_config: Any,
+        auto_config: Any,
+        board_snapshot: Any,
+        pr_port: PullRequestPort,
+    ) -> tuple[str, str, str, int, Any | None, str, str | None, str | None]: ...
+
+
+class ResolveLaunchIssueContextFn(Protocol):
+    """Resolve issue context and title for a launch candidate."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        *,
+        owner: str,
+        repo: str,
+        number: int,
+        snapshot: Any | None,
+        config: Any,
+        db: Any,
+        issue_context_port: IssueContextPort,
+    ) -> tuple[dict[str, Any], str]: ...
+
+
+class SetupLaunchWorktreeFn(Protocol):
+    """Prepare or reuse the launch worktree for a candidate."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        title: str,
+        session_kind: str,
+        repair_branch_name: str | None,
+        *,
+        config: Any,
+        cp_config: Any,
+        db: Any,
+        session_store: SessionStorePort,
+        worktree_port: WorktreePort,
+        subprocess_runner: Callable[..., Any] | None = None,
+    ) -> tuple[str, str, str | None, str | None]: ...
+
+
+class ResolveLaunchRuntimeFn(Protocol):
+    """Resolve runtime config and workflow definition for a launch."""
+
+    def __call__(
+        self,
+        candidate_prefix: str,
+        worktree_path: str,
+        *,
+        config: Any,
+        prepared: Any,
+    ) -> tuple[Any, Any]: ...
+
+
+class RunLaunchWorkspaceHooksFn(Protocol):
+    """Run pre-launch hooks for a prepared worktree."""
+
+    def __call__(
+        self,
+        workflow_definition: Any,
+        *,
+        worktree_path: str,
+        issue_ref: str,
+        branch_name: str,
+        worktree_port: WorktreePort,
+        subprocess_runner: Callable[..., Any] | None,
+    ) -> None: ...
+
+
+class AssemblePreparedLaunchContextFn(Protocol):
+    """Build the final prepared launch context for downstream steps."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        *,
+        candidate_prefix: str,
+        owner: str,
+        repo: str,
+        number: int,
+        title: str,
+        context: dict[str, Any],
+        session_kind: str,
+        repair_pr_url: str | None,
+        repair_branch_name: str | None,
+        worktree_path: str,
+        branch_name: str,
+        workflow_definition: Any,
+        effective_consumer_config: Any,
+        dependency_summary: str,
+        branch_reconcile_state: str | None,
+        branch_reconcile_error: str | None,
+    ) -> PreparedLaunchContext: ...
+
+
+class OpenPendingClaimSessionFn(Protocol):
+    """Create the pending claim session record for a prepared launch."""
+
+    def __call__(
+        self,
+        *,
+        db: Any,
+        launch_context: PreparedLaunchContext,
+        executor: str,
+        slot_id: int,
+    ) -> tuple[PendingClaimContext | None, CycleResult | None]: ...
+
+
+class EnforceClaimRetryCeilingFn(Protocol):
+    """Stop work when the candidate exceeded its retry ceiling."""
+
+    def __call__(
+        self,
+        *,
+        config: Any,
+        db: Any,
+        launch_context: PreparedLaunchContext,
+        pending_claim: PendingClaimContext,
+        cp_config: Any,
+    ) -> CycleResult | None: ...
+
+
+class AttemptLaunchContextClaimFn(Protocol):
+    """Attempt to claim board ownership for a prepared launch."""
+
+    def __call__(
+        self,
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: PreparedLaunchContext,
+        pending_claim: PendingClaimContext,
+        slot_id: int,
+    ) -> tuple[Any | None, CycleResult | None]: ...
+
+
+class MarkClaimedSessionRunningFn(Protocol):
+    """Persist the durable running-session state after claim."""
+
+    def __call__(
+        self,
+        *,
+        config: Any,
+        db: Any,
+        launch_context: PreparedLaunchContext,
+        pending_claim: PendingClaimContext,
+        slot_id: int,
+        cp_config: Any,
+    ) -> ClaimedSessionContext: ...
+
+
 @dataclass(frozen=True)
 class ResolveLaunchDeps:
     """Injected seams for launch-context resolution."""
 
-    select_launch_candidate_for_cycle: Callable[
-        ..., tuple[Any | None, CycleResult | None]
-    ]
-    prepare_selected_launch_candidate: Callable[
-        ..., tuple[Any | None, CycleResult | None]
-    ]
+    select_launch_candidate_for_cycle: SelectLaunchCandidateForCycleFn
+    prepare_selected_launch_candidate: PrepareSelectedLaunchCandidateFn
 
 
 @dataclass(frozen=True)
 class PrepareLaunchDeps:
     """Injected seams for launch preparation."""
 
-    resolve_launch_candidate_metadata: Callable[..., tuple[Any, ...]]
-    resolve_launch_issue_context: Callable[..., tuple[Any, str]]
-    setup_launch_worktree: Callable[..., tuple[str, str, str | None, str | None]]
-    resolve_launch_runtime: Callable[..., tuple[Any, Any]]
-    run_launch_workspace_hooks: Callable[..., None]
+    resolve_launch_candidate_metadata: ResolveLaunchCandidateMetadataFn
+    resolve_launch_issue_context: ResolveLaunchIssueContextFn
+    setup_launch_worktree: SetupLaunchWorktreeFn
+    resolve_launch_runtime: ResolveLaunchRuntimeFn
+    run_launch_workspace_hooks: RunLaunchWorkspaceHooksFn
     build_dependency_summary: Callable[..., str]
-    assemble_prepared_launch_context: Callable[..., Any]
+    assemble_prepared_launch_context: AssemblePreparedLaunchContextFn
 
 
 def resolve_launch_context_for_cycle(
@@ -46,11 +235,11 @@ def resolve_launch_context_for_cycle(
     db: Any,
     prepared: Any,
     deps: ResolveLaunchDeps,
-    launch_context: Any | None,
+    launch_context: PreparedLaunchContext | None,
     target_issue: str | None,
     dry_run: bool,
     log_dry_run: Callable[[str], None] | None = None,
-) -> tuple[Any | None, CycleResult | None]:
+) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
     if launch_context is not None:
         return launch_context, None
@@ -93,16 +282,16 @@ def prepare_launch_candidate(
     review_state_port: ReviewStatePort | None = None,
     gh_runner: GhRunnerPort | None = None,
     pr_port: PullRequestPort,
-    issue_context_port: IssueContextPort | None = None,
+    issue_context_port: IssueContextPort,
     session_store: SessionStorePort,
     worktree_port: WorktreePort,
-) -> Any:
+) -> PreparedLaunchContext:
     """Prepare local launch state for an issue before board claim."""
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
     store = session_store
     effective_pr_port = pr_port
-    effective_issue_context_port = issue_context_port or effective_pr_port
+    effective_issue_context_port = issue_context_port
     effective_worktree_port = worktree_port
 
     (
@@ -196,10 +385,10 @@ def prepare_launch_candidate(
 class ClaimLaunchDeps:
     """Injected seams for launch-claim orchestration."""
 
-    open_pending_claim_session: Callable[..., tuple[Any | None, CycleResult | None]]
-    enforce_claim_retry_ceiling: Callable[..., CycleResult | None]
-    attempt_launch_context_claim: Callable[..., tuple[Any | None, CycleResult | None]]
-    mark_claimed_session_running: Callable[..., Any]
+    open_pending_claim_session: OpenPendingClaimSessionFn
+    enforce_claim_retry_ceiling: EnforceClaimRetryCeilingFn
+    attempt_launch_context_claim: AttemptLaunchContextClaimFn
+    mark_claimed_session_running: MarkClaimedSessionRunningFn
 
 
 def claim_launch_context(
@@ -208,9 +397,9 @@ def claim_launch_context(
     db: Any,
     prepared: Any,
     deps: ClaimLaunchDeps,
-    launch_context: Any,
+    launch_context: PreparedLaunchContext,
     slot_id: int,
-) -> tuple[Any | None, CycleResult | None]:
+) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
     pending_claim, cycle_result = deps.open_pending_claim_session(
         db=db,
