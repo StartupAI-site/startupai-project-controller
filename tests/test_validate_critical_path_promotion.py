@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 import startupai_controller.validate_critical_path_promotion as validator
-from startupai_controller.github_http import GitHubTransportError
+from startupai_controller.adapters.github_http_adapter import GitHubTransportError
 
 
 def _valid_payload() -> dict:
