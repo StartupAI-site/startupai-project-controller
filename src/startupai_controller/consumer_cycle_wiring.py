@@ -33,22 +33,35 @@ from startupai_controller.application.consumer.launch import (
     prepare_launch_candidate as _prepare_launch_candidate_use_case,
     resolve_launch_context_for_cycle as _resolve_launch_context_for_cycle_use_case,
 )
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
     PendingClaimContext,
     PrCreationOutcome,
+    PreparedCycleContext,
     PreparedLaunchContext,
     SelectedLaunchCandidate,
     SessionExecutionOutcome,
 )
 from startupai_controller.domain.models import (
+    ClaimReadyResult,
     CycleResult,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.process_runner import GhRunnerPort
+from startupai_controller.ports.ready_flow import (
+    BoardInfoResolverFn,
+    BoardStatusMutatorFn,
+    CommentCheckerFn,
+    CommentPosterFn,
+    GitHubRunnerFn,
+    StatusResolverFn,
+)
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.runtime.wiring import (
     build_gh_runner_port,
     build_process_runner_port,
@@ -332,19 +345,19 @@ def resolve_launch_context_for_cycle(
 
 def claim_launch_context(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     launch_context: PreparedLaunchContext,
     slot_id: int,
-    review_state_port: Any | None,
-    board_port: Any | None,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Any | None,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
+    status_resolver: StatusResolverFn | None,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | GhRunnerPort | None,
     open_pending_claim_session: Callable[
         ...,
         tuple[PendingClaimContext | None, CycleResult | None],
@@ -352,7 +365,7 @@ def claim_launch_context(
     enforce_claim_retry_ceiling: Callable[..., CycleResult | None],
     attempt_launch_context_claim: Callable[
         ...,
-        tuple[Any | None, CycleResult | None],
+        tuple[ClaimReadyResult | None, CycleResult | None],
     ],
     mark_claimed_session_running: Callable[..., ClaimedSessionContext],
 ) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
@@ -366,8 +379,8 @@ def claim_launch_context(
 
     def _enforce_claim_retry_ceiling(
         *,
-        config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
         cp_config: Any,
@@ -386,13 +399,13 @@ def claim_launch_context(
 
     def _attempt_launch_context_claim(
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
         slot_id: int,
-    ) -> tuple[Any | None, CycleResult | None]:
+    ) -> tuple[ClaimReadyResult | None, CycleResult | None]:
         return attempt_launch_context_claim(
             config=config,
             db=db,
@@ -410,8 +423,8 @@ def claim_launch_context(
 
     def _mark_claimed_session_running(
         *,
-        config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
         slot_id: int,

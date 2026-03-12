@@ -56,6 +56,7 @@ from startupai_controller.control_plane_runtime import (
 )
 from startupai_controller.domain.launch_policy import reconcile_in_progress_decision
 from startupai_controller.domain.models import (
+    ClaimReadyResult,
     CycleResult,
     ReviewQueueDrainSummary,
 )
@@ -66,6 +67,14 @@ from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
+from startupai_controller.ports.ready_flow import (
+    BoardInfoResolverFn,
+    BoardStatusMutatorFn,
+    CommentCheckerFn,
+    CommentPosterFn,
+    GitHubRunnerFn,
+    StatusResolverFn,
+)
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.runtime.wiring import (
     GitHubRuntimeMemo as CycleGitHubMemo,
@@ -314,14 +323,14 @@ def block_prelaunch_issue(
 
 def select_launch_candidate_for_cycle(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     target_issue: str | None,
-    review_state_port: Any | None = None,
-    status_resolver: Callable[..., str] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[Any | None, Any | None]:
+    review_state_port: ReviewStatePort | None = None,
+    status_resolver: StatusResolverFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]:
     """Select a launch candidate and validate its immediate launchability."""
     return _selection_retry_wiring.select_launch_candidate_for_cycle(
         config=config,
@@ -350,17 +359,17 @@ def select_launch_candidate_for_cycle(
 
 def prepare_selected_launch_candidate(
     *,
-    selected_candidate: Any,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    selected_candidate: SelectedLaunchCandidate,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     subprocess_runner: Callable[..., Any] | None,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    pr_port: Any | None = None,
-) -> tuple[Any | None, Any | None]:
+    status_resolver: StatusResolverFn | None,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+    pr_port: PullRequestPort | None = None,
+) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Prepare the selected candidate into launch-ready local context."""
     return _claim_wiring.prepare_selected_launch_candidate(
         selected_candidate=selected_candidate,
@@ -389,9 +398,9 @@ def handle_selected_launch_query_error(
     *,
     candidate: str,
     err: Exception,
-    config: Any,
-    db: Any,
-) -> tuple[None, Any]:
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+) -> tuple[None, CycleResult]:
     """Handle GitHub/query failures during selected launch preparation."""
     return _claim_wiring.handle_selected_launch_query_error(
         candidate=candidate,
@@ -400,7 +409,7 @@ def handle_selected_launch_query_error(
         db=db,
         record_metric=_support_wiring.record_metric,
         maybe_activate_claim_suppression=cast(
-            Callable[..., None],
+            _claim_wiring.MaybeActivateClaimSuppressionFn,
             _support_wiring.maybe_activate_claim_suppression,
         ),
         mark_degraded=_mark_degraded,
@@ -413,13 +422,13 @@ def handle_selected_launch_workflow_config_error(
     *,
     candidate: str,
     err: Exception,
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     cp_config: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[None, Any]:
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[None, CycleResult]:
     """Handle invalid workflow configuration during launch preparation."""
     return _claim_wiring.handle_selected_launch_workflow_config_error(
         candidate=candidate,
@@ -440,9 +449,9 @@ def handle_selected_launch_worktree_error(
     *,
     candidate: str,
     err: Exception,
-    config: Any,
-    db: Any,
-) -> tuple[None, Any]:
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+) -> tuple[None, CycleResult]:
     """Handle worktree preparation failures for a selected launch candidate."""
     return _claim_wiring.handle_selected_launch_worktree_error(
         candidate=candidate,
@@ -457,14 +466,14 @@ def handle_selected_launch_worktree_error(
 def handle_selected_launch_runtime_error(
     *,
     candidate: str,
-    err: Exception,
-    config: Any,
-    db: Any,
+    err: RuntimeError,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     cp_config: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[None, Any]:
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[None, CycleResult]:
     """Handle workflow-hook runtime failures during launch preparation."""
     return _claim_wiring.handle_selected_launch_runtime_error(
         candidate=candidate,
@@ -483,20 +492,20 @@ def handle_selected_launch_runtime_error(
 
 def resolve_launch_context_for_cycle(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any | None,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext | None,
     target_issue: str | None,
     dry_run: bool,
-    status_resolver: Callable[..., str] | None,
+    status_resolver: StatusResolverFn | None,
     subprocess_runner: Callable[..., Any] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    review_state_port: Any | None = None,
-    pr_port: Any | None = None,
-) -> tuple[Any | None, Any | None]:
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+    review_state_port: ReviewStatePort | None = None,
+    pr_port: PullRequestPort | None = None,
+) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
     return _cycle_wiring.resolve_launch_context_for_cycle(
         config=config,
@@ -520,18 +529,21 @@ def resolve_launch_context_for_cycle(
 
 def open_pending_claim_session(
     *,
-    db: Any,
-    launch_context: Any,
+    db: ConsumerRuntimeStatePort,
+    launch_context: PreparedLaunchContext,
     executor: str,
     slot_id: int,
-) -> tuple[Any | None, Any | None]:
+) -> tuple[PendingClaimContext | None, CycleResult | None]:
     """Create the session record and acquire the lease for a launch-ready issue."""
     return _claim_wiring.open_pending_claim_session(
         db=db,
         launch_context=launch_context,
         executor=executor,
         slot_id=slot_id,
-        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
+        complete_session=cast(
+            _claim_wiring.CompleteSessionFn,
+            _support_wiring.complete_session,
+        ),
         pending_claim_context_factory=PendingClaimContext,
         cycle_result_factory=CycleResult,
     )
@@ -539,16 +551,16 @@ def open_pending_claim_session(
 
 def enforce_claim_retry_ceiling(
     *,
-    config: Any,
-    db: Any,
-    launch_context: Any,
-    pending_claim: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    launch_context: PreparedLaunchContext,
+    pending_claim: PendingClaimContext,
     cp_config: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> Any | None:
+    board_info_resolver: BoardInfoResolverFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> CycleResult | None:
     """Abort and escalate if the issue already exhausted its retry ceiling."""
     return _claim_wiring.enforce_claim_retry_ceiling(
         config=config,
@@ -560,7 +572,10 @@ def enforce_claim_retry_ceiling(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
+        complete_session=cast(
+            _claim_wiring.CompleteSessionFn,
+            _support_wiring.complete_session,
+        ),
         escalate_to_claude=_board_state_helpers.escalate_to_claude_from_shell,
         cycle_result_factory=CycleResult,
         logger=logger,
@@ -569,19 +584,19 @@ def enforce_claim_retry_ceiling(
 
 def attempt_launch_context_claim(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any,
-    pending_claim: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    pending_claim: PendingClaimContext,
     slot_id: int,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[Any | None, Any | None]:
+    status_resolver: StatusResolverFn | None,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[ClaimReadyResult | None, CycleResult | None]:
     """Claim board ownership for a launch-ready issue."""
     return _claim_wiring.attempt_launch_context_claim(
         config=config,
@@ -608,15 +623,15 @@ def attempt_launch_context_claim(
 def claim_launch_ready_issue(
     candidate: str,
     *,
-    config: Any,
-    prepared: Any,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> Any:
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    status_resolver: StatusResolverFn | None,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> ClaimReadyResult:
     """Execute the actual board claim for a launch-ready issue."""
     return _claim_wiring.claim_launch_ready_issue(
         candidate,
@@ -636,10 +651,10 @@ def handle_launch_claim_api_failure(
     candidate: str,
     err: Exception,
     *,
-    config: Any,
-    db: Any,
-    pending_claim: Any,
-) -> tuple[None, Any]:
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
     """Handle a GitHub/API failure while claiming a launch-ready issue."""
     return _claim_wiring.handle_launch_claim_api_failure(
         candidate,
@@ -648,12 +663,15 @@ def handle_launch_claim_api_failure(
         db=db,
         pending_claim=pending_claim,
         maybe_activate_claim_suppression=cast(
-            Callable[..., None],
+            _claim_wiring.MaybeActivateClaimSuppressionFn,
             _support_wiring.maybe_activate_claim_suppression,
         ),
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
-        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
+        complete_session=cast(
+            _claim_wiring.CompleteSessionFn,
+            _support_wiring.complete_session,
+        ),
         record_metric=_support_wiring.record_metric,
         cycle_result_factory=CycleResult,
         logger=logger,
@@ -664,10 +682,10 @@ def handle_launch_claim_unexpected_failure(
     candidate: str,
     err: Exception,
     *,
-    config: Any,
-    db: Any,
-    pending_claim: Any,
-) -> tuple[None, Any]:
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
     """Handle an unexpected local failure while claiming a launch-ready issue."""
     return _claim_wiring.handle_launch_claim_unexpected_failure(
         candidate,
@@ -675,7 +693,10 @@ def handle_launch_claim_unexpected_failure(
         config=config,
         db=db,
         pending_claim=pending_claim,
-        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
+        complete_session=cast(
+            _claim_wiring.CompleteSessionFn,
+            _support_wiring.complete_session,
+        ),
         record_metric=_support_wiring.record_metric,
         cycle_result_factory=CycleResult,
         logger=logger,
@@ -684,12 +705,12 @@ def handle_launch_claim_unexpected_failure(
 
 def handle_launch_claim_rejection(
     candidate: str,
-    claim_result: Any,
+    claim_result: ClaimReadyResult,
     *,
-    config: Any,
-    db: Any,
-    pending_claim: Any,
-) -> tuple[None, Any]:
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    pending_claim: PendingClaimContext,
+) -> tuple[None, CycleResult]:
     """Handle a non-exception claim rejection for a launch-ready issue."""
     return _claim_wiring.handle_launch_claim_rejection(
         candidate,
@@ -697,7 +718,10 @@ def handle_launch_claim_rejection(
         config=config,
         db=db,
         pending_claim=pending_claim,
-        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
+        complete_session=cast(
+            _claim_wiring.CompleteSessionFn,
+            _support_wiring.complete_session,
+        ),
         record_metric=_support_wiring.record_metric,
         cycle_result_factory=CycleResult,
     )
@@ -705,16 +729,16 @@ def handle_launch_claim_rejection(
 
 def mark_claimed_session_running(
     *,
-    config: Any,
-    db: Any,
-    launch_context: Any,
-    pending_claim: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    launch_context: PreparedLaunchContext,
+    pending_claim: PendingClaimContext,
     slot_id: int,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
     cp_config: Any,
-    gh_runner: Callable[..., str] | None,
-) -> Any:
+    gh_runner: GitHubRunnerFn | None,
+) -> ClaimedSessionContext:
     """Persist the durable-start state and post the claim marker."""
     return _claim_wiring.mark_claimed_session_running(
         config=config,
@@ -736,20 +760,20 @@ def mark_claimed_session_running(
 
 def claim_launch_context(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
     slot_id: int,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[Any | None, Any | None]:
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    status_resolver: StatusResolverFn | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    comment_checker: CommentCheckerFn | None = None,
+    comment_poster: CommentPosterFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
+) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
     return _cycle_wiring.claim_launch_context(
         config=config,
