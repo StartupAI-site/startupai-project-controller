@@ -6,6 +6,12 @@ from dataclasses import dataclass
 import time
 from typing import Any, Callable, Protocol
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_workflow import (
+    WorkflowDefinition,
+    WorkflowRepoStatus,
+)
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
@@ -14,23 +20,48 @@ from startupai_controller.ports.control_plane_state import ControlPlaneStatePort
 from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.service_control import ServiceControlPort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+
+class TickArgs(Protocol):
+    """Minimal CLI/runtime args surface consumed by the control-plane tick."""
+
+    dry_run: bool
 
 
 class GitHubBundle(Protocol):
     """Minimal GitHub bundle surface consumed by the control-plane tick."""
 
     pull_requests: PullRequestPort
-    github_memo: Any
+    github_memo: object
+
+
+class ControlPlaneHealthSummaryFn(Protocol):
+    """Classify the control-plane health summary for one tick."""
+
+    def __call__(
+        self,
+        control_state: dict[str, str],
+        *,
+        deferred_action_count: int,
+        oldest_deferred_action_age_seconds: float | None,
+        poll_interval_seconds: int,
+    ) -> dict[str, str]: ...
 
 
 @dataclass(frozen=True)
 class TickDeps:
     """Injected seams for control-plane tick orchestration."""
 
-    load_config: Callable[..., Any]
-    load_automation_config: Callable[..., Any]
-    apply_automation_runtime: Callable[..., None]
-    current_main_workflows: Callable[..., tuple[Any, dict[str, Any], int]]
+    load_config: Callable[[Any], CriticalPathConfig]
+    load_automation_config: Callable[[Any], BoardAutomationConfig]
+    apply_automation_runtime: Callable[
+        [ConsumerConfig, BoardAutomationConfig | None], None
+    ]
+    current_main_workflows: Callable[
+        [ConsumerConfig],
+        tuple[dict[str, WorkflowDefinition], dict[str, WorkflowRepoStatus], int],
+    ]
     build_github_port_bundle: Callable[..., GitHubBundle]
     ready_flow_port: ReadyFlowPort
     replay_deferred_actions: Callable[..., tuple[int, ...]]
@@ -43,7 +74,7 @@ class TickDeps:
     record_successful_board_sync: Callable[[ControlPlaneStatePort], None]
     clear_degraded: Callable[[ControlPlaneStatePort], None]
     mark_degraded: Callable[[ControlPlaneStatePort, str], None]
-    control_plane_health_summary: Callable[..., dict[str, Any]]
+    control_plane_health_summary: ControlPlaneHealthSummaryFn
     runtime_gh_reason_code: Callable[[Exception], str]
     service_control_port: ServiceControlPort
     gh_query_error_type: type[Exception]
@@ -51,8 +82,8 @@ class TickDeps:
 
 def run_tick(
     *,
-    args: Any,
-    config: Any,
+    args: TickArgs,
+    config: ConsumerConfig,
     db: ControlPlaneStatePort,
     finalize_payload: Callable[[dict[str, object]], dict[str, object]],
     deps: TickDeps,
