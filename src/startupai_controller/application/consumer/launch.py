@@ -5,20 +5,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
     PendingClaimContext,
+    PreparedCycleContext,
     PreparedLaunchContext,
     SelectedLaunchCandidate,
 )
-from startupai_controller.domain.models import CycleResult
+from startupai_controller.consumer_workflow import WorkflowDefinition
+from startupai_controller.domain.models import (
+    ClaimReadyResult,
+    CycleBoardSnapshot,
+    CycleResult,
+    IssueSnapshot,
+)
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 
 class SelectLaunchCandidateForCycleFn(Protocol):
@@ -27,9 +38,9 @@ class SelectLaunchCandidateForCycleFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
         target_issue: str | None,
     ) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]: ...
 
@@ -41,9 +52,9 @@ class PrepareSelectedLaunchCandidateFn(Protocol):
         self,
         *,
         selected_candidate: SelectedLaunchCandidate,
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
     ) -> tuple[PreparedLaunchContext | None, CycleResult | None]: ...
 
 
@@ -54,11 +65,13 @@ class ResolveLaunchCandidateMetadataFn(Protocol):
         self,
         issue_ref: str,
         *,
-        cp_config: Any,
-        auto_config: Any,
-        board_snapshot: Any,
+        cp_config: CriticalPathConfig,
+        auto_config: BoardAutomationConfig | None,
+        board_snapshot: CycleBoardSnapshot,
         pr_port: PullRequestPort,
-    ) -> tuple[str, str, str, int, Any | None, str, str | None, str | None]: ...
+    ) -> tuple[
+        str, str, str, int, IssueSnapshot | None, str, str | None, str | None
+    ]: ...
 
 
 class ResolveLaunchIssueContextFn(Protocol):
@@ -71,9 +84,9 @@ class ResolveLaunchIssueContextFn(Protocol):
         owner: str,
         repo: str,
         number: int,
-        snapshot: Any | None,
-        config: Any,
-        db: Any,
+        snapshot: IssueSnapshot | None,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
         issue_context_port: IssueContextPort,
     ) -> tuple[dict[str, Any], str]: ...
 
@@ -88,9 +101,9 @@ class SetupLaunchWorktreeFn(Protocol):
         session_kind: str,
         repair_branch_name: str | None,
         *,
-        config: Any,
-        cp_config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        cp_config: CriticalPathConfig,
+        db: ConsumerRuntimeStatePort,
         session_store: SessionStorePort,
         worktree_port: WorktreePort,
         subprocess_runner: Callable[..., Any] | None = None,
@@ -105,9 +118,9 @@ class ResolveLaunchRuntimeFn(Protocol):
         candidate_prefix: str,
         worktree_path: str,
         *,
-        config: Any,
-        prepared: Any,
-    ) -> tuple[Any, Any]: ...
+        config: ConsumerConfig,
+        prepared: PreparedCycleContext,
+    ) -> tuple[WorkflowDefinition, ConsumerConfig]: ...
 
 
 class RunLaunchWorkspaceHooksFn(Protocol):
@@ -115,7 +128,7 @@ class RunLaunchWorkspaceHooksFn(Protocol):
 
     def __call__(
         self,
-        workflow_definition: Any,
+        workflow_definition: WorkflowDefinition,
         *,
         worktree_path: str,
         issue_ref: str,
@@ -143,8 +156,8 @@ class AssemblePreparedLaunchContextFn(Protocol):
         repair_branch_name: str | None,
         worktree_path: str,
         branch_name: str,
-        workflow_definition: Any,
-        effective_consumer_config: Any,
+        workflow_definition: WorkflowDefinition,
+        effective_consumer_config: ConsumerConfig,
         dependency_summary: str,
         branch_reconcile_state: str | None,
         branch_reconcile_error: str | None,
@@ -157,7 +170,7 @@ class OpenPendingClaimSessionFn(Protocol):
     def __call__(
         self,
         *,
-        db: Any,
+        db: ConsumerRuntimeStatePort,
         launch_context: PreparedLaunchContext,
         executor: str,
         slot_id: int,
@@ -170,11 +183,11 @@ class EnforceClaimRetryCeilingFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
-        cp_config: Any,
+        cp_config: CriticalPathConfig,
     ) -> CycleResult | None: ...
 
 
@@ -184,13 +197,13 @@ class AttemptLaunchContextClaimFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
         slot_id: int,
-    ) -> tuple[Any | None, CycleResult | None]: ...
+    ) -> tuple[ClaimReadyResult | None, CycleResult | None]: ...
 
 
 class MarkClaimedSessionRunningFn(Protocol):
@@ -199,12 +212,12 @@ class MarkClaimedSessionRunningFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
         slot_id: int,
-        cp_config: Any,
+        cp_config: CriticalPathConfig,
     ) -> ClaimedSessionContext: ...
 
 
@@ -231,9 +244,9 @@ class PrepareLaunchDeps:
 
 def resolve_launch_context_for_cycle(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     deps: ResolveLaunchDeps,
     launch_context: PreparedLaunchContext | None,
     target_issue: str | None,
@@ -274,9 +287,9 @@ def resolve_launch_context_for_cycle(
 def prepare_launch_candidate(
     issue_ref: str,
     *,
-    config: Any,
-    prepared: Any,
-    db: Any,
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    db: ConsumerRuntimeStatePort,
     deps: PrepareLaunchDeps,
     subprocess_runner: ProcessRunnerPort | None = None,
     review_state_port: ReviewStatePort | None = None,
@@ -393,9 +406,9 @@ class ClaimLaunchDeps:
 
 def claim_launch_context(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     deps: ClaimLaunchDeps,
     launch_context: PreparedLaunchContext,
     slot_id: int,
