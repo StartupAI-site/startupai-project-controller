@@ -681,6 +681,25 @@ def execute_claimed_session(
             return cast(GhRunnerPort, gh_runner).run_gh
         return cast(Callable[..., str], gh_runner)
 
+    gh_runner_fn = _gh_runner_callable(gh_runner)
+    github_bundle = (
+        None
+        if pr_port is not None and board_port is not None
+        else build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=prepared.cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner_fn,
+        )
+    )
+    effective_pr_port = pr_port or (
+        github_bundle.pull_requests if github_bundle is not None else None
+    )
+    effective_board_port = board_port or (
+        github_bundle.board_mutations if github_bundle is not None else None
+    )
+
     def _create_pr_for_execution_result(
         *,
         config: Any,
@@ -726,10 +745,10 @@ def execute_claimed_session(
             pr_url=pr_url,
             session_status=session_status,
             review_state_port=review_state_port,
-            board_port=board_port,
+            board_port=effective_board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
-            gh_runner=_gh_runner_callable(gh_runner),
+            gh_runner=gh_runner_fn,
         )
 
     def _handle_non_review_execution_outcome(
@@ -755,15 +774,15 @@ def execute_claimed_session(
             session_status=session_status,
             codex_result=codex_result,
             has_commits=has_commits,
-            pr_port=cast(PullRequestPort | None, pr_port),
-            board_port=cast(BoardMutationPort | None, board_port),
+            pr_port=cast(PullRequestPort | None, effective_pr_port),
+            board_port=cast(BoardMutationPort | None, effective_board_port),
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_poster=comment_poster,
             subprocess_runner=(
                 process_runner.run if process_runner is not None else None
             ),
-            gh_runner=_gh_runner_callable(gh_runner),
+            gh_runner=gh_runner_fn,
         )
 
     return _execute_claimed_session_use_case(
@@ -787,8 +806,8 @@ def execute_claimed_session(
         process_runner=process_runner,
         file_reader=file_reader,
         review_state_port=review_state_port,
-        board_port=board_port,
-        pr_port=pr_port,
+        board_port=effective_board_port,
+        pr_port=effective_pr_port,
     )
 
 
