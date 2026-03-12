@@ -9,6 +9,9 @@ from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
 )
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 
 
@@ -128,9 +131,9 @@ def reconcile_board_truth(
     *,
     deps: ReconciliationDeps,
     session_store: SessionStorePort,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     dry_run: bool = False,
     board_snapshot: CycleBoardSnapshot | None = None,
 ) -> ReconciliationResult:

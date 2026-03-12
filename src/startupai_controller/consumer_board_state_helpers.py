@@ -13,7 +13,13 @@ from startupai_controller import (
 import startupai_controller.consumer_resolution_helpers as _resolution_helpers
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.domain.repair_policy import marker_for as _marker_for
-from startupai_controller.ports.session_store import SessionUpdateFields
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import (
+    SessionStorePort,
+    SessionUpdateFields,
+)
 from startupai_controller.runtime.wiring import build_github_port_bundle
 from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
@@ -29,8 +35,8 @@ def transition_issue_to_review(
     project_owner: str,
     project_number: int,
     *,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -61,8 +67,8 @@ def transition_issue_to_in_progress(
     *,
     build_github_port_bundle: Callable[..., Any],
     from_statuses: set[str] | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move an actively running local repair back into In Progress."""
@@ -98,8 +104,8 @@ def return_issue_to_ready(
     *,
     build_github_port_bundle: Callable[..., Any],
     from_statuses: set[str] | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
@@ -132,8 +138,8 @@ def reconcile_active_repair_review_items(
     critical_path_config: Any,
     *,
     active_repair_issue_refs: set[str],
-    review_state_port: Any,
-    board_port: Any,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
     dry_run: bool,
@@ -177,10 +183,10 @@ def reconcile_single_in_progress_item(
     consumer_config: Any,
     critical_path_config: Any,
     automation_config: Any,
-    store: Any,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     dry_run: bool,
     resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
     classify_open_pr_candidates: Callable[..., tuple[str, Any | None, str]],
@@ -266,10 +272,10 @@ def reconcile_stale_in_progress_items(
     critical_path_config: Any,
     automation_config: Any,
     *,
-    store: Any,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
     active_issue_refs: set[str],

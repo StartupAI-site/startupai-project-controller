@@ -18,6 +18,9 @@ from startupai_controller.application.consumer.preflight import (
     reconcile_board_truth as _reconcile_board_truth_use_case,
 )
 from startupai_controller.domain.models import IssueSnapshot
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 
 # ---------------------------------------------------------------------------
@@ -62,8 +65,8 @@ def reconcile_active_repair_review_items(
     *,
     deps: ReconciliationWiringDeps,
     active_repair_issue_refs: set[str],
-    review_state_port: Any,
-    board_port: Any,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
     dry_run: bool,
@@ -89,10 +92,10 @@ def reconcile_single_in_progress_item(
     consumer_config: Any,
     critical_path_config: Any,
     automation_config: Any,
-    store: Any,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     dry_run: bool,
 ) -> str:
     """Reconcile one stale In Progress item and return its target lane."""
@@ -121,10 +124,10 @@ def reconcile_stale_in_progress_items(
     automation_config: Any,
     *,
     deps: ReconciliationWiringDeps,
-    store: Any,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
     active_issue_refs: set[str],
@@ -186,9 +189,9 @@ def wire_reconcile_board_truth(
     *,
     deps: ReconciliationWiringDeps,
     session_store: SessionStorePort | None = None,
-    pr_port: Any | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     dry_run: bool = False,
     board_snapshot: Any | None = None,
 ) -> ReconciliationResult:
@@ -254,6 +257,9 @@ def wire_reconcile_board_truth(
         )
 
     assert session_store is not None
+    assert pr_port is not None
+    assert review_state_port is not None
+    assert board_port is not None
 
     return _reconcile_board_truth_use_case(
         consumer_config,

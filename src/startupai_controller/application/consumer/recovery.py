@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
+
 
 @dataclass(frozen=True)
 class RecoveryDeps:
@@ -27,9 +31,9 @@ def recover_interrupted_sessions(
     cp_config: Any,
     deps: RecoveryDeps,
     automation_config: Any | None = None,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     log_error: Callable[[str, Exception], None] | None = None,
 ) -> list[Any]:
     """Recover leases left behind by a previous interrupted daemon process."""
