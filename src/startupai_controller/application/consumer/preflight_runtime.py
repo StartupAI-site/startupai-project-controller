@@ -20,6 +20,7 @@ from startupai_controller.domain.models import (
     ReviewQueueDrainSummary,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.ready_flow import ReadyFlowPort
@@ -162,7 +163,7 @@ def initialize_cycle_runtime(
 
 def run_deferred_replay_phase(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
@@ -204,7 +205,7 @@ def load_board_snapshot_phase(
 
 def run_executor_routing_phase(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
@@ -235,7 +236,7 @@ def run_executor_routing_phase(
 
 def run_reconciliation_phase(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
@@ -270,7 +271,7 @@ def run_reconciliation_phase(
 
 def run_review_queue_phase(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
@@ -318,7 +319,7 @@ def run_review_queue_phase(
 
 def run_admission_phase(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
@@ -369,7 +370,7 @@ def run_admission_phase(
 
 def prepare_cycle(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     *,
     deps: PrepareCycleDeps,
     prepared_cycle_context_factory: Callable[..., Any],
