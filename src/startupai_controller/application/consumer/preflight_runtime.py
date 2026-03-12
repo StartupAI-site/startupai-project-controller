@@ -11,10 +11,22 @@ dependencies and delegate here.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Protocol
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_types import (
+    GitHubRuntimeMemo,
+    PreparedCycleContext,
+)
+from startupai_controller.consumer_workflow import (
+    WorkflowDefinition,
+    WorkflowRepoStatus,
+)
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
@@ -26,6 +38,63 @@ from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    IssueRef,
+)
+
+
+class CurrentMainWorkflowsFn(Protocol):
+    """Load canonical workflow definitions and statuses for one cycle."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+    ) -> tuple[dict[str, WorkflowDefinition], dict[str, WorkflowRepoStatus], int]:
+        """Return workflows, statuses, and effective poll interval."""
+        ...
+
+
+class ReconcileBoardTruthResult(Protocol):
+    """Board-truth reconciliation summary needed by preflight runtime."""
+
+    moved_ready: tuple[str, ...]
+    moved_in_progress: tuple[str, ...]
+    moved_review: tuple[str, ...]
+    moved_blocked: tuple[str, ...]
+
+
+class GitHubRequestStatsView(Protocol):
+    """Runtime GitHub request counters emitted at the end of preflight."""
+
+    graphql: int
+    rest: int
+
+
+class ExecutePrepareCyclePhasesResult(Protocol):
+    """Prepared phase execution result consumed by preflight runtime."""
+
+    board_snapshot: CycleBoardSnapshot
+    review_queue_summary: ReviewQueueDrainSummary
+    admission_summary: dict[str, Any]
+    timings_ms: dict[str, int]
+
+
+class ExecutePrepareCyclePhasesFn(Protocol):
+    """Run the preflight phases for one cycle."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        *,
+        runtime: CycleRuntimeContext,
+        deps: Any,
+        dry_run: bool = False,
+    ) -> ExecutePrepareCyclePhasesResult:
+        """Return board snapshot, review queue, admission, and timing results."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Cycle runtime context (moved from board_consumer.py)
@@ -37,14 +106,14 @@ class CycleRuntimeContext:
     """Cycle-scoped runtime wiring and configuration."""
 
     session_store: SessionStorePort
-    cp_config: Any  # CriticalPathConfig
-    auto_config: Any  # BoardAutomationConfig | None
-    main_workflows: dict[str, Any]
-    workflow_statuses: dict[str, Any]
+    cp_config: CriticalPathConfig
+    auto_config: BoardAutomationConfig | None
+    main_workflows: dict[str, WorkflowDefinition]
+    workflow_statuses: dict[str, WorkflowRepoStatus]
     dispatchable_repo_prefixes: tuple[str, ...]
     effective_interval: int
     global_limit: int
-    github_memo: Any  # CycleGitHubMemo
+    github_memo: GitHubRuntimeMemo
     ready_flow_port: ReadyFlowPort
     pr_port: PullRequestPort
     review_state_port: ReviewStatePort
@@ -61,11 +130,13 @@ class CycleRuntimeContext:
 class InitializeCycleRuntimeDeps:
     """Injected seams for building cycle-scoped runtime context."""
 
-    load_automation_config: Callable[[Any], Any]
-    apply_automation_runtime: Callable[..., None]
-    current_main_workflows: Callable[..., tuple[dict, dict, int]]
+    load_automation_config: Callable[[Path], BoardAutomationConfig]
+    apply_automation_runtime: Callable[
+        [ConsumerConfig, BoardAutomationConfig | None], None
+    ]
+    current_main_workflows: CurrentMainWorkflowsFn
     config_error_type: type[Exception]
-    logger: Any
+    logger: logging.Logger
 
 
 @dataclass(frozen=True)
@@ -77,13 +148,13 @@ class PhaseHelperDeps:
         ...,
         tuple[ReviewQueueDrainSummary, CycleBoardSnapshot],
     ]
-    reconcile_board_truth: Callable[..., Any]
-    record_successful_github_mutation: Callable[[Any], None]
-    record_successful_board_sync: Callable[[Any], None]
-    clear_degraded: Callable[[Any], None]
-    mark_degraded: Callable[[Any, str], None]
+    reconcile_board_truth: Callable[..., ReconcileBoardTruthResult]
+    record_successful_github_mutation: Callable[[ConsumerRuntimeStatePort], None]
+    record_successful_board_sync: Callable[[ConsumerRuntimeStatePort], None]
+    clear_degraded: Callable[[ConsumerRuntimeStatePort], None]
+    mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None]
     persist_admission_summary: Callable[..., None]
-    logger: Any
+    logger: logging.Logger
 
 
 @dataclass(frozen=True)
@@ -92,14 +163,14 @@ class PrepareCycleDeps:
 
     initialize_cycle_runtime: Callable[..., CycleRuntimeContext]
     phase_helper_deps: PhaseHelperDeps
-    begin_runtime_request_stats: Callable[[], Any]
-    end_runtime_request_stats: Callable[[Any], Any]
-    snapshot_to_issue_ref: Callable[[str, dict], str | None]
-    parse_issue_ref: Callable[[str], Any]
+    begin_runtime_request_stats: Callable[[], object]
+    end_runtime_request_stats: Callable[[object], GitHubRequestStatsView]
+    snapshot_to_issue_ref: Callable[[str, dict[str, str]], str | None]
+    parse_issue_ref: Callable[[str], IssueRef]
     record_metric: Callable[..., None]
     control_key_degraded: str
     prepare_cycle_phases_deps_factory: Callable[..., Any]
-    execute_prepare_cycle_phases: Callable[..., Any]
+    execute_prepare_cycle_phases: ExecutePrepareCyclePhasesFn
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +179,12 @@ class PrepareCycleDeps:
 
 
 def initialize_cycle_runtime(
-    config: Any,
+    config: ConsumerConfig,
     *,
     deps: InitializeCycleRuntimeDeps,
     session_store: SessionStorePort,
-    cp_config: Any,
-    github_memo: Any,
+    cp_config: CriticalPathConfig,
+    github_memo: GitHubRuntimeMemo,
     ready_flow_port: ReadyFlowPort,
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
@@ -162,7 +233,7 @@ def initialize_cycle_runtime(
 
 
 def run_deferred_replay_phase(
-    config: Any,
+    config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
@@ -191,7 +262,7 @@ def run_deferred_replay_phase(
 
 
 def load_board_snapshot_phase(
-    config: Any,
+    config: ConsumerConfig,
     runtime: CycleRuntimeContext,
     *,
     timings_ms: dict[str, int],
@@ -204,7 +275,7 @@ def load_board_snapshot_phase(
 
 
 def run_executor_routing_phase(
-    config: Any,
+    config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
@@ -235,12 +306,12 @@ def run_executor_routing_phase(
 
 
 def run_reconciliation_phase(
-    config: Any,
+    config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
-    board_snapshot: Any,
+    board_snapshot: CycleBoardSnapshot,
     timings_ms: dict[str, int],
 ) -> None:
     """Run truthful board reconciliation for the cycle."""
@@ -270,15 +341,15 @@ def run_reconciliation_phase(
 
 
 def run_review_queue_phase(
-    config: Any,
+    config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
-    board_snapshot: Any,
+    board_snapshot: CycleBoardSnapshot,
     timings_ms: dict[str, int],
     dry_run: bool,
-) -> tuple[Any, Any]:
+) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
     """Drain the review queue for the current cycle."""
     phase_started = time.monotonic()
     review_queue_summary, updated_snapshot = deps.drain_review_queue(
@@ -318,12 +389,12 @@ def run_review_queue_phase(
 
 
 def run_admission_phase(
-    config: Any,
+    config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
-    board_snapshot: Any,
+    board_snapshot: CycleBoardSnapshot,
     timings_ms: dict[str, int],
     dry_run: bool,
 ) -> dict[str, Any]:
@@ -369,14 +440,14 @@ def run_admission_phase(
 
 
 def prepare_cycle(
-    config: Any,
+    config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     *,
     deps: PrepareCycleDeps,
-    prepared_cycle_context_factory: Callable[..., Any],
+    prepared_cycle_context_factory: type[PreparedCycleContext],
     dry_run: bool = False,
     gh_runner: GhRunnerPort | None = None,
-) -> Any:
+) -> PreparedCycleContext:
     """Run control-plane preflight once for a daemon tick."""
     request_stats_token = deps.begin_runtime_request_stats()
     expired = db.expire_stale_leases(config.heartbeat_expiry_seconds)
