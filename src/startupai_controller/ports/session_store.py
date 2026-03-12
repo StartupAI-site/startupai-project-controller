@@ -7,9 +7,36 @@ Returns domain types from domain/models.py.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Protocol, TypedDict
 
 from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
+
+
+class SessionUpdateFields(TypedDict, total=False):
+    """Typed session fields accepted by the canonical persistence port."""
+
+    repo_prefix: str | None
+    worktree_path: str | None
+    branch_name: str | None
+    status: str
+    slot_id: int | None
+    phase: str | None
+    started_at: str | None
+    completed_at: str | None
+    outcome_json: str | None
+    failure_reason: str | None
+    retry_count: int
+    pr_url: str | None
+    provenance_id: str | None
+    session_kind: str
+    repair_pr_url: str | None
+    branch_reconcile_state: str | None
+    branch_reconcile_error: str | None
+    resolution_kind: str | None
+    verification_class: str | None
+    resolution_evidence_json: str | None
+    resolution_action: str | None
+    done_reason: str | None
 
 
 class SessionStorePort(Protocol):
@@ -99,6 +126,10 @@ class SessionStorePort(Protocol):
         """Return the most recent session that used a worktree path."""
         ...
 
-    def update_session(self, session_id: str, **fields: Any) -> None:
+    def update_session(
+        self,
+        session_id: str,
+        fields: SessionUpdateFields,
+    ) -> None:
         """Update session fields by session_id."""
         ...

@@ -1,15 +1,14 @@
-"""GitHub HTTP adapter — wraps github_http.py for HTTP transport.
+"""GitHub HTTP adapter facade for the canonical transport implementation.
 
-Thin re-export layer for the HTTP transport path. The existing
-github_http.py module is already well-isolated; this adapter provides
-a consistent import path within the adapters/ package.
+Thin re-export layer for the canonical adapter implementation in
+``github_http_transport.py``. The legacy top-level ``github_http.py`` module is
+now only a deprecated compatibility facade.
 """
 
 from __future__ import annotations
 
-# Re-export the public interface from github_http for adapter consumers.
-# The actual implementation stays in github_http.py.
-from startupai_controller.github_http import (  # noqa: F401
+# Re-export the public interface for adapter consumers.
+from startupai_controller.adapters.github_http_transport import (  # noqa: F401
     GitHubTransportError,
     begin_request_stats,
     end_request_stats,

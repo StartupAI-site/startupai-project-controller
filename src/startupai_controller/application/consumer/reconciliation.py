@@ -18,6 +18,7 @@ from startupai_controller.application.consumer.preflight import (
     reconcile_board_truth as _reconcile_board_truth_use_case,
 )
 from startupai_controller.domain.models import IssueSnapshot
+from startupai_controller.ports.session_store import SessionStorePort
 
 # ---------------------------------------------------------------------------
 # Wiring deps
@@ -184,7 +185,7 @@ def wire_reconcile_board_truth(
     db: Any,
     *,
     deps: ReconciliationWiringDeps,
-    session_store: Any | None = None,
+    session_store: SessionStorePort | None = None,
     pr_port: Any | None = None,
     review_state_port: Any | None = None,
     board_port: Any | None = None,
@@ -251,6 +252,8 @@ def wire_reconcile_board_truth(
             active_issue_refs=active_issue_refs,
             dry_run=dry_run,
         )
+
+    assert session_store is not None
 
     return _reconcile_board_truth_use_case(
         consumer_config,

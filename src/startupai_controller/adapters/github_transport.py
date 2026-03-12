@@ -6,8 +6,11 @@ import subprocess
 import time
 from collections.abc import Callable, Sequence
 
+from startupai_controller.adapters.github_http_adapter import (
+    GitHubTransportError,
+    run_github_command,
+)
 from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
-from startupai_controller.github_http import GitHubTransportError, run_github_command
 from startupai_controller.validate_critical_path_promotion import GhQueryError
 
 _GH_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)

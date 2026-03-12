@@ -9,6 +9,7 @@ from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
 )
+from startupai_controller.ports.session_store import SessionStorePort
 
 
 @dataclass(frozen=True)
@@ -126,7 +127,7 @@ def reconcile_board_truth(
     db: Any,
     *,
     deps: ReconciliationDeps,
-    session_store: Any,
+    session_store: SessionStorePort,
     pr_port: Any,
     review_state_port: Any,
     board_port: Any,

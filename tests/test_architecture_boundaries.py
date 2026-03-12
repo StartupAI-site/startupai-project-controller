@@ -22,6 +22,19 @@ GRAPH_MODULE = SRC_ROOT / "board_graph.py"
 APPLICATION_ROOT = SRC_ROOT / "application"
 DOMAIN_ROOT = SRC_ROOT / "domain"
 PORTS_ROOT = SRC_ROOT / "ports"
+HOTSPOT_MODULES = {
+    "startupai_controller.adapters.pull_requests": SRC_ROOT
+    / "adapters"
+    / "pull_requests.py",
+    "startupai_controller.consumer_review_queue_helpers": SRC_ROOT
+    / "consumer_review_queue_helpers.py",
+    "startupai_controller.consumer_operational_wiring": SRC_ROOT
+    / "consumer_operational_wiring.py",
+    "startupai_controller.application.automation.ready_wiring": APPLICATION_ROOT
+    / "automation"
+    / "ready_wiring.py",
+    "startupai_controller.project_field_sync": SRC_ROOT / "project_field_sync.py",
+}
 
 SHIM_MODULES = {
     "startupai_controller.board_io",
@@ -85,6 +98,18 @@ def _controller_runtime_imports(path: Path) -> set[str]:
 
 def _source_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _hotspot_import_graph() -> dict[str, set[str]]:
+    graph: dict[str, set[str]] = {}
+    for module_name, path in HOTSPOT_MODULES.items():
+        imports = _runtime_imported_modules(path)
+        graph[module_name] = {
+            candidate
+            for candidate in HOTSPOT_MODULES
+            if candidate != module_name and candidate in imports
+        }
+    return graph
 
 
 def _function_parameter_names(path: Path, function_name: str) -> set[str]:
@@ -529,24 +554,40 @@ def test_capability_adapters_do_not_inherit_each_other() -> None:
     assert not issubclass(GitHubPullRequestAdapter, GitHubReviewStateAdapter)
 
 
+def test_official_hotspot_set_has_no_import_cycles() -> None:
+    graph = _hotspot_import_graph()
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _walk(node: str, trail: tuple[str, ...]) -> None:
+        if node in visiting:
+            raise AssertionError(
+                "Hotspot import cycle detected: " + " -> ".join((*trail, node))
+            )
+        if node in visited:
+            return
+        visiting.add(node)
+        for neighbor in sorted(graph[node]):
+            _walk(neighbor, (*trail, node))
+        visiting.remove(node)
+        visited.add(node)
+
+    for module_name in sorted(graph):
+        _walk(module_name, ())
+
+
 # --- Shim governance tests ---
 
 # Frozen allowlist: only these files may import shim modules at runtime.
 # When a PR removes a shim caller, remove it from this dict in the same PR.
-KNOWN_SHIM_IMPORTERS = {
-    "validate_critical_path_promotion.py": {"startupai_controller.github_http"},
-    "github_transport.py": {"startupai_controller.github_http"},
-    "promote_ready.py": {"startupai_controller.github_http"},
-    "sqlite_store.py": {"startupai_controller.consumer_db"},
-    "github_http_adapter.py": {"startupai_controller.github_http"},
-}
+KNOWN_SHIM_IMPORTERS = {}
 
 # Baselines: current line counts for each shim file.
 # When a PR shrinks a shim, update the baseline downward in the same PR.
 SHIM_SIZE_BASELINES = {
     "board_io.py": 1461,
-    "consumer_db.py": 1288,
-    "github_http.py": 1658,
+    "consumer_db.py": 11,
+    "github_http.py": 11,
 }
 
 SHIM_FILENAMES = {m.rsplit(".", 1)[-1] + ".py" for m in SHIM_MODULES}

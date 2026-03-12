@@ -1,18 +1,18 @@
-"""SQLite adapter — wraps consumer_db.py behind SessionStorePort.
+"""SQLite adapter — wraps the canonical ConsumerDB implementation.
 
-Thin wrapper around ConsumerDB, translating between the port protocol
-and the existing SQLite access layer.
+Thin wrapper around the canonical SQLite implementation, translating between
+the port protocol and the persistence layer.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
+from startupai_controller.ports.session_store import SessionUpdateFields
 
 # Adapter-internal types re-exported for canonical import paths.
-from startupai_controller.consumer_db import (  # noqa: F401
+from startupai_controller.adapters.consumer_db_store import (  # noqa: F401
     ConsumerDB,
     MetricEvent,
     RecoveredLease,
@@ -119,5 +119,5 @@ class SqliteSessionStore:
     def latest_session_for_worktree(self, worktree_path: str) -> SessionInfo | None:
         return self._db.latest_session_for_worktree(worktree_path)
 
-    def update_session(self, session_id: str, **fields: Any) -> None:
+    def update_session(self, session_id: str, fields: SessionUpdateFields) -> None:
         self._db.update_session(session_id, **fields)

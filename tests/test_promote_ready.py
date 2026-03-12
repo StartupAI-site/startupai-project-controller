@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import startupai_controller.promote_ready as promoter
-from startupai_controller.github_http import GitHubTransportError
+from startupai_controller.adapters.github_http_adapter import GitHubTransportError
 from startupai_controller.promote_ready import BoardInfo, promote_to_ready
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
