@@ -34,8 +34,17 @@ from startupai_controller.application.consumer.launch import (
     resolve_launch_context_for_cycle as _resolve_launch_context_for_cycle_use_case,
 )
 from startupai_controller.consumer_types import (
+    ClaimedSessionContext,
+    PendingClaimContext,
+    PrCreationOutcome,
     PreparedLaunchContext,
+    SelectedLaunchCandidate,
     SessionExecutionOutcome,
+)
+from startupai_controller.domain.models import (
+    CycleResult,
+    ResolutionEvaluation,
+    ReviewQueueDrainSummary,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
@@ -249,7 +258,7 @@ def resolve_launch_context_for_cycle(
     config: Any,
     db: Any,
     prepared: Any,
-    launch_context: Any | None,
+    launch_context: PreparedLaunchContext | None,
     target_issue: str | None,
     dry_run: bool,
     review_state_port: Any | None,
@@ -259,15 +268,21 @@ def resolve_launch_context_for_cycle(
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Any | None,
-    select_launch_candidate_for_cycle: Callable[..., tuple[Any | None, Any | None]],
-    prepare_selected_launch_candidate: Callable[..., tuple[Any | None, Any | None]],
+    select_launch_candidate_for_cycle: Callable[
+        ...,
+        tuple[SelectedLaunchCandidate | None, CycleResult | None],
+    ],
+    prepare_selected_launch_candidate: Callable[
+        ...,
+        tuple[PreparedLaunchContext | None, CycleResult | None],
+    ],
     logger: Any,
-) -> tuple[Any | None, Any | None]:
+) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
 
     def _select_launch_candidate(
         *, config: Any, db: Any, prepared: Any, target_issue: str | None
-    ) -> tuple[Any | None, Any | None]:
+    ) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]:
         return select_launch_candidate_for_cycle(
             config=config,
             db=db,
@@ -279,11 +294,11 @@ def resolve_launch_context_for_cycle(
 
     def _prepare_selected_launch_candidate(
         *,
-        selected_candidate: Any,
+        selected_candidate: SelectedLaunchCandidate,
         config: Any,
         db: Any,
         prepared: Any,
-    ) -> tuple[Any | None, Any | None]:
+    ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
         return prepare_selected_launch_candidate(
             selected_candidate=selected_candidate,
             config=config,
@@ -320,7 +335,7 @@ def claim_launch_context(
     config: Any,
     db: Any,
     prepared: Any,
-    launch_context: Any,
+    launch_context: PreparedLaunchContext,
     slot_id: int,
     review_state_port: Any | None,
     board_port: Any | None,
@@ -330,11 +345,17 @@ def claim_launch_context(
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
     gh_runner: Any | None,
-    open_pending_claim_session: Callable[..., tuple[Any | None, Any | None]],
-    enforce_claim_retry_ceiling: Callable[..., Any | None],
-    attempt_launch_context_claim: Callable[..., tuple[Any | None, Any | None]],
-    mark_claimed_session_running: Callable[..., Any],
-) -> tuple[Any | None, Any | None]:
+    open_pending_claim_session: Callable[
+        ...,
+        tuple[PendingClaimContext | None, CycleResult | None],
+    ],
+    enforce_claim_retry_ceiling: Callable[..., CycleResult | None],
+    attempt_launch_context_claim: Callable[
+        ...,
+        tuple[Any | None, CycleResult | None],
+    ],
+    mark_claimed_session_running: Callable[..., ClaimedSessionContext],
+) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
     effective_comment_checker = comment_checker or (
         review_state_port.comment_exists if review_state_port is not None else None
@@ -347,10 +368,10 @@ def claim_launch_context(
         *,
         config: Any,
         db: Any,
-        launch_context: Any,
-        pending_claim: Any,
+        launch_context: PreparedLaunchContext,
+        pending_claim: PendingClaimContext,
         cp_config: Any,
-    ) -> Any | None:
+    ) -> CycleResult | None:
         return enforce_claim_retry_ceiling(
             config=config,
             db=db,
@@ -368,10 +389,10 @@ def claim_launch_context(
         config: Any,
         db: Any,
         prepared: Any,
-        launch_context: Any,
-        pending_claim: Any,
+        launch_context: PreparedLaunchContext,
+        pending_claim: PendingClaimContext,
         slot_id: int,
-    ) -> tuple[Any | None, Any | None]:
+    ) -> tuple[Any | None, CycleResult | None]:
         return attempt_launch_context_claim(
             config=config,
             db=db,
@@ -391,11 +412,11 @@ def claim_launch_context(
         *,
         config: Any,
         db: Any,
-        launch_context: Any,
-        pending_claim: Any,
+        launch_context: PreparedLaunchContext,
+        pending_claim: PendingClaimContext,
         slot_id: int,
         cp_config: Any,
-    ) -> Any:
+    ) -> ClaimedSessionContext:
         return mark_claimed_session_running(
             config=config,
             db=db,
@@ -648,8 +669,8 @@ def execute_claimed_session(
     config: Any,
     db: Any,
     prepared: Any,
-    launch_context: Any,
-    claimed_context: Any,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
     process_runner: Any | None,
     file_reader: Callable[..., Any] | None,
     review_state_port: Any | None,
@@ -664,10 +685,10 @@ def execute_claimed_session(
     run_codex_session: Callable[..., int],
     parse_codex_result: Callable[..., dict[str, Any] | None],
     session_status_from_codex_result: Callable[..., tuple[str, str | None]],
-    create_pr_for_execution_result: Callable[..., Any],
-    handoff_execution_to_review: Callable[..., Any],
+    create_pr_for_execution_result: Callable[..., PrCreationOutcome],
+    handoff_execution_to_review: Callable[..., ReviewQueueDrainSummary],
     handle_non_review_execution_outcome: Callable[
-        ..., tuple[str, Any | None, str | None]
+        ..., tuple[str, ResolutionEvaluation | None, str | None]
     ],
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
@@ -703,14 +724,14 @@ def execute_claimed_session(
     def _create_pr_for_execution_result(
         *,
         config: Any,
-        launch_context: Any,
-        claimed_context: Any,
+        launch_context: PreparedLaunchContext,
+        claimed_context: ClaimedSessionContext,
         codex_result: dict[str, Any] | None,
         session_status: str,
         failure_reason: str | None,
         subprocess_runner: Callable[..., Any] | None,
         gh_runner: Callable[..., str] | None,
-    ) -> Any:
+    ) -> PrCreationOutcome:
         return create_pr_for_execution_result(
             config=config,
             launch_context=launch_context,
@@ -727,14 +748,14 @@ def execute_claimed_session(
         config: Any,
         db: Any,
         prepared: Any,
-        launch_context: Any,
+        launch_context: PreparedLaunchContext,
         session_id: str,
         pr_url: str,
         session_status: str,
         session_store: Any,
         review_state_port: Any | None,
         board_port: Any | None,
-    ) -> Any:
+    ) -> ReviewQueueDrainSummary:
         del session_store
         return handoff_execution_to_review(
             config=config,
@@ -756,7 +777,7 @@ def execute_claimed_session(
         config: Any,
         db: Any,
         prepared: Any,
-        launch_context: Any,
+        launch_context: PreparedLaunchContext,
         session_id: str,
         session_status: str,
         codex_result: dict[str, Any] | None,
@@ -764,7 +785,7 @@ def execute_claimed_session(
         gh_runner: Any | None,
         pr_port: Any | None,
         board_port: Any | None,
-    ) -> tuple[str, Any | None, str | None]:
+    ) -> tuple[str, ResolutionEvaluation | None, str | None]:
         return handle_non_review_execution_outcome(
             config=config,
             db=db,
@@ -816,9 +837,9 @@ def finalize_claimed_session(
     config: Any,
     db: Any,
     prepared: Any,
-    launch_context: Any,
-    claimed_context: Any,
-    execution_outcome: Any,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    execution_outcome: SessionExecutionOutcome,
     review_state_port: Any | None,
     board_info_resolver: Callable[..., Any] | None,
     comment_checker: Callable[..., bool] | None,
@@ -828,7 +849,7 @@ def finalize_claimed_session(
     persist_claimed_session_completion: Callable[..., None],
     post_claimed_session_result_comment: Callable[..., None],
     maybe_escalate_claimed_session_failure: Callable[..., None],
-) -> Any:
+) -> CycleResult:
     """Persist final session state and return the cycle result."""
     effective_comment_checker = comment_checker or (
         review_state_port.comment_exists if review_state_port is not None else None
@@ -894,12 +915,18 @@ def finalize_claimed_session(
 
 def prepared_cycle_deps(
     *,
-    claim_suppression_state: Callable[..., Any],
-    next_available_slot: Callable[..., Any],
-    resolve_launch_context_for_cycle: Callable[..., Any],
-    claim_launch_context: Callable[..., Any],
-    execute_claimed_session: Callable[..., Any],
-    finalize_claimed_session: Callable[..., Any],
+    claim_suppression_state: Callable[..., dict[str, str] | None],
+    next_available_slot: Callable[..., int | None],
+    resolve_launch_context_for_cycle: Callable[
+        ...,
+        tuple[PreparedLaunchContext | None, CycleResult | None],
+    ],
+    claim_launch_context: Callable[
+        ...,
+        tuple[ClaimedSessionContext | None, CycleResult | None],
+    ],
+    execute_claimed_session: Callable[..., SessionExecutionOutcome],
+    finalize_claimed_session: Callable[..., CycleResult],
 ) -> PreparedCycleDeps:
     """Bind board_consumer helpers for the extracted prepared-cycle slice."""
     return PreparedCycleDeps(
