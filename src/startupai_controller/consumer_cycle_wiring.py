@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, cast
+import subprocess
+from collections.abc import Callable
+from typing import Any, Protocol, cast
 
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
@@ -16,6 +18,7 @@ from startupai_controller.application.consumer.launch import (
     prepare_launch_candidate as _prepare_launch_candidate_use_case,
     resolve_launch_context_for_cycle as _resolve_launch_context_for_cycle_use_case,
 )
+from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
@@ -25,14 +28,18 @@ from startupai_controller.consumer_types import (
     SelectedLaunchCandidate,
     SessionExecutionOutcome,
 )
+from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.domain.models import (
     ClaimReadyResult,
+    CycleBoardSnapshot,
     CycleResult,
+    IssueSnapshot,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
+from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
-from startupai_controller.ports.process_runner import GhRunnerPort
 from startupai_controller.ports.ready_flow import (
     BoardInfoResolverFn,
     BoardStatusMutatorFn,
@@ -43,15 +50,27 @@ from startupai_controller.ports.ready_flow import (
 )
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.runtime.wiring import (
     build_gh_runner_port,
-    build_process_runner_port,
+    ConsumerDB,
     build_github_port_bundle,
+    build_process_runner_port,
     build_session_store,
     build_worktree_port,
 )
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 logger = logging.getLogger("board-consumer")
+SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
+
+
+class LoggerLike(Protocol):
+    """Minimal logger surface used by the cycle wiring wrappers."""
+
+    def info(self, msg: str, *args: object) -> None:
+        """Record one informational log line."""
+        ...
 
 
 def assemble_prepared_launch_context(
@@ -68,8 +87,8 @@ def assemble_prepared_launch_context(
     repair_branch_name: str | None,
     worktree_path: str,
     branch_name: str,
-    workflow_definition: Any,
-    effective_consumer_config: Any,
+    workflow_definition: WorkflowDefinition,
+    effective_consumer_config: ConsumerConfig,
     dependency_summary: str,
     branch_reconcile_state: str | None,
     branch_reconcile_error: str | None,
@@ -99,33 +118,33 @@ def assemble_prepared_launch_context(
 def prepare_launch_candidate(
     issue_ref: str,
     *,
-    config: Any,
-    prepared: Any,
-    db: Any,
-    subprocess_runner: Any | None = None,
-    review_state_port: Any | None = None,
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    db: ConsumerRuntimeStatePort,
+    subprocess_runner: ProcessRunnerPort | SubprocessRunnerFn | None = None,
+    review_state_port: ReviewStatePort | None = None,
     status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
     board_mutator: Callable[..., None] | None = None,
-    gh_runner: Any | None = None,
-    pr_port: Any | None = None,
-    issue_context_port: Any | None = None,
-    session_store: Any | None = None,
-    worktree_port: Any | None = None,
+    gh_runner: GitHubRunnerFn | GhRunnerPort | None = None,
+    pr_port: PullRequestPort | None = None,
+    issue_context_port: IssueContextPort | None = None,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
 ) -> PreparedLaunchContext:
     """Prepare local launch state for an issue before board claim."""
     process_runner_port = (
-        subprocess_runner
+        cast(ProcessRunnerPort, subprocess_runner)
         if hasattr(subprocess_runner, "run")
         else build_process_runner_port(
-            gh_runner=gh_runner,
-            subprocess_runner=subprocess_runner,
+            gh_runner=cast(GitHubRunnerFn | None, gh_runner),
+            subprocess_runner=cast(SubprocessRunnerFn | None, subprocess_runner),
         )
     )
     gh_port = (
-        gh_runner
+        cast(GhRunnerPort, gh_runner)
         if hasattr(gh_runner, "run_gh")
-        else build_gh_runner_port(gh_runner=gh_runner)
+        else build_gh_runner_port(gh_runner=cast(GitHubRunnerFn | None, gh_runner))
     )
     gh_runner_fn = gh_port.run_gh if gh_port is not None else None
     github_bundle = (
@@ -151,11 +170,11 @@ def prepare_launch_candidate(
     def _resolve_launch_candidate_metadata(
         issue_ref: str,
         *,
-        cp_config: Any,
-        auto_config: Any,
-        board_snapshot: Any,
-        pr_port: Any,
-    ) -> tuple[Any, ...]:
+        cp_config: CriticalPathConfig,
+        auto_config: BoardAutomationConfig | None,
+        board_snapshot: CycleBoardSnapshot,
+        pr_port: PullRequestPort,
+    ) -> tuple[str, str, str, int, IssueSnapshot | None, str, str | None, str | None]:
         return _launch_support_wiring.resolve_launch_candidate_metadata(
             issue_ref,
             cp_config=cp_config,
@@ -171,11 +190,11 @@ def prepare_launch_candidate(
         owner: str,
         repo: str,
         number: int,
-        snapshot: Any | None,
-        config: Any,
-        db: Any,
-        issue_context_port: Any,
-    ) -> tuple[Any, str]:
+        snapshot: IssueSnapshot | None,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        issue_context_port: IssueContextPort,
+    ) -> tuple[dict[str, Any], str]:
         return _launch_support_wiring.resolve_launch_issue_context(
             issue_ref,
             owner=owner,
@@ -194,12 +213,12 @@ def prepare_launch_candidate(
         session_kind: str,
         repair_branch_name: str | None,
         *,
-        config: Any,
-        cp_config: Any,
-        db: Any,
-        session_store: Any | None = None,
-        worktree_port: Any | None = None,
-        subprocess_runner: Any | None = None,
+        config: ConsumerConfig,
+        cp_config: CriticalPathConfig,
+        db: ConsumerRuntimeStatePort,
+        session_store: SessionStorePort | None = None,
+        worktree_port: WorktreePort | None = None,
+        subprocess_runner: SubprocessRunnerFn | None = None,
     ) -> tuple[str, str, str | None, str | None]:
         return _launch_support_wiring.setup_launch_worktree(
             issue_ref,
@@ -236,7 +255,7 @@ def prepare_launch_candidate(
         gh_runner=gh_port,
         pr_port=effective_pr_port,
         issue_context_port=effective_issue_context_port,
-        session_store=session_store or build_session_store(db),
+        session_store=session_store or build_session_store(cast(ConsumerDB, db)),
         worktree_port=worktree_port
         or build_worktree_port(
             subprocess_runner=(
@@ -249,19 +268,19 @@ def prepare_launch_candidate(
 
 def resolve_launch_context_for_cycle(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     launch_context: PreparedLaunchContext | None,
     target_issue: str | None,
     dry_run: bool,
-    review_state_port: Any | None,
-    pr_port: Any | None,
+    review_state_port: ReviewStatePort | None,
+    pr_port: PullRequestPort | None,
     status_resolver: Callable[..., str] | None,
-    subprocess_runner: Any | None,
-    board_info_resolver: Callable[..., Any] | None,
+    subprocess_runner: ProcessRunnerPort | SubprocessRunnerFn | None,
+    board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: Callable[..., None] | None,
-    gh_runner: Any | None,
+    gh_runner: GitHubRunnerFn | GhRunnerPort | None,
     select_launch_candidate_for_cycle: Callable[
         ...,
         tuple[SelectedLaunchCandidate | None, CycleResult | None],
@@ -270,12 +289,16 @@ def resolve_launch_context_for_cycle(
         ...,
         tuple[PreparedLaunchContext | None, CycleResult | None],
     ],
-    logger: Any,
+    logger: LoggerLike,
 ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
 
     def _select_launch_candidate(
-        *, config: Any, db: Any, prepared: Any, target_issue: str | None
+        *,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
+        target_issue: str | None,
     ) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]:
         return select_launch_candidate_for_cycle(
             config=config,
@@ -289,9 +312,9 @@ def resolve_launch_context_for_cycle(
     def _prepare_selected_launch_candidate(
         *,
         selected_candidate: SelectedLaunchCandidate,
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
     ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
         return prepare_selected_launch_candidate(
             selected_candidate=selected_candidate,
@@ -364,7 +387,7 @@ def claim_launch_context(
         db: ConsumerRuntimeStatePort,
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
-        cp_config: Any,
+        cp_config: CriticalPathConfig,
     ) -> CycleResult | None:
         return enforce_claim_retry_ceiling(
             config=config,
@@ -409,7 +432,7 @@ def claim_launch_context(
         launch_context: PreparedLaunchContext,
         pending_claim: PendingClaimContext,
         slot_id: int,
-        cp_config: Any,
+        cp_config: CriticalPathConfig,
     ) -> ClaimedSessionContext:
         return mark_claimed_session_running(
             config=config,

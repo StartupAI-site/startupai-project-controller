@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_operational_wiring as _operational_wiring
 import startupai_controller.consumer_support_wiring as _support_wiring
+from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.board_graph import _resolve_issue_coordinates
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_launch_helpers import (
     resolve_launch_candidate_metadata as _resolve_launch_candidate_metadata_helper,
     resolve_launch_issue_context as _resolve_launch_issue_context_helper,
@@ -25,15 +28,37 @@ from startupai_controller.consumer_worktree_helpers import (
     reconcile_repair_branch as _reconcile_repair_branch_helper,
 )
 from startupai_controller.consumer_types import WorktreePrepareError
-from startupai_controller.consumer_workflow import load_worktree_workflow
+from startupai_controller.consumer_types import PreparedCycleContext
+from startupai_controller.consumer_workflow import (
+    WorkflowDefinition,
+    load_worktree_workflow,
+)
 from startupai_controller.domain.launch_policy import (
     launch_session_kind as _launch_session_kind,
 )
+from startupai_controller.domain.models import (
+    CycleBoardSnapshot,
+    IssueSnapshot,
+    RepairBranchReconcileOutcome,
+)
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
+from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.ready_flow import (
+    BoardInfoResolverFn,
+    BoardStatusMutatorFn,
+    GitHubRunnerFn,
+)
+from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.runtime.wiring import build_session_store, build_worktree_port
-from startupai_controller.validate_critical_path_promotion import parse_issue_ref
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    parse_issue_ref,
+)
 
 logger = logging.getLogger("board-consumer")
+SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
@@ -44,13 +69,13 @@ def git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
 def prepare_worktree(
     issue_ref: str,
     title: str,
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
     branch_name_override: str | None = None,
-    session_store: Any | None = None,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
 ) -> tuple[str, str]:
     """Create or safely adopt a worktree for an issue."""
     return _prepare_worktree_helper(
@@ -82,11 +107,11 @@ def prepare_worktree(
 def create_worktree(
     issue_ref: str,
     title: str,
-    config: Any,
+    config: ConsumerConfig,
     *,
     branch_name_override: str | None = None,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
 ) -> tuple[str, str]:
     """Create a worktree for the issue."""
     return _create_worktree_helper(
@@ -104,8 +129,8 @@ def fast_forward_existing_worktree(
     worktree_path: str,
     branch: str,
     *,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree when possible."""
     _fast_forward_existing_worktree_helper(
@@ -121,9 +146,9 @@ def reconcile_repair_branch(
     worktree_path: str,
     branch: str,
     *,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> Any:
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
+) -> RepairBranchReconcileOutcome:
     """Reconcile a repair branch against origin/main and its remote head."""
     return _reconcile_repair_branch_helper(
         worktree_path,
@@ -140,15 +165,15 @@ def setup_launch_worktree(
     session_kind: str,
     repair_branch_name: str | None,
     *,
-    config: Any,
-    cp_config: Any,
-    db: Any,
-    session_store: Any | None = None,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    config: ConsumerConfig,
+    cp_config: CriticalPathConfig,
+    db: ConsumerRuntimeStatePort,
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
 ) -> tuple[str, str, str | None, str | None]:
     """Set up a launch worktree and reconcile repair branches when needed."""
     return _setup_launch_worktree_helper(
@@ -177,9 +202,9 @@ def resolve_launch_runtime(
     candidate_prefix: str,
     worktree_path: str,
     *,
-    config: Any,
-    prepared: Any,
-) -> tuple[Any, Any]:
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+) -> tuple[WorkflowDefinition, ConsumerConfig]:
     """Load worktree workflow and effective consumer config."""
     return _resolve_launch_runtime_helper(
         candidate_prefix,
@@ -193,12 +218,12 @@ def resolve_launch_runtime(
 def resolve_launch_candidate_metadata(
     issue_ref: str,
     *,
-    cp_config: Any,
-    auto_config: Any,
-    board_snapshot: Any,
-    pr_port: Any,
-    gh_runner: Callable[..., str] | None,
-) -> tuple[Any, ...]:
+    cp_config: CriticalPathConfig,
+    auto_config: BoardAutomationConfig | None,
+    board_snapshot: CycleBoardSnapshot,
+    pr_port: PullRequestPort,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[str, str, str, int, IssueSnapshot | None, str, str | None, str | None]:
     """Resolve launch candidate identity and repair-session metadata."""
     return _resolve_launch_candidate_metadata_helper(
         issue_ref,
@@ -221,11 +246,11 @@ def resolve_launch_issue_context(
     owner: str,
     repo: str,
     number: int,
-    snapshot: Any | None,
-    config: Any,
-    db: Any,
-    issue_context_port: Any,
-    gh_runner: Callable[..., str] | None,
+    snapshot: IssueSnapshot | None,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    issue_context_port: IssueContextPort,
+    gh_runner: GitHubRunnerFn | None,
 ) -> tuple[dict[str, Any], str]:
     """Hydrate launch issue context and compute the launch title."""
     return _resolve_launch_issue_context_helper(
@@ -243,13 +268,13 @@ def resolve_launch_issue_context(
 
 
 def run_launch_workspace_hooks(
-    workflow_definition: Any,
+    workflow_definition: WorkflowDefinition,
     *,
     worktree_path: str,
     issue_ref: str,
     branch_name: str,
     worktree_port: WorktreePort,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    subprocess_runner: SubprocessRunnerFn | None,
 ) -> None:
     """Run workflow-defined launch hooks for a prepared worktree."""
     _run_launch_workspace_hooks_helper(

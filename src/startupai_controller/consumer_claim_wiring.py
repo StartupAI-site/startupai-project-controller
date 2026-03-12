@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+import subprocess
+from collections.abc import Callable
 from typing import Protocol
 
 import startupai_controller.consumer_claim_helpers as _claim_helpers
@@ -30,6 +31,8 @@ from startupai_controller.ports.ready_flow import (
 )
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
+SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
+
 
 class CompleteSessionFn(Protocol):
     """Persist a terminal session update for a claim/launch failure path."""
@@ -43,8 +46,8 @@ class CompleteSessionFn(Protocol):
         status: str,
         failure_reason: str | None = None,
         completed_at: str | None = None,
-        **fields: Any,
-    ) -> Any: ...
+        **fields: object,
+    ) -> None: ...
 
 
 class RecordMetricFn(Protocol):
@@ -57,7 +60,7 @@ class RecordMetricFn(Protocol):
         event_type: str,
         *,
         issue_ref: str | None = None,
-        payload: dict[str, Any] | None = None,
+        payload: dict[str, object] | None = None,
     ) -> None: ...
 
 
@@ -84,7 +87,7 @@ class PrepareLaunchCandidateFn(Protocol):
         config: ConsumerConfig,
         prepared: PreparedCycleContext,
         db: ConsumerRuntimeStatePort,
-        subprocess_runner: Callable[..., Any] | None = None,
+        subprocess_runner: SubprocessRunnerFn | None = None,
         status_resolver: StatusResolverFn | None = None,
         board_info_resolver: BoardInfoResolverFn | None = None,
         board_mutator: BoardStatusMutatorFn | None = None,
@@ -138,7 +141,7 @@ class PostConsumerClaimCommentFn(Protocol):
         repo_prefix: str,
         branch_name: str,
         executor: str,
-        config: Any,
+        config: CriticalPathConfig,
         *,
         comment_checker: Callable[..., bool] | None = None,
         comment_poster: Callable[..., None] | None = None,
@@ -152,7 +155,7 @@ def prepare_selected_launch_candidate(
     config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     prepared: PreparedCycleContext,
-    subprocess_runner: Callable[..., Any] | None,
+    subprocess_runner: SubprocessRunnerFn | None,
     status_resolver: StatusResolverFn | None,
     board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: BoardStatusMutatorFn | None,

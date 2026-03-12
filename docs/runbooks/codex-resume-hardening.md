@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-29`
-- Active branch: `refactor/controller-10-10-phase-29`
-- Fresh-main baseline already includes merged work through `origin/main` commit `89f14b0`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-30`
+- Active branch: `refactor/controller-10-10-phase-30`
+- Fresh-main baseline already includes merged work through `origin/main` commit `6b3faaf`
 
-Do not resume from the main checkout. Continue from the phase-29 worktree.
+Do not resume from the main checkout. Continue from the phase-30 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -61,19 +61,20 @@ Recent merged phases:
 - `PR #68` `refactor: type execution finalization wiring cluster`
 - `PR #69` `refactor: split review queue state processing cluster`
 - `PR #70` `refactor: extract pr review state adapter cluster`
+- `PR #71` `refactor: type review comment operational cluster`
 
-Latest successful validation on the current phase-29 worktree:
+Latest successful validation on the current phase-30 worktree:
 
-- targeted `mypy` on review-comment and operational wiring modules: passed
+- targeted `mypy` on launch-cycle, launch-support, and claim wiring modules: passed
 - targeted `pytest` on consumer/control-plane/boundary slices: `169 passed`
 - full suite: `872 passed`
 
-No PR is open yet for phase 29. No poller should be running until the next PR
+No PR is open yet for phase 30. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining structural hotspots after the phase-29 review-comment typing cleanup:
+Remaining structural hotspots after the phase-30 launch-cycle typing cleanup:
 
 - `1972` lines in `src/startupai_controller/adapters/pull_requests.py`
 - `1377` lines in `src/startupai_controller/project_field_sync.py`
@@ -82,40 +83,44 @@ Remaining structural hotspots after the phase-29 review-comment typing cleanup:
 - `623` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
 - `466` lines in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `464` lines in `src/startupai_controller/consumer_cycle_wiring.py`
+- `263` lines in `src/startupai_controller/consumer_launch_support_wiring.py`
 - `556` lines in `src/startupai_controller/consumer_claim_wiring.py`
 - `443` lines in `src/startupai_controller/adapters/pull_request_review_state.py`
+- `251` lines in `src/startupai_controller/consumer_launch_helpers.py`
 - `4` `Any` usages in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `3` `Any` usages in `src/startupai_controller/consumer_comment_pr_wiring.py`
 - `3` `Any` usages in `src/startupai_controller/consumer_comment_pr_helpers.py`
+- `3` `Any` usages in `src/startupai_controller/consumer_cycle_wiring.py`
+- `2` `Any` usages in `src/startupai_controller/consumer_launch_support_wiring.py`
 - `2` `Any` usages in `src/startupai_controller/consumer_operational_wiring.py`
+- `0` `Any` usages in `src/startupai_controller/consumer_claim_wiring.py`
 - `5` `Any` usages in `src/startupai_controller/control_plane_rescue.py`
 
 Bounded-context completion estimate at handoff time:
 
-- consumer/control-plane: about 92-93%
+- consumer/control-plane: about 94-95%
 - automation/review: about 86-88%
 - field sync: about 15-20%
-- overall program: about 86-88%
+- overall program: about 88-89%
 
 ## Recommended Next Batch
 
-If phase 29 is not yet merged, finish shipping the current typed review-comment
-and operational cleanup:
-
-- `src/startupai_controller/consumer_comment_pr_helpers.py`
-- `src/startupai_controller/consumer_comment_pr_wiring.py`
-- `src/startupai_controller/consumer_codex_comment_wiring.py`
-- `src/startupai_controller/consumer_operational_wiring.py`
-
-Once phase 29 is merged, the strongest next target is the remaining
-launch/claim typing seam:
+If phase 30 is not yet merged, finish shipping the current typed launch-cycle
+and launch-support cleanup:
 
 - `src/startupai_controller/consumer_cycle_wiring.py`
+- `src/startupai_controller/consumer_launch_support_wiring.py`
 - `src/startupai_controller/consumer_claim_wiring.py`
+
+Once phase 30 is merged, the strongest next target is the remaining
+field-sync and launch-helper cleanup:
+
+- `src/startupai_controller/project_field_sync.py`
+- `src/startupai_controller/consumer_launch_helpers.py`
+- `src/startupai_controller/consumer_worktree_helpers.py`
 
 After that, the biggest structural work still pending is:
 
-- `src/startupai_controller/project_field_sync.py`
 - the remaining typed-shell cleanup around control-plane rescue and comment/replay wiring
 - deeper adapter decomposition in `src/startupai_controller/adapters/pull_requests.py`
 
@@ -128,8 +133,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-29
-- active branch: refactor/controller-10-10-phase-29
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-30
+- active branch: refactor/controller-10-10-phase-30
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -148,8 +153,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66, #67, #68, #69, and #70
-- no PR is open yet for phase 29
-- latest full local validation on phase 29 was 872 passed
-- current batch is the typed review-comment and operational wiring cleanup; next batch after merge is the remaining launch/claim typing seam
+- latest merged PRs: #66, #67, #68, #69, #70, and #71
+- no PR is open yet for phase 30
+- latest full local validation on phase 30 was 872 passed
+- current batch is the typed launch-cycle and launch-support cleanup; next batch after merge is `project_field_sync.py` plus the remaining launch/worktree helper typing
 ```
