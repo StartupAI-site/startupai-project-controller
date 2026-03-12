@@ -65,7 +65,9 @@ def run_validation_on_main(
     """Run the repo validation command against canonical main."""
     if not command.strip():
         return False, None, "missing-validation-command"
-    runner = subprocess_runner or (lambda args, **kwargs: subprocess.run(args, **kwargs))
+    runner = subprocess_runner or (
+        lambda args, **kwargs: subprocess.run(args, **kwargs)
+    )
     result = runner(
         ["bash", "-lc", command],
         cwd=str(repo_root),
@@ -83,7 +85,9 @@ def commit_reachable_from_origin_main(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Return True when a commit is reachable from origin/main."""
-    runner = subprocess_runner or (lambda args, **kwargs: subprocess.run(args, **kwargs))
+    runner = subprocess_runner or (
+        lambda args, **kwargs: subprocess.run(args, **kwargs)
+    )
     result = runner(
         [
             "git",
@@ -273,7 +277,9 @@ def verify_resolution_payload(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     gh_runner: Callable[..., str] | None = None,
     build_resolution_evaluation: Callable[..., Any],
-    normalize_resolution_payload: Callable[[dict[str, Any] | None], dict[str, Any] | None],
+    normalize_resolution_payload: Callable[
+        [dict[str, Any] | None], dict[str, Any] | None
+    ],
     resolution_has_meaningful_signal: Callable[[dict[str, Any]], bool],
     resolution_allows_autoclose: Callable[[dict[str, Any]], bool],
     non_auto_close_resolution_kinds: set[str] | tuple[str, ...],
@@ -317,7 +323,8 @@ def verify_resolution_payload(
             resolution_kind=kind,
             verification_class="strong",
             final_action="closed_as_already_resolved",
-            summary=summary or "Verified existing implementation already satisfies the issue.",
+            summary=summary
+            or "Verified existing implementation already satisfies the issue.",
             evidence=evidence,
         )
 
@@ -332,9 +339,7 @@ def verify_resolution_payload(
         )
 
     verification_class = (
-        "ambiguous"
-        if resolution_has_meaningful_signal(normalized)
-        else "failed"
+        "ambiguous" if resolution_has_meaningful_signal(normalized) else "failed"
     )
     blocked_reason = resolution_blocked_reason_fn(normalized, evidence)
     return build_resolution_evaluation(
@@ -456,7 +461,11 @@ def apply_resolution_action(
     if evaluation.final_action == "closed_as_already_resolved":
         try:
             mark_issues_done(
-                [linked_issue_type(owner=owner, repo=repo, number=number, ref=issue_ref)],
+                [
+                    linked_issue_type(
+                        owner=owner, repo=repo, number=number, ref=issue_ref
+                    )
+                ],
                 critical_path_config,
                 config.project_owner,
                 config.project_number,

@@ -40,7 +40,6 @@ from startupai_controller.automation_compat_ports import (
     wrap_status_transition_review_state_port,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared review-family helpers
 # ---------------------------------------------------------------------------
@@ -93,6 +92,7 @@ def configured_review_checks(
     from startupai_controller.domain.rescue_policy import (
         configured_review_checks as _domain_configured_review_checks,
     )
+
     return _domain_configured_review_checks(
         pr_repo, automation_config.required_checks_by_repo
     )
@@ -319,9 +319,7 @@ def review_rescue(
 ) -> ReviewRescueResult:
     """Assemble ports and delegate to the review_rescue use case."""
     if pr_port is None and default_pr_port_fn is not None:
-        pr_port = default_pr_port_fn(
-            project_owner, project_number, config, gh_runner
-        )
+        pr_port = default_pr_port_fn(project_owner, project_number, config, gh_runner)
     if review_state_port is None and default_review_state_port_fn is not None:
         review_state_port = default_review_state_port_fn(
             project_owner, project_number, config=config, gh_runner=gh_runner
@@ -387,9 +385,7 @@ def review_rescue_all(
 ) -> ReviewRescueSweep:
     """Assemble ports and delegate to the review_rescue_all use case."""
     if pr_port is None and default_pr_port_fn is not None:
-        pr_port = default_pr_port_fn(
-            project_owner, project_number, config, gh_runner
-        )
+        pr_port = default_pr_port_fn(project_owner, project_number, config, gh_runner)
     if review_state_port is None and default_review_state_port_fn is not None:
         review_state_port = default_review_state_port_fn(
             project_owner, project_number, config, gh_runner
@@ -453,9 +449,7 @@ def automerge_review(
 ) -> tuple[int, str]:
     """Assemble ports and delegate to the automerge_review use case."""
     if pr_port is None and default_pr_port_fn is not None:
-        pr_port = default_pr_port_fn(
-            project_owner, project_number, config, gh_runner
-        )
+        pr_port = default_pr_port_fn(project_owner, project_number, config, gh_runner)
     if review_state_port is None and default_review_state_port_fn is not None:
         review_state_port = default_review_state_port_fn(
             project_owner, project_number, config, gh_runner

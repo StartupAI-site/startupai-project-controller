@@ -377,7 +377,9 @@ def execute_claimed_session(
     session_status_from_codex_result: Callable[..., tuple[str, str | None]],
     create_pr_for_execution_result: Callable[..., Any],
     handoff_execution_to_review: Callable[..., Any],
-    handle_non_review_execution_outcome: Callable[..., tuple[str, Any | None, str | None]],
+    handle_non_review_execution_outcome: Callable[
+        ..., tuple[str, Any | None, str | None]
+    ],
 ) -> Any:
     """Execute Codex for a claimed session and apply immediate board handoff."""
     return _cycle_wiring.execute_claimed_session(

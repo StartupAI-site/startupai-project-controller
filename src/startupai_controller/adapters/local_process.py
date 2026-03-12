@@ -26,7 +26,9 @@ class LocalProcessAdapter:
         self,
         *,
         gh_runner: Callable[..., str] | None = None,
-        subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        subprocess_runner: (
+            Callable[..., subprocess.CompletedProcess[str]] | None
+        ) = None,
     ) -> None:
         self._gh_runner = gh_runner
         self._subprocess_runner = subprocess_runner or (
@@ -164,9 +166,8 @@ class LocalProcessAdapter:
             text=True,
         )
         if result.returncode != 0:
-            if (
-                "Worktree already exists at" in result.stderr
-                and os.path.isdir(expected_worktree_path)
+            if "Worktree already exists at" in result.stderr and os.path.isdir(
+                expected_worktree_path
             ):
                 branch_result = self._subprocess_runner(
                     ["git", "-C", expected_worktree_path, "branch", "--show-current"],
@@ -274,7 +275,9 @@ class LocalProcessAdapter:
             detail = _git_command_detail(merge_main_result)
             if "Already up to date." in detail:
                 return RepairBranchReconcileOutcome(
-                    "fast_forwarded_repair_branch" if synced_remote_branch else "up_to_date"
+                    "fast_forwarded_repair_branch"
+                    if synced_remote_branch
+                    else "up_to_date"
                 )
             return RepairBranchReconcileOutcome("merged_main")
 

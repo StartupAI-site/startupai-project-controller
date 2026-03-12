@@ -53,11 +53,7 @@ def _cmd_status(
         for session in payload["sessions"]:
             slot = f" slot={session['slot_index']}" if session["slot_index"] else ""
             phase = f" phase={session['phase']}" if session["phase"] else ""
-            kind = (
-                f" kind={session['session_kind']}"
-                if session["session_kind"]
-                else ""
-            )
+            kind = f" kind={session['session_kind']}" if session["session_kind"] else ""
             reconcile = (
                 f" reconcile={session['branch_reconcile_state']}"
                 if session["branch_reconcile_state"]
@@ -69,11 +65,7 @@ def _cmd_status(
                 if session["failure_reason"]
                 else ""
             )
-            retry = (
-                f" retry={session['retry_count']}"
-                if session["retry_count"]
-                else ""
-            )
+            retry = f" retry={session['retry_count']}" if session["retry_count"] else ""
             next_retry = (
                 f" next_retry={session['next_retry_at']}"
                 if session["next_retry_at"]
@@ -90,9 +82,7 @@ def _cmd_status(
                 else ""
             )
             done_reason = (
-                f" done={session['done_reason']}"
-                if session["done_reason"]
-                else ""
+                f" done={session['done_reason']}" if session["done_reason"] else ""
             )
             print(
                 f"  {session['id']}  {session['issue_ref']:>10}  "
@@ -178,7 +168,9 @@ def _create_status_http_server(
     port = port or core.DEFAULT_STATUS_PORT
 
     class StatusHandler(BaseHTTPRequestHandler):
-        def _write_json(self, payload: dict[str, Any], *, status_code: int = 200) -> None:
+        def _write_json(
+            self, payload: dict[str, Any], *, status_code: int = 200
+        ) -> None:
             body = json.dumps(payload, indent=2).encode("utf-8")
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -204,7 +196,9 @@ def _create_status_http_server(
             self._write_json({"error": "not_found", "path": self.path}, status_code=404)
 
         def log_message(self, format: str, *args: Any) -> None:
-            core.logger.debug("status-http %s - %s", self.address_string(), format % args)
+            core.logger.debug(
+                "status-http %s - %s", self.address_string(), format % args
+            )
 
     return ThreadingHTTPServer((host, port), StatusHandler)
 
@@ -220,7 +214,9 @@ def _cmd_serve_status(
     host = host or core.DEFAULT_STATUS_HOST
     port = port or core.DEFAULT_STATUS_PORT
     server = _create_status_http_server(config, host=host, port=port)
-    core.logger.info("Serving local consumer status on http://%s:%s", host, server.server_port)
+    core.logger.info(
+        "Serving local consumer status on http://%s:%s", host, server.server_port
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -314,7 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     run_p = sub.add_parser("run", help="Run daemon loop")
-    run_p.add_argument("--interval", type=int, default=180, help="Poll interval seconds")
+    run_p.add_argument(
+        "--interval", type=int, default=180, help="Poll interval seconds"
+    )
     run_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
     run_p.add_argument("--dry-run", action="store_true")
     run_p.add_argument("--verbose", action="store_true")
@@ -334,7 +332,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip GitHub queries and report local consumer state only",
     )
 
-    report_p = sub.add_parser("report-slo", help="Show rolling reliability and throughput metrics")
+    report_p = sub.add_parser(
+        "report-slo", help="Show rolling reliability and throughput metrics"
+    )
     report_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
     report_p.add_argument("--json", action="store_true", dest="as_json")
     report_p.add_argument(
@@ -343,7 +343,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip GitHub queries and report local consumer state only",
     )
 
-    serve_p = sub.add_parser("serve-status", help="Serve local-only consumer status over localhost HTTP")
+    serve_p = sub.add_parser(
+        "serve-status", help="Serve local-only consumer status over localhost HTTP"
+    )
     serve_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
     serve_p.add_argument("--host", default=core.DEFAULT_STATUS_HOST)
     serve_p.add_argument("--port", type=int, default=core.DEFAULT_STATUS_PORT)
@@ -355,7 +357,9 @@ def build_parser() -> argparse.ArgumentParser:
     rec_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
     rec_p.add_argument("--dry-run", action="store_true")
 
-    drain_p = sub.add_parser("drain", help="Request a graceful drain before the next issue claim")
+    drain_p = sub.add_parser(
+        "drain", help="Request a graceful drain before the next issue claim"
+    )
     drain_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
 
     resume_p = sub.add_parser("resume", help="Clear a pending graceful drain request")

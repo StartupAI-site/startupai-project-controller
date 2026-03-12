@@ -23,7 +23,9 @@ class ExecutionDeps:
     session_status_from_codex_result: Callable[..., tuple[str, str | None]]
     create_pr_for_execution_result: Callable[..., Any]
     handoff_execution_to_review: Callable[..., ReviewQueueDrainSummary]
-    handle_non_review_execution_outcome: Callable[..., tuple[str, Any | None, str | None]]
+    handle_non_review_execution_outcome: Callable[
+        ..., tuple[str, Any | None, str | None]
+    ]
     build_session_execution_outcome: Callable[..., Any]
 
 
@@ -271,7 +273,9 @@ def handle_non_review_execution_outcome(
             board_port=board_port,
         )
         if done_reason == "already_resolved":
-            deps.record_metric(db, config, "session_transition_done", issue_ref=candidate)
+            deps.record_metric(
+                db, config, "session_transition_done", issue_ref=candidate
+            )
         return updated_session_status, resolution_evaluation, done_reason
 
     try:

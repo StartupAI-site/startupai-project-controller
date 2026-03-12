@@ -25,7 +25,8 @@ def test_set_issue_status_uses_board_info_and_field_option(monkeypatch) -> None:
         GitHubBoardMutationAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: (
-            field_calls.append((project_id, field_name, option_name)) or ("FIELD", "OPT")
+            field_calls.append((project_id, field_name, option_name))
+            or ("FIELD", "OPT")
         ),
     )
     monkeypatch.setattr(

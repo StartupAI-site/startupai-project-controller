@@ -40,7 +40,9 @@ def _select_execution_policy_issues(
         if legacy_copilot_only_mode:
             protected_linked.append(issue)
             continue
-        executor = review_state_port.project_field_value(issue.ref, "Executor").strip().lower()
+        executor = (
+            review_state_port.project_field_value(issue.ref, "Executor").strip().lower()
+        )
         if executor in automation_config.execution_authority_executors:
             protected_linked.append(issue)
     return protected_linked
@@ -61,7 +63,9 @@ def _apply_execution_policy_to_issue(
     old_status = review_state_port.get_issue_status(issue.ref) or "NOT_ON_BOARD"
     changed = old_status in {"In Progress", "Review", "Ready"}
     if changed and not dry_run:
-        board_port.set_issue_status(issue.ref, "Blocked" if policy == "block" else "Ready")
+        board_port.set_issue_status(
+            issue.ref, "Blocked" if policy == "block" else "Ready"
+        )
     if changed and policy == "block":
         decision.blocked.append(issue.ref)
     elif changed:
@@ -69,9 +73,7 @@ def _apply_execution_policy_to_issue(
 
     repo_slug = f"{issue.owner}/{issue.repo}"
     assignees = list(review_state_port.issue_assignees(repo_slug, issue.number))
-    filtered_assignees = [
-        login for login in assignees if not is_copilot_actor(login)
-    ]
+    filtered_assignees = [login for login in assignees if not is_copilot_actor(login)]
     if filtered_assignees != assignees:
         if not dry_run:
             board_port.set_issue_assignees(repo_slug, issue.number, filtered_assignees)
@@ -185,7 +187,9 @@ def enforce_execution_policy(
             ref=issue_ref,
         )
         for issue_ref in pr_port.linked_issue_refs(pr_repo, pr_number)
-        for issue_owner, issue_repo, issue_number in [_resolve_issue_coordinates(issue_ref, config)]
+        for issue_owner, issue_repo, issue_number in [
+            _resolve_issue_coordinates(issue_ref, config)
+        ]
     ]
     protected_linked = _select_execution_policy_issues(
         linked=linked,

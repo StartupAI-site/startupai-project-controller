@@ -23,7 +23,6 @@ from startupai_controller.domain.launch_policy import (
     reconcile_in_progress_decision,
 )
 
-
 # ---------------------------------------------------------------------------
 # _classify_open_pr_candidates decision table
 # (Testing the pure classification logic via domain function)
@@ -132,9 +131,7 @@ class TestClassifyOpenPrCandidates:
         assert "executor-mismatch" in reason
 
     def test_untrusted_author(self) -> None:
-        candidate = _make_candidate(
-            issue_ref="crew#42", author="random-user"
-        )
+        candidate = _make_candidate(issue_ref="crew#42", author="random-user")
         cls, match, reason = _classify_candidates_pure(
             "crew#42", [candidate], self.TRUSTED_AUTHORS
         )

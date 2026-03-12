@@ -62,7 +62,9 @@ def run_tick(
                 config,
                 critical_path_config,
             )
-            timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
+            timings_ms["deferred_replay"] = int(
+                (time.monotonic() - phase_started) * 1000
+            )
         except deps.gh_query_error_type as error:
             deps.mark_degraded(
                 db,
@@ -146,9 +148,7 @@ def run_tick(
         config.project_owner,
         config.project_number,
         dispatchable_repo_prefixes=tuple(
-            repo_prefix
-            for repo_prefix, status in statuses.items()
-            if status.available
+            repo_prefix for repo_prefix, status in statuses.items() if status.available
         ),
         active_lease_issue_refs=tuple(db.active_lease_issue_refs()),
         dry_run=args.dry_run,

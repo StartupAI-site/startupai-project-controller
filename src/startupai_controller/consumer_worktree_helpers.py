@@ -14,10 +14,10 @@ def list_repo_worktrees(
     subprocess_runner: Callable[..., Any] | None = None,
 ) -> list[tuple[str, str]]:
     """Return (worktree_path, branch_name) pairs for a repo root."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
-    return [(entry.path, entry.branch_name) for entry in port.list_worktrees(str(repo_root))]
+    port = worktree_port or build_worktree_port(subprocess_runner=subprocess_runner)
+    return [
+        (entry.path, entry.branch_name) for entry in port.list_worktrees(str(repo_root))
+    ]
 
 
 def worktree_is_clean(
@@ -28,9 +28,7 @@ def worktree_is_clean(
     subprocess_runner: Callable[..., Any] | None = None,
 ) -> bool:
     """Return True when a worktree has no local changes."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
+    port = worktree_port or build_worktree_port(subprocess_runner=subprocess_runner)
     return port.is_clean(worktree_path)
 
 
@@ -60,9 +58,7 @@ def create_worktree(
     subprocess_runner: Callable[..., Any] | None = None,
 ) -> tuple[str, str]:
     """Create a worktree for the issue."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
+    port = worktree_port or build_worktree_port(subprocess_runner=subprocess_runner)
     entry = port.create_issue_worktree(
         issue_ref,
         title,
@@ -80,9 +76,7 @@ def fast_forward_existing_worktree(
     subprocess_runner: Callable[..., Any] | None = None,
 ) -> None:
     """Fast-forward a clean reused worktree to the remote branch head when possible."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
+    port = worktree_port or build_worktree_port(subprocess_runner=subprocess_runner)
     port.fast_forward_existing(worktree_path, branch)
 
 
@@ -95,9 +89,7 @@ def reconcile_repair_branch(
     subprocess_runner: Callable[..., Any] | None = None,
 ) -> Any:
     """Reconcile a repair branch against its remote and origin/main."""
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
+    port = worktree_port or build_worktree_port(subprocess_runner=subprocess_runner)
     return port.reconcile_repair_branch(worktree_path, branch)
 
 
@@ -125,9 +117,7 @@ def prepare_worktree(
     """Create or safely adopt a worktree for an issue."""
     parsed = parse_issue_ref(issue_ref)
     store = session_store or build_session_store(db)
-    port = worktree_port or build_worktree_port(
-        subprocess_runner=subprocess_runner
-    )
+    port = worktree_port or build_worktree_port(subprocess_runner=subprocess_runner)
     if config.worktree_reuse_enabled:
         repo_root = config.repo_roots.get(parsed.prefix)
         if repo_root is None:

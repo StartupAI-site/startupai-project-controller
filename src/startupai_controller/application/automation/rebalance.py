@@ -17,8 +17,13 @@ from startupai_controller.domain.repair_policy import (
     marker_for as _marker_for,
     parse_pr_url as _parse_pr_url,
 )
-from startupai_controller.domain.scheduling_policy import VALID_EXECUTORS, wip_limit_for_lane
-from startupai_controller.application.automation.ready_claim import _transition_issue_status
+from startupai_controller.domain.scheduling_policy import (
+    VALID_EXECUTORS,
+    wip_limit_for_lane,
+)
+from startupai_controller.application.automation.ready_claim import (
+    _transition_issue_status,
+)
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
@@ -28,6 +33,8 @@ from startupai_controller.validate_critical_path_promotion import (
     evaluate_ready_promotion,
     parse_issue_ref,
 )
+
+
 @dataclass(frozen=True)
 class _WipCandidate:
     ref: str
@@ -129,7 +136,9 @@ def _handle_stale_rebalance_item(
                 f"<!-- {MARKER_PREFIX}:stale-candidate:{ref}:"
                 f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')} -->"
             )
-            if not review_state_port.comment_exists(f"{owner}/{repo}", number, stale_marker):
+            if not review_state_port.comment_exists(
+                f"{owner}/{repo}", number, stale_marker
+            ):
                 board_port.post_issue_comment(
                     f"{owner}/{repo}",
                     number,
@@ -153,7 +162,9 @@ def _handle_stale_rebalance_item(
     )
     if changed and not dry_run:
         demote_marker = _marker_for("stale-demote", ref)
-        if not review_state_port.comment_exists(f"{owner}/{repo}", number, demote_marker):
+        if not review_state_port.comment_exists(
+            f"{owner}/{repo}", number, demote_marker
+        ):
             board_port.post_issue_comment(
                 f"{owner}/{repo}",
                 number,
@@ -225,7 +236,8 @@ def _evaluate_rebalance_snapshot(
     if parsed_pr is not None:
         pr_owner, pr_repo, pr_number = parsed_pr
         has_open_pr = (
-            pr_port.pull_request_updated_at(f"{pr_owner}/{pr_repo}", pr_number) is not None
+            pr_port.pull_request_updated_at(f"{pr_owner}/{pr_repo}", pr_number)
+            is not None
         )
     activity_at = _latest_wip_activity_timestamp(
         ref,

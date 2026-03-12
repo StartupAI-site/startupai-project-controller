@@ -26,7 +26,9 @@ from startupai_controller.consumer_worktree_helpers import (
 )
 from startupai_controller.consumer_types import WorktreePrepareError
 from startupai_controller.consumer_workflow import load_worktree_workflow
-from startupai_controller.domain.launch_policy import launch_session_kind as _launch_session_kind
+from startupai_controller.domain.launch_policy import (
+    launch_session_kind as _launch_session_kind,
+)
 from startupai_controller.runtime.wiring import build_session_store, build_worktree_port
 from startupai_controller.validate_critical_path_promotion import parse_issue_ref
 

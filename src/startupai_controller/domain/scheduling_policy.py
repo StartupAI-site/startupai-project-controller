@@ -182,7 +182,9 @@ def has_structured_acceptance_criteria(
     for line in body.splitlines():
         heading_match = heading_re.match(line)
         if heading_match:
-            current_matches = normalize_heading(heading_match.group("text")) in target_headings
+            current_matches = (
+                normalize_heading(heading_match.group("text")) in target_headings
+            )
             continue
         if current_matches and bullet_re.match(line):
             return True

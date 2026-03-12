@@ -24,7 +24,6 @@ from startupai_controller.domain.models import IssueFields, IssueSnapshot
 from startupai_controller.domain.repair_policy import MARKER_PREFIX
 from startupai_controller.validate_critical_path_promotion import GhQueryError
 
-
 _BOARD_SNAPSHOT_CACHE_TTL_SECONDS = 15
 _cycle_board_snapshot_cache: dict[
     tuple[str, int, int],
@@ -241,14 +240,14 @@ query($owner: String!, $number: Int!, $cursor: String) {
             cursor = str(page_info.get("endCursor") or "")
 
             for node in items_data.get("nodes", []):
-                node_status = ((node.get("fieldValueByName") or {}).get("name") or "")
+                node_status = (node.get("fieldValueByName") or {}).get("name") or ""
                 if node_status != status:
                     continue
                 content = node.get("content") or {}
                 issue_number = content.get("number")
-                repo_with_owner = (
-                    (content.get("repository") or {}).get("nameWithOwner") or ""
-                )
+                repo_with_owner = (content.get("repository") or {}).get(
+                    "nameWithOwner"
+                ) or ""
                 if not issue_number or not repo_with_owner:
                     continue
                 results.append(
@@ -258,8 +257,12 @@ query($owner: String!, $number: Int!, $cursor: String) {
                             int(issue_number),
                         ),
                         status=node_status or status,
-                        executor=str((node.get("executorField") or {}).get("name") or ""),
-                        priority=str((node.get("priorityField") or {}).get("name") or ""),
+                        executor=str(
+                            (node.get("executorField") or {}).get("name") or ""
+                        ),
+                        priority=str(
+                            (node.get("priorityField") or {}).get("name") or ""
+                        ),
                         title=str(content.get("title") or ""),
                         item_id=str(node.get("id") or ""),
                         project_id=project_id,
@@ -508,14 +511,14 @@ query($owner: String!, $number: Int!, $cursor: String) {
         cursor = str(page_info.get("endCursor") or "")
 
         for node in items_data.get("nodes", []):
-            node_status = ((node.get("fieldValueByName") or {}).get("name") or "")
+            node_status = (node.get("fieldValueByName") or {}).get("name") or ""
             if node_status != status:
                 continue
             content = node.get("content") or {}
             issue_number = content.get("number")
-            repo_with_owner = (
-                (content.get("repository") or {}).get("nameWithOwner") or ""
-            )
+            repo_with_owner = (content.get("repository") or {}).get(
+                "nameWithOwner"
+            ) or ""
             if not issue_number or not repo_with_owner:
                 continue
             items.append(

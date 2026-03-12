@@ -72,6 +72,7 @@ class _PullRequestListItem:
     body: str
     author: str
 
+
 _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS = 900
 _required_status_checks_ttl_cache: dict[
     tuple[str, str],
@@ -716,9 +717,7 @@ def _review_state_digest_from_probe(probe: _PullRequestStateProbe) -> str:
             (name, result) for name, (_ts, result) in latest_checks.items()
         ),
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -971,7 +970,9 @@ def review_state_digest_from_probe(probe: _PullRequestStateProbe) -> str:
 
 def review_state_digest_from_payload(payload: PullRequestViewPayload) -> str:
     """Return a stable review-state digest from an expanded PR payload."""
-    return review_state_digest_from_probe(_pull_request_state_probe_from_payload(payload))
+    return review_state_digest_from_probe(
+        _pull_request_state_probe_from_payload(payload)
+    )
 
 
 class GitHubPullRequestAdapter(GitHubAdapterBase):
@@ -993,7 +994,9 @@ class GitHubPullRequestAdapter(GitHubAdapterBase):
                     head_ref_name=str(item.get("headRefName") or ""),
                     is_draft=bool(item.get("isDraft", False)),
                     body=str(item.get("body") or ""),
-                    author=str(((item.get("author") or {}).get("login") or "")).strip().lower(),
+                    author=str(((item.get("author") or {}).get("login") or ""))
+                    .strip()
+                    .lower(),
                 )
             )
         return results
@@ -1036,10 +1039,14 @@ class GitHubPullRequestAdapter(GitHubAdapterBase):
                 f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
             )
         comments = tuple(
-            item for item in (payload.get("comments", []) or []) if isinstance(item, dict)
+            item
+            for item in (payload.get("comments", []) or [])
+            if isinstance(item, dict)
         )
         reviews = tuple(
-            item for item in (payload.get("reviews", []) or []) if isinstance(item, dict)
+            item
+            for item in (payload.get("reviews", []) or [])
+            if isinstance(item, dict)
         )
         status_check_rollup = tuple(
             item
@@ -1051,7 +1058,9 @@ class GitHubPullRequestAdapter(GitHubAdapterBase):
             pr_number=pr_number,
             url=str(payload.get("url") or ""),
             head_ref_name=str(payload.get("headRefName") or ""),
-            author=str(((payload.get("author") or {}).get("login") or "")).strip().lower(),
+            author=str(((payload.get("author") or {}).get("login") or ""))
+            .strip()
+            .lower(),
             body=str(payload.get("body") or ""),
             state=str(payload.get("state") or ""),
             is_draft=bool(payload.get("isDraft", False)),
@@ -1065,7 +1074,9 @@ class GitHubPullRequestAdapter(GitHubAdapterBase):
             status_check_rollup=status_check_rollup,
         )
 
-    def _query_closing_issue_refs(self, pr_repo: str, pr_number: int) -> tuple[str, ...]:
+    def _query_closing_issue_refs(
+        self, pr_repo: str, pr_number: int
+    ) -> tuple[str, ...]:
         """Return linked issue refs for one PR using the configured repo-prefix map."""
         config = self._require_config()
         pr_owner, pr_repo_name = pr_repo.split("/", maxsplit=1)
@@ -1268,8 +1279,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
             if commit_nodes:
                 latest_commit = commit_nodes[-1]
                 rollup = (
-                    (((latest_commit.get("commit") or {}).get("statusCheckRollup") or {}).get("contexts") or {})
-                )
+                    (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
+                ).get("contexts") or {}
                 for item in rollup.get("nodes", []) or []:
                     if not isinstance(item, dict):
                         continue
@@ -1281,7 +1292,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 pr_number=number,
                 url=str(node.get("url") or ""),
                 head_ref_name=str(node.get("headRefName") or ""),
-                author=str(((node.get("author") or {}).get("login") or "")).strip().lower(),
+                author=str(((node.get("author") or {}).get("login") or ""))
+                .strip()
+                .lower(),
                 body=str(node.get("body") or ""),
                 state=str(node.get("state") or ""),
                 is_draft=bool(node.get("isDraft", False)),
@@ -1290,7 +1303,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 base_ref_name=str(node.get("baseRefName") or "main"),
                 merged_at=str(node.get("mergedAt") or ""),
                 auto_merge_enabled=node.get("autoMergeRequest") is not None,
-                comments=tuple(item for item in comment_nodes if isinstance(item, dict)),
+                comments=tuple(
+                    item for item in comment_nodes if isinstance(item, dict)
+                ),
                 reviews=tuple(item for item in review_nodes if isinstance(item, dict)),
                 status_check_rollup=tuple(status_nodes),
             )
@@ -1420,8 +1435,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
             if commit_nodes:
                 latest_commit = commit_nodes[-1]
                 rollup = (
-                    (((latest_commit.get("commit") or {}).get("statusCheckRollup") or {}).get("contexts") or {})
-                )
+                    (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
+                ).get("contexts") or {}
                 for item in rollup.get("nodes", []) or []:
                     if not isinstance(item, dict):
                         continue
@@ -1477,7 +1492,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
             gh_runner=self._gh_runner,
         )
 
-    def _post_issue_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+    def _post_issue_comment(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> None:
         """Post a comment on a GitHub issue or PR and update the memo cache."""
         _run_gh(
             [
@@ -1492,7 +1509,6 @@ query($owner: String!, $repo: String!, $number: Int!) {
         cached = self._github_memo.issue_comment_bodies.get(key)
         if cached is not None:
             self._github_memo.issue_comment_bodies[key] = [*cached, body]
-
 
     # -- PullRequestPort methods --
 
@@ -1607,15 +1623,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
                         f"Failed querying automerge state for {pr_repo}#{pr_number}: invalid JSON."
                     ),
                 )
-                if isinstance(payload, dict) and payload.get("autoMergeRequest") is not None:
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("autoMergeRequest") is not None
+                ):
                     return "confirmed"
             except GhQueryError:
                 continue
         return "pending"
 
-    def rerun_failed_check(
-        self, pr_repo: str, check_name: str, run_id: int
-    ) -> bool:
+    def rerun_failed_check(self, pr_repo: str, check_name: str, run_id: int) -> bool:
         del check_name  # run id is the actual rerun handle
         try:
             _run_gh(
@@ -1650,7 +1667,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
         pr_number: int,
     ) -> str | None:
         owner, repo = pr_repo.split("/", maxsplit=1)
-        ts = _query_open_pr_updated_at(owner, repo, pr_number, gh_runner=self._gh_runner)
+        ts = _query_open_pr_updated_at(
+            owner, repo, pr_number, gh_runner=self._gh_runner
+        )
         return ts.isoformat() if ts is not None else None
 
     def pull_request_head_sha(self, pr_repo: str, pr_number: int) -> str | None:
@@ -1663,7 +1682,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
         head_sha: str,
     ) -> tuple[str, ...] | None:
         owner, repo = pr_repo.split("/", maxsplit=1)
-        failed = _query_failed_check_runs(owner, repo, head_sha, gh_runner=self._gh_runner)
+        failed = _query_failed_check_runs(
+            owner, repo, head_sha, gh_runner=self._gh_runner
+        )
         return tuple(failed) if failed is not None else None
 
     def close_pull_request(
@@ -1740,7 +1761,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
     def post_codex_verdict_if_missing(self, pr_url: str, session_id: str) -> bool:
         parsed = _parse_pr_url(pr_url)
         if parsed is None:
-            from startupai_controller.validate_critical_path_promotion import GhQueryError
+            from startupai_controller.validate_critical_path_promotion import (
+                GhQueryError,
+            )
 
             raise GhQueryError(f"Invalid PR URL for codex verdict: {pr_url}")
         owner, repo, pr_number = parsed
@@ -1759,7 +1782,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 "api",
                 f"repos/{owner}/{repo}/issues/{number}",
                 "--jq",
-                '{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}',
+                "{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}",
             ],
             gh_runner=self._gh_runner,
         )
@@ -1773,6 +1796,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
             labels=tuple(str(label) for label in labels if str(label)),
             updated_at=str(payload.get("updated_at") or ""),
         )
+
 
 def _list_project_items(
     project_owner: str,
@@ -1864,7 +1888,9 @@ query($owner: String!, $number: Int!, $cursor: String) {
             joined = "; ".join(messages) if messages else "unknown GraphQL error"
             raise GhQueryError(f"Failed listing project items: {joined}")
 
-        project_data = payload.get("data", {}).get("organization", {}).get("projectV2", {})
+        project_data = (
+            payload.get("data", {}).get("organization", {}).get("projectV2", {})
+        )
         project_id = str(project_data.get("id") or "")
         items_data = project_data.get("items", {})
         page_info = items_data.get("pageInfo", {})
@@ -2193,7 +2219,10 @@ def enable_pull_request_automerge(
                     f"Failed querying automerge state for {pr_repo}#{pr_number}: invalid JSON."
                 ),
             )
-            if isinstance(payload, dict) and payload.get("autoMergeRequest") is not None:
+            if (
+                isinstance(payload, dict)
+                and payload.get("autoMergeRequest") is not None
+            ):
                 return "confirmed"
         except GhQueryError:
             continue

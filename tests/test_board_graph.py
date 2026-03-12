@@ -28,7 +28,6 @@ from startupai_controller.validate_critical_path_promotion import (
     load_config,
 )
 
-
 # -- Fixtures -----------------------------------------------------------------
 
 
@@ -136,19 +135,15 @@ def test_ready_snapshot_rank_priority_tiebreak(tmp_path: Path) -> None:
 
 def test_acceptance_criteria_requires_structured_section() -> None:
     """Admission only accepts bodies with a supported heading and list items."""
-    assert has_structured_acceptance_criteria(
-        """
+    assert has_structured_acceptance_criteria("""
 ## Acceptance Criteria
 - user can see the result
 - tests cover the controller
-"""
-    )
-    assert has_structured_acceptance_criteria(
-        """
+""")
+    assert has_structured_acceptance_criteria("""
 ## Definition of Done
 1. Ready buffer replenishes automatically
-"""
-    )
+""")
     assert not has_structured_acceptance_criteria(
         "Acceptance criteria should probably be added later."
     )

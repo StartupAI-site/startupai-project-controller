@@ -40,14 +40,15 @@ This repo is a control plane. Reliability matters more than cleverness.
 
 ## Directory Structure
 ```
-src/startupai_controller/   # 125 Python modules across shells/application/domain/ports/adapters/runtime
+src/startupai_controller/   # 126 Python modules across shells/application/domain/ports/adapters/runtime
 config/                      # Config and schema files
 ├── board-automation-config.json
 ├── critical-paths.json
 ├── project-field-sync-config.json
 └── codex_session_result.schema.json
-tests/                       # 26 test files (842 tests)
+tests/                       # 28 test files (854+ tests)
 docs/adr/                    # Architecture decisions
+docs/runbooks/               # Operational runbooks
 systemd/                     # systemd user unit
 ```
 
@@ -130,5 +131,72 @@ systemctl --user status startupai-consumer
 - snake_case naming
 - stdlib-only + PyYAML (no heavy deps)
 
+## Maintenance Constitution
+
+Five principles that govern all changes to this repo:
+
+1. **Shells delegate** — `board_automation.py`, `board_consumer.py`, and `board_control_plane.py` are entry shells. They parse CLI args and delegate to `application/` use cases. They must not accumulate new policy.
+2. **Policy lives in domain/** — Business rules, decision logic, and state transitions belong in `domain/`. No I/O, no shims, no adapter imports.
+3. **Application uses ports** — `application/` coordinates use cases through `ports/` protocols. It must not import adapters, runtime, entrypoints, or shims directly.
+4. **Adapters own mechanism** — GitHub API calls, SQLite queries, subprocess invocations, and transport details live in `adapters/`. They implement port protocols.
+5. **Shims shrink monotonically** — `board_io.py`, `consumer_db.py`, and `github_http.py` are compatibility shims. They may not grow. When touched, they must shrink. No new callers may be added.
+
+## Hard Rules
+
+- **No new shim imports**: Code outside the shim files themselves must not add new `import` statements referencing `board_io`, `consumer_db`, or `github_http`. The frozen allowlist in `tests/test_architecture_boundaries.py` enforces this.
+- **No service-locator patterns**: Do not use `sys.modules[__name__]`, `_shell_module()`, or similar dynamic dispatch to locate dependencies. Use explicit port injection.
+- **No adapter bypass**: Application and domain code must not call adapters directly. If a port is missing capability, extend the port protocol.
+- **No new mega-modules**: If touching a large coordinator, extract focused policy modules instead of adding branches.
+
+## CLI Public API Contract
+
+The three entry modules are the public surface of this repo:
+
+| Module | Purpose |
+|--------|---------|
+| `startupai_controller.board_automation` | CLI for GitHub Actions workflows (18 subcommands) |
+| `startupai_controller.board_consumer` | Daemon for continuous board management (8 subcommands) |
+| `startupai_controller.board_control_plane` | Overnight sweep / recovery (tick, run) |
+
+Breaking changes to subcommand names, arguments, or exit codes require coordinated
+updates to the 16 GitHub Actions workflows in `startupai-crew`.
+
+## No Self-Dispatch Policy
+
+This repo has no `WORKFLOW.md` and does not self-dispatch via the board consumer.
+The consumer manages work in `startupai-crew`, `app.startupai.site`, and
+`startupai.site` — not in this repo. This is a deliberate architectural constraint,
+not a gap. Controller changes are made via normal PRs and CI, not board automation.
+
+## Agent Ownership
+
+| Change Type | Owning Agent | Notes |
+|-------------|--------------|-------|
+| Domain policy | `system-architect` | Pure logic in `domain/` |
+| Port protocol changes | `system-architect` | Typed boundaries |
+| Adapter implementation | `platform-engineer` | GitHub, SQLite, transport |
+| Application use cases | `backend-developer` | Coordination logic |
+| Entry shell changes | `platform-engineer` | CLI parsing, wiring |
+| CI/workflow changes | `platform-engineer` | `.github/workflows/` |
+| Architecture decisions | `system-architect` | `docs/adr/` |
+| Operational runbooks | `platform-engineer` | `docs/runbooks/` |
+| Boundary tests | `qa-engineer` | `tests/test_architecture_boundaries.py` |
+
+## Compatibility Shim Policy
+
+Three compatibility shims exist as transitional artifacts from the extraction:
+
+| Shim | Lines | Status |
+|------|-------|--------|
+| `board_io.py` | 1463 | Transitional — shrink on touch |
+| `consumer_db.py` | 1309 | Transitional — shrink on touch |
+| `github_http.py` | 1659 | Transitional — shrink on touch |
+
+**Rules:**
+- Shims may not grow in line count (ratchet test enforces this)
+- No new callers may import shims (frozen allowlist enforces this)
+- When a PR touches a shim, it must reduce its size or leave it unchanged
+- Target: eventual elimination once all callers migrate to ports/adapters
+
 ---
-**Last Updated**: 2026-03-11
+**Last Updated**: 2026-03-12

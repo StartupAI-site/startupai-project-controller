@@ -45,7 +45,9 @@ from startupai_controller.domain.review_queue_policy import (
     retry_delay_seconds as _retry_delay_seconds,
     session_retry_due_at as _session_retry_due_at,
 )
-from startupai_controller.domain.scheduling_policy import snapshot_to_issue_ref as _snapshot_to_issue_ref
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _snapshot_to_issue_ref,
+)
 from startupai_controller.runtime.wiring import (
     _run_gh,
     build_github_port_bundle,
@@ -53,7 +55,10 @@ from startupai_controller.runtime.wiring import (
     gh_reason_code,
     open_consumer_db,
 )
-from startupai_controller.validate_critical_path_promotion import ConfigError, parse_issue_ref
+from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
+    parse_issue_ref,
+)
 
 
 def record_metric(

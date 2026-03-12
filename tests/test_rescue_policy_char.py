@@ -23,7 +23,6 @@ from startupai_controller.domain.models import (
     PrGateStatus,
 )
 
-
 # ---------------------------------------------------------------------------
 # _configured_review_checks
 # ---------------------------------------------------------------------------
@@ -36,7 +35,9 @@ class TestConfiguredReviewChecks:
         checks_by_repo = {
             "startupai-site/startupai-crew": ("ci", "test"),
         }
-        result = _configured_review_checks("StartupAI-site/startupai-crew", checks_by_repo)
+        result = _configured_review_checks(
+            "StartupAI-site/startupai-crew", checks_by_repo
+        )
         assert result == ("ci", "test")
 
     def test_no_matching_repo(self) -> None:
@@ -400,23 +401,29 @@ class TestRescueDecisionDirect:
         assert action == "rerun_cancelled"
 
     def test_not_open(self) -> None:
-        action, reason = self._call(_make_snapshot(
-            gate_status=_make_gate_status(state="CLOSED"),
-        ))
+        action, reason = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(state="CLOSED"),
+            )
+        )
         assert action == "blocked"
         assert "state=" in reason
 
     def test_draft(self) -> None:
-        action, reason = self._call(_make_snapshot(
-            gate_status=_make_gate_status(is_draft=True),
-        ))
+        action, reason = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(is_draft=True),
+            )
+        )
         assert action == "blocked"
         assert reason == "draft-pr"
 
     def test_conflicting(self) -> None:
-        action, _ = self._call(_make_snapshot(
-            gate_status=_make_gate_status(mergeable="CONFLICTING"),
-        ))
+        action, _ = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(mergeable="CONFLICTING"),
+            )
+        )
         assert action == "requeue_conflicting"
 
     def test_missing_copilot(self) -> None:
@@ -424,19 +431,25 @@ class TestRescueDecisionDirect:
         assert action == "blocked"
 
     def test_codex_gate_fail(self) -> None:
-        action, _ = self._call(_make_snapshot(codex_gate_code=2, codex_gate_message="fail"))
+        action, _ = self._call(
+            _make_snapshot(codex_gate_code=2, codex_gate_message="fail")
+        )
         assert action == "blocked"
 
     def test_required_failed(self) -> None:
-        action, _ = self._call(_make_snapshot(
-            gate_status=_make_gate_status(failed={"ci"}),
-        ))
+        action, _ = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(failed={"ci"}),
+            )
+        )
         assert action == "requeue_failed"
 
     def test_required_pending(self) -> None:
-        action, _ = self._call(_make_snapshot(
-            gate_status=_make_gate_status(pending={"ci"}),
-        ))
+        action, _ = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(pending={"ci"}),
+            )
+        )
         assert action == "blocked"
 
     def test_rescue_failed(self) -> None:
@@ -448,9 +461,11 @@ class TestRescueDecisionDirect:
         assert action == "blocked"
 
     def test_auto_merge_already_enabled(self) -> None:
-        action, _ = self._call(_make_snapshot(
-            gate_status=_make_gate_status(auto_merge_enabled=True),
-        ))
+        action, _ = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(auto_merge_enabled=True),
+            )
+        )
         assert action == "skipped"
 
     def test_all_clear(self) -> None:
@@ -498,16 +513,20 @@ class TestAutomergeGateDecisionDirect:
         assert action == "no_op"
 
     def test_already_enabled(self) -> None:
-        code, _, action = self._call(_make_snapshot(
-            gate_status=_make_gate_status(auto_merge_enabled=True),
-        ))
+        code, _, action = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(auto_merge_enabled=True),
+            )
+        )
         assert code == 0
         assert action == "already_enabled"
 
     def test_behind(self) -> None:
-        code, _, action = self._call(_make_snapshot(
-            gate_status=_make_gate_status(merge_state_status="BEHIND"),
-        ))
+        code, _, action = self._call(
+            _make_snapshot(
+                gate_status=_make_gate_status(merge_state_status="BEHIND"),
+            )
+        )
         assert code == 0
         assert action == "update_branch_then_enable"
 

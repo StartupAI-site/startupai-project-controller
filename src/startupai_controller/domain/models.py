@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Policy outcome types (decisions, results, coordination state)
 # ---------------------------------------------------------------------------
@@ -82,6 +81,7 @@ class OpenPullRequestMatch:
 
 
 # From board_automation.py
+
 
 @dataclass
 class PromotionResult:
@@ -192,6 +192,7 @@ class ReviewRescueSweep:
 
 
 # From board_graph.py
+
 
 @dataclass(frozen=True)
 class AdmissionCandidate:

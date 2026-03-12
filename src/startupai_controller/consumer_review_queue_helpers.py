@@ -294,13 +294,16 @@ def seed_new_review_entries(
         if latest_session is None or not latest_session.pr_url:
             continue
         if not dry_run:
-            if queue_review_item(
-                store,
-                issue_ref,
-                latest_session.pr_url,
-                session_id=latest_session.id,
-                now=now,
-            ) is None:
+            if (
+                queue_review_item(
+                    store,
+                    issue_ref,
+                    latest_session.pr_url,
+                    session_id=latest_session.id,
+                    now=now,
+                )
+                is None
+            ):
                 continue
         seeded.append(issue_ref)
     return seeded
@@ -331,7 +334,9 @@ def reconcile_review_queue_identity(
                 pr_repo=f"{owner}/{repo}",
                 pr_number=pr_number,
                 source_session_id=(
-                    latest_session.id if latest_session is not None else entry.source_session_id
+                    latest_session.id
+                    if latest_session is not None
+                    else entry.source_session_id
                 ),
                 next_attempt_at=entry.next_attempt_at,
                 now=now,
@@ -346,9 +351,7 @@ def review_queue_state_probe_candidates(
 ) -> list[ReviewQueueEntry]:
     """Return review entries whose PR state can be tracked cheaply via digest."""
     return [
-        entry
-        for entry in entries
-        if entry.last_result in REVIEW_QUEUE_STABLE_RESULTS
+        entry for entry in entries if entry.last_result in REVIEW_QUEUE_STABLE_RESULTS
     ]
 
 
@@ -402,8 +405,12 @@ def repark_unchanged_review_queue_entries(
             rerun_checks=(),
             auto_merge_enabled=entry.last_result == "auto_merge_enabled",
             requeued_refs=(),
-            blocked_reason=entry.last_reason if entry.last_result == "blocked" else None,
-            skipped_reason=entry.last_reason if entry.last_result == "skipped" else None,
+            blocked_reason=(
+                entry.last_reason if entry.last_result == "blocked" else None
+            ),
+            skipped_reason=(
+                entry.last_reason if entry.last_result == "skipped" else None
+            ),
         )
         retry_seconds = review_queue_retry_seconds_for_result(synthetic_result)
         if entry.last_result == "partial_failure":
@@ -633,7 +640,9 @@ def prepare_review_queue_batch(
     prepared_batch_factory: Callable[..., Any],
     summary_factory: Callable[..., Any],
     log_warning: Callable[[Exception], None],
-    wakeup_changed_review_queue_entries_fn: Callable[..., tuple[str, ...]] | None = None,
+    wakeup_changed_review_queue_entries_fn: (
+        Callable[..., tuple[str, ...]] | None
+    ) = None,
 ) -> tuple[Any | None, Any | None]:
     """Prepare the bounded review-queue workset for one drain cycle."""
     review_refs = frozenset(
@@ -647,7 +656,9 @@ def prepare_review_queue_batch(
     existing_refs = {entry.issue_ref for entry in existing_entries}
 
     removed = tuple(
-        prune_stale_review_entries(store, review_refs, existing_entries, dry_run=dry_run)
+        prune_stale_review_entries(
+            store, review_refs, existing_entries, dry_run=dry_run
+        )
     )
     seeded = tuple(
         seed_new_review_entries(
@@ -740,16 +751,16 @@ def prepare_due_review_processing(
     log_pre_backfill_warning: Callable[[str, Exception], None],
     log_backfill_warning: Callable[[str, str, Exception], None],
     pre_backfill_verdicts_for_due_prs_fn: Callable[..., tuple[str, ...]] | None = None,
-    partition_review_queue_entries_by_probe_change_fn: Callable[
-        ..., tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]
-    ]
-    | None = None,
+    partition_review_queue_entries_by_probe_change_fn: (
+        Callable[..., tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]] | None
+    ) = None,
     repark_unchanged_review_queue_entries_fn: Callable[..., None] | None = None,
-    build_review_snapshots_for_queue_entries_fn: Callable[
-        ..., dict[tuple[str, int], ReviewSnapshot]
-    ]
-    | None = None,
-    backfill_review_verdicts_from_snapshots_fn: Callable[..., tuple[str, ...]] | None = None,
+    build_review_snapshots_for_queue_entries_fn: (
+        Callable[..., dict[tuple[str, int], ReviewSnapshot]] | None
+    ) = None,
+    backfill_review_verdicts_from_snapshots_fn: (
+        Callable[..., tuple[str, ...]] | None
+    ) = None,
 ) -> Any:
     """Prepare the changed due-review groups and snapshots for rescue processing."""
     due_items = list(prepared_batch.due_items)
@@ -785,16 +796,17 @@ def prepare_due_review_processing(
     if due_pr_groups:
         try:
             changed_due_items, unchanged_due_items = (
-                (
-                    partition_review_queue_entries_by_probe_change_fn
-                    or partition_review_queue_entries_by_probe_change
-                )(
-                    due_items,
-                    pr_port=pr_port,
-                )
+                partition_review_queue_entries_by_probe_change_fn
+                or partition_review_queue_entries_by_probe_change
+            )(
+                due_items,
+                pr_port=pr_port,
             )
             if unchanged_due_items and not dry_run:
-                (repark_unchanged_review_queue_entries_fn or repark_unchanged_review_queue_entries)(
+                (
+                    repark_unchanged_review_queue_entries_fn
+                    or repark_unchanged_review_queue_entries
+                )(
                     store,
                     unchanged_due_items,
                     now=now,
@@ -1138,16 +1150,16 @@ def process_review_queue_due_groups(
     log_pre_backfill_warning: Callable[[str, Exception], None],
     log_backfill_warning: Callable[[str, str, Exception], None],
     pre_backfill_verdicts_for_due_prs_fn: Callable[..., tuple[str, ...]] | None = None,
-    partition_review_queue_entries_by_probe_change_fn: Callable[
-        ..., tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]
-    ]
-    | None = None,
+    partition_review_queue_entries_by_probe_change_fn: (
+        Callable[..., tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]] | None
+    ) = None,
     repark_unchanged_review_queue_entries_fn: Callable[..., None] | None = None,
-    build_review_snapshots_for_queue_entries_fn: Callable[
-        ..., dict[tuple[str, int], ReviewSnapshot]
-    ]
-    | None = None,
-    backfill_review_verdicts_from_snapshots_fn: Callable[..., tuple[str, ...]] | None = None,
+    build_review_snapshots_for_queue_entries_fn: (
+        Callable[..., dict[tuple[str, int], ReviewSnapshot]] | None
+    ) = None,
+    backfill_review_verdicts_from_snapshots_fn: (
+        Callable[..., tuple[str, ...]] | None
+    ) = None,
 ) -> Any:
     """Process the due PR groups for a prepared review-queue batch."""
     prepared_due_processing = prepare_due_review_processing(
@@ -1264,18 +1276,20 @@ def drain_review_queue(
     log_probe_warning: Callable[[Exception], None],
     log_pre_backfill_warning: Callable[[str, Exception], None],
     log_backfill_warning: Callable[[str, str, Exception], None],
-    wakeup_changed_review_queue_entries_fn: Callable[..., tuple[str, ...]] | None = None,
+    wakeup_changed_review_queue_entries_fn: (
+        Callable[..., tuple[str, ...]] | None
+    ) = None,
     pre_backfill_verdicts_for_due_prs_fn: Callable[..., tuple[str, ...]] | None = None,
-    partition_review_queue_entries_by_probe_change_fn: Callable[
-        ..., tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]
-    ]
-    | None = None,
+    partition_review_queue_entries_by_probe_change_fn: (
+        Callable[..., tuple[list[ReviewQueueEntry], list[ReviewQueueEntry]]] | None
+    ) = None,
     repark_unchanged_review_queue_entries_fn: Callable[..., None] | None = None,
-    build_review_snapshots_for_queue_entries_fn: Callable[
-        ..., dict[tuple[str, int], ReviewSnapshot]
-    ]
-    | None = None,
-    backfill_review_verdicts_from_snapshots_fn: Callable[..., tuple[str, ...]] | None = None,
+    build_review_snapshots_for_queue_entries_fn: (
+        Callable[..., dict[tuple[str, int], ReviewSnapshot]] | None
+    ) = None,
+    backfill_review_verdicts_from_snapshots_fn: (
+        Callable[..., tuple[str, ...]] | None
+    ) = None,
 ) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
     """Process a bounded batch of queued Review items."""
     memo = github_memo or github_memo_factory()
@@ -1292,23 +1306,29 @@ def drain_review_queue(
             ).review_state.build_board_snapshot()
         )
 
-    effective_board_snapshot = board_snapshot or build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=critical_path_config,
-        github_memo=memo,
-        gh_runner=gh_runner,
-    ).review_state.build_board_snapshot()
+    effective_board_snapshot = (
+        board_snapshot
+        or build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=critical_path_config,
+            github_memo=memo,
+            gh_runner=gh_runner,
+        ).review_state.build_board_snapshot()
+    )
 
     store = session_store or build_session_store(db)
     now = datetime.now(timezone.utc)
-    effective_pr_port = pr_port or build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=critical_path_config,
-        github_memo=memo,
-        gh_runner=gh_runner,
-    ).pull_requests
+    effective_pr_port = (
+        pr_port
+        or build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=critical_path_config,
+            github_memo=memo,
+            gh_runner=gh_runner,
+        ).pull_requests
+    )
 
     prepared_batch, empty_summary = prepare_review_queue_batch(
         config=config,

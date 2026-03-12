@@ -56,9 +56,7 @@ class PullRequestPort(Protocol):
         """Enable auto-merge on a PR. Returns status string."""
         ...
 
-    def rerun_failed_check(
-        self, pr_repo: str, check_name: str, run_id: int
-    ) -> bool:
+    def rerun_failed_check(self, pr_repo: str, check_name: str, run_id: int) -> bool:
         """Re-run a failed/cancelled check. Returns True on success."""
         ...
 

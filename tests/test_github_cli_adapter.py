@@ -56,7 +56,9 @@ def test_list_open_prs_for_issue_searches_by_issue_number(monkeypatch) -> None:
             ]
         )
 
-    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_base._run_gh", fake_run_gh
+    )
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
     prs = adapter.list_open_prs_for_issue("StartupAI-site/startupai-crew", 42)
@@ -145,13 +147,16 @@ def test_set_issue_status_uses_board_info_and_field_option(monkeypatch) -> None:
     monkeypatch.setattr(
         GitHubCliAdapter,
         "_query_board_info",
-        lambda self, issue_ref: SimpleNamespace(status="Ready", item_id="ITEM", project_id="PROJ"),
+        lambda self, issue_ref: SimpleNamespace(
+            status="Ready", item_id="ITEM", project_id="PROJ"
+        ),
     )
     monkeypatch.setattr(
         GitHubCliAdapter,
         "_query_single_select_field_option",
         lambda self, project_id, field_name, option_name: (
-            field_calls.append((project_id, field_name, option_name)) or ("FIELD", "OPT")
+            field_calls.append((project_id, field_name, option_name))
+            or ("FIELD", "OPT")
         ),
     )
     monkeypatch.setattr(
@@ -208,7 +213,9 @@ def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
         calls.append(args)
         return json.dumps({"items": [{"number": 84}, {"number": 85}]})
 
-    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_base._run_gh", fake_run_gh
+    )
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
     numbers = adapter.search_open_issue_numbers_with_comment_marker(
@@ -219,12 +226,15 @@ def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
     assert numbers == (84, 85)
     assert calls[0][0:4] == ["api", "search/issues", "-X", "GET"]
     assert any(
-        arg == 'q=repo:StartupAI-site/startupai-crew is:issue is:open in:comments "startupai-board-bot:handoff:job="'
+        arg
+        == 'q=repo:StartupAI-site/startupai-crew is:issue is:open in:comments "startupai-board-bot:handoff:job="'
         for arg in calls[0]
     )
 
 
-def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(monkeypatch) -> None:
+def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         "startupai_controller.adapters.github_base._run_gh",
         lambda args, gh_runner=None, operation_type="query": json.dumps(
@@ -245,7 +255,9 @@ def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(monkeypatch)
     assert comments == ("first", "second", "")
 
 
-def test_latest_matching_comment_timestamp_delegates_to_query_helper(monkeypatch) -> None:
+def test_latest_matching_comment_timestamp_delegates_to_query_helper(
+    monkeypatch,
+) -> None:
     expected = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
     recorded: list[tuple[str, str, int, tuple[str, ...]]] = []
 
@@ -390,7 +402,9 @@ def test_set_issue_field_routes_single_select_fields(monkeypatch) -> None:
     monkeypatch.setattr(
         GitHubCliAdapter,
         "_query_board_info",
-        lambda self, issue_ref: SimpleNamespace(status="Ready", item_id="ITEM", project_id="PROJ"),
+        lambda self, issue_ref: SimpleNamespace(
+            status="Ready", item_id="ITEM", project_id="PROJ"
+        ),
     )
     monkeypatch.setattr(
         GitHubCliAdapter,
@@ -554,9 +568,7 @@ def test_required_status_checks_delegates_to_query(monkeypatch) -> None:
     monkeypatch.setattr(
         GitHubCliAdapter,
         "_query_required_status_checks",
-        lambda self, pr_repo, base_ref_name="main": {
-            f"{pr_repo}:{base_ref_name}"
-        },
+        lambda self, pr_repo, base_ref_name="main": {f"{pr_repo}:{base_ref_name}"},
     )
     adapter = GitHubCliAdapter(project_owner="StartupAI-site", project_number=1)
 
@@ -742,10 +754,7 @@ def test_review_state_digests_batches_by_repo(monkeypatch) -> None:
 
     def fake_probes(self, pr_repo, pr_numbers):
         calls.append((pr_repo, pr_numbers))
-        return {
-            number: {"repo": pr_repo, "number": number}
-            for number in pr_numbers
-        }
+        return {number: {"repo": pr_repo, "number": number} for number in pr_numbers}
 
     monkeypatch.setattr(
         GitHubCliAdapter,
@@ -813,7 +822,10 @@ def test_post_codex_verdict_if_missing_checks_marker_first(monkeypatch) -> None:
     ]
     assert len(poster_calls) == 1
     assert poster_calls[0][0:3] == ("StartupAI-site", "startupai-crew", 42)
-    assert "<!-- startupai-board-bot:codex-verdict:session=session-123 -->" in poster_calls[0][3]
+    assert (
+        "<!-- startupai-board-bot:codex-verdict:session=session-123 -->"
+        in poster_calls[0][3]
+    )
     assert "codex-review: pass" in poster_calls[0][3]
 
 
@@ -860,7 +872,9 @@ def test_build_cycle_board_snapshot_uses_adapter_owned_cache(monkeypatch) -> Non
         calls["count"] += 1
         return json.dumps(payload)
 
-    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_base._run_gh", fake_run_gh
+    )
 
     first = build_cycle_board_snapshot("StartupAI-site", 1)
     second = build_cycle_board_snapshot("StartupAI-site", 1)
@@ -948,7 +962,11 @@ def test_issue_assignee_helpers_use_adapter_owned_mechanism(monkeypatch) -> None
     )
 
     assert assignees == ["alice", "bob"]
-    assert calls[0][0:3] == ["api", "repos/StartupAI-site/startupai-crew/issues/42", "-q"]
+    assert calls[0][0:3] == [
+        "api",
+        "repos/StartupAI-site/startupai-crew/issues/42",
+        "-q",
+    ]
     assert calls[1][0:4] == [
         "api",
         "repos/StartupAI-site/startupai-crew/issues/42",

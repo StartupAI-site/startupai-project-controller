@@ -20,7 +20,6 @@ from startupai_controller.ports.process_runner import GhRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 
-
 # ---------------------------------------------------------------------------
 # Cycle runtime context (moved from board_consumer.py)
 # ---------------------------------------------------------------------------
@@ -176,7 +175,9 @@ def run_deferred_replay_phase(
     )
     timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
     if replayed_actions:
-        deps.logger.info("Replayed deferred control-plane actions: %s", replayed_actions)
+        deps.logger.info(
+            "Replayed deferred control-plane actions: %s", replayed_actions
+        )
 
 
 def load_board_snapshot_phase(
@@ -284,7 +285,9 @@ def run_review_queue_phase(
     )
     timings_ms["review_queue"] = int((time.monotonic() - phase_started) * 1000)
     if review_queue_summary.error:
-        deps.logger.warning("Review queue partial failure: %s", review_queue_summary.error)
+        deps.logger.warning(
+            "Review queue partial failure: %s", review_queue_summary.error
+        )
         if not dry_run:
             deps.mark_degraded(
                 db,
@@ -338,9 +341,13 @@ def run_admission_phase(
     if admission_decision.admitted:
         if not dry_run:
             deps.record_successful_github_mutation(db)
-        deps.logger.info("Backlog admission admitted: %s", list(admission_decision.admitted))
+        deps.logger.info(
+            "Backlog admission admitted: %s", list(admission_decision.admitted)
+        )
     if admission_decision.partial_failure and admission_decision.error:
-        deps.logger.warning("Backlog admission partial failure: %s", admission_decision.error)
+        deps.logger.warning(
+            "Backlog admission partial failure: %s", admission_decision.error
+        )
     if not dry_run:
         deps.persist_admission_summary(db, admission_summary)
     return admission_summary
@@ -378,39 +385,65 @@ def prepare_cycle(
     # wrapped to inject the PhaseHelperDeps.
     def _deferred_replay_phase(config, db, runtime, *, timings_ms, dry_run):
         return run_deferred_replay_phase(
-            config, db, runtime, deps=phase_deps,
-            timings_ms=timings_ms, dry_run=dry_run,
+            config,
+            db,
+            runtime,
+            deps=phase_deps,
+            timings_ms=timings_ms,
+            dry_run=dry_run,
         )
 
     def _board_snapshot_phase(config, runtime, *, timings_ms):
         return load_board_snapshot_phase(
-            config, runtime, timings_ms=timings_ms,
+            config,
+            runtime,
+            timings_ms=timings_ms,
         )
 
-    def _executor_routing_phase(config, db, runtime, *, board_snapshot, timings_ms, dry_run):
+    def _executor_routing_phase(
+        config, db, runtime, *, board_snapshot, timings_ms, dry_run
+    ):
         return run_executor_routing_phase(
-            config, db, runtime, deps=phase_deps,
-            board_snapshot=board_snapshot, timings_ms=timings_ms,
+            config,
+            db,
+            runtime,
+            deps=phase_deps,
+            board_snapshot=board_snapshot,
+            timings_ms=timings_ms,
             dry_run=dry_run,
         )
 
     def _reconciliation_phase(config, db, runtime, *, board_snapshot, timings_ms):
         return run_reconciliation_phase(
-            config, db, runtime, deps=phase_deps,
-            board_snapshot=board_snapshot, timings_ms=timings_ms,
+            config,
+            db,
+            runtime,
+            deps=phase_deps,
+            board_snapshot=board_snapshot,
+            timings_ms=timings_ms,
         )
 
-    def _review_queue_phase(config, db, runtime, *, board_snapshot, timings_ms, dry_run):
+    def _review_queue_phase(
+        config, db, runtime, *, board_snapshot, timings_ms, dry_run
+    ):
         return run_review_queue_phase(
-            config, db, runtime, deps=phase_deps,
-            board_snapshot=board_snapshot, timings_ms=timings_ms,
+            config,
+            db,
+            runtime,
+            deps=phase_deps,
+            board_snapshot=board_snapshot,
+            timings_ms=timings_ms,
             dry_run=dry_run,
         )
 
     def _admission_phase(config, db, runtime, *, board_snapshot, timings_ms, dry_run):
         return run_admission_phase(
-            config, db, runtime, deps=phase_deps,
-            board_snapshot=board_snapshot, timings_ms=timings_ms,
+            config,
+            db,
+            runtime,
+            deps=phase_deps,
+            board_snapshot=board_snapshot,
+            timings_ms=timings_ms,
             dry_run=dry_run,
         )
 

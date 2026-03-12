@@ -11,7 +11,6 @@ from typing import Any
 
 from startupai_controller.domain.models import SessionInfo
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -41,11 +40,11 @@ RETRYABLE_FAILURE_REASONS = {
 }
 
 # Escalation ceilings per blocker class
-ESCALATION_CEILING_TRANSIENT = 12   # ~24 min at 2-min pending retry
-ESCALATION_CEILING_FAILED = 6       # ~90 min at 15-min failed retry
-ESCALATION_CEILING_STABLE = 4       # ~120 min at 30-min stable retry
-ESCALATION_CEILING_AUTOMERGE = 3    # ~3 hr at 1-hr automerge retry
-ESCALATION_CEILING_DEFAULT = 8      # ~40 min at 5-min default retry
+ESCALATION_CEILING_TRANSIENT = 12  # ~24 min at 2-min pending retry
+ESCALATION_CEILING_FAILED = 6  # ~90 min at 15-min failed retry
+ESCALATION_CEILING_STABLE = 4  # ~120 min at 30-min stable retry
+ESCALATION_CEILING_AUTOMERGE = 3  # ~3 hr at 1-hr automerge retry
+ESCALATION_CEILING_DEFAULT = 8  # ~40 min at 5-min default retry
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +57,7 @@ def blocker_class(blocked_reason: str) -> str:
     normalized = blocked_reason.strip().lower()
     if "auto-merge pending verification" in normalized:
         return "automerge"
-    if (
-        "required checks pending" in normalized
-        or "review checks pending" in normalized
-    ):
+    if "required checks pending" in normalized or "review checks pending" in normalized:
         return "transient"
     if (
         "required checks failed" in normalized
@@ -101,10 +97,7 @@ def review_queue_retry_seconds_for_blocked_reason(blocked_reason: str) -> int:
     normalized = blocked_reason.strip().lower()
     if "auto-merge pending verification" in normalized:
         return REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
-    if (
-        "required checks pending" in normalized
-        or "review checks pending" in normalized
-    ):
+    if "required checks pending" in normalized or "review checks pending" in normalized:
         return REVIEW_QUEUE_PENDING_RETRY_SECONDS
     if (
         "required checks failed" in normalized
@@ -238,11 +231,7 @@ def blocked_streak_needs_escalation(
     Returns (new_class, new_streak, needs_escalation).
     """
     new_class = blocker_class(blocked_reason)
-    new_streak = (
-        (current_streak + 1)
-        if new_class == current_class
-        else 1
-    )
+    new_streak = (current_streak + 1) if new_class == current_class else 1
     ceiling = escalation_ceiling_for_blocker_class(new_class)
     return new_class, new_streak, new_streak >= ceiling
 

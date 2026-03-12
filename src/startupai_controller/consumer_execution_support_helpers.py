@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 import subprocess
 from typing import Any, Callable
 
-from startupai_controller.runtime.wiring import build_worktree_port as _build_worktree_port
+from startupai_controller.runtime.wiring import (
+    build_worktree_port as _build_worktree_port,
+)
 from startupai_controller.validate_critical_path_promotion import (
     direct_predecessors,
     in_any_critical_path as _in_any_critical_path,
@@ -120,7 +122,9 @@ def has_commits_on_branch(
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> bool:
     """Check if the branch has commits beyond main."""
-    runner = subprocess_runner or (lambda args, **kwargs: subprocess.run(args, **kwargs))
+    runner = subprocess_runner or (
+        lambda args, **kwargs: subprocess.run(args, **kwargs)
+    )
     result = runner(
         ["git", "-C", worktree_path, "log", "main..HEAD", "--oneline"],
         capture_output=True,

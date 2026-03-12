@@ -7,7 +7,9 @@ from typing import Any, Callable
 
 from startupai_controller import consumer_automation_bridge as _automation_bridge
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
-from startupai_controller import consumer_execution_support_helpers as _execution_support_helpers
+from startupai_controller import (
+    consumer_execution_support_helpers as _execution_support_helpers,
+)
 import startupai_controller.consumer_resolution_helpers as _resolution_helpers
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.domain.repair_policy import marker_for as _marker_for

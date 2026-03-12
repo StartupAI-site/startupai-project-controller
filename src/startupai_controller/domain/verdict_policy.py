@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from startupai_controller.domain.repair_policy import MARKER_PREFIX
 
-
 # ---------------------------------------------------------------------------
 # Verdict marker format
 # ---------------------------------------------------------------------------

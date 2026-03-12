@@ -40,8 +40,10 @@ from startupai_controller.control_plane_runtime import _apply_automation_runtime
 from startupai_controller.domain.models import CycleResult, ReviewQueueDrainSummary
 from startupai_controller.application.consumer.preflight import ReconciliationResult
 from startupai_controller.runtime.wiring import build_session_store, open_consumer_db
-from startupai_controller.validate_critical_path_promotion import ConfigError, load_config
-
+from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
+    load_config,
+)
 
 logger = logging.getLogger("board-consumer")
 DEFAULT_STATUS_HOST = "127.0.0.1"

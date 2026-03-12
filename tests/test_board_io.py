@@ -36,7 +36,6 @@ from startupai_controller.validate_critical_path_promotion import (
     load_config,
 )
 
-
 # -- Fixtures -----------------------------------------------------------------
 
 
@@ -183,14 +182,14 @@ def test_query_failed_check_runs_parses_response() -> None:
 
 def test_query_failed_check_runs_returns_none_on_api_error() -> None:
     """_query_failed_check_runs returns None when API fails."""
-    from startupai_controller.validate_critical_path_promotion import GhQueryError as _GhQueryError
+    from startupai_controller.validate_critical_path_promotion import (
+        GhQueryError as _GhQueryError,
+    )
 
     def failing_gh(args):
         raise _GhQueryError("rate limited")
 
-    result = _query_failed_check_runs(
-        "owner", "repo", "sha123", gh_runner=failing_gh
-    )
+    result = _query_failed_check_runs("owner", "repo", "sha123", gh_runner=failing_gh)
     assert result is None
 
 
@@ -212,7 +211,10 @@ def test_query_pr_gate_status_normalizes_state_to_uppercase() -> None:
     def fake_gh(args):
         if args[:2] == ["pr", "view"]:
             return pr_payload
-        if args[:2] == ["api", "repos/owner/repo/branches/main/protection/required_status_checks"]:
+        if args[:2] == [
+            "api",
+            "repos/owner/repo/branches/main/protection/required_status_checks",
+        ]:
             return branch_payload
         raise AssertionError(args)
 
@@ -345,7 +347,13 @@ def test_set_board_status_wrapper_respects_board_io_runner(monkeypatch) -> None:
 
     def fake_gh(args, gh_runner=None, operation_type="query"):
         calls.append(list(args))
-        return json.dumps({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM1"}}}})
+        return json.dumps(
+            {
+                "data": {
+                    "updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM1"}}
+                }
+            }
+        )
 
     monkeypatch.setattr(board_io, "_run_gh", fake_gh)
 
@@ -692,7 +700,11 @@ def test_enable_automerge_confirmed_after_retries() -> None:
         return ""
 
     result = enable_pull_request_automerge(
-        "o/r", 42, confirm_retries=3, confirm_delay_seconds=0, gh_runner=fake_gh,
+        "o/r",
+        42,
+        confirm_retries=3,
+        confirm_delay_seconds=0,
+        gh_runner=fake_gh,
     )
     assert result == "confirmed"
     assert call_count["enable"] == 1
@@ -701,6 +713,7 @@ def test_enable_automerge_confirmed_after_retries() -> None:
 
 def test_enable_automerge_pending_when_never_confirmed() -> None:
     """All verify reads return null → "pending"."""
+
     def fake_gh(args):
         if "merge" in args and "--auto" in args:
             return ""
@@ -709,7 +722,11 @@ def test_enable_automerge_pending_when_never_confirmed() -> None:
         return ""
 
     result = enable_pull_request_automerge(
-        "o/r", 42, confirm_retries=3, confirm_delay_seconds=0, gh_runner=fake_gh,
+        "o/r",
+        42,
+        confirm_retries=3,
+        confirm_delay_seconds=0,
+        gh_runner=fake_gh,
     )
     assert result == "pending"
 
@@ -725,5 +742,9 @@ def test_enable_automerge_propagates_gh_error_on_enable() -> None:
 
     with pytest.raises(GhQueryError, match="transport error"):
         enable_pull_request_automerge(
-            "o/r", 42, confirm_retries=3, confirm_delay_seconds=0, gh_runner=fake_gh,
+            "o/r",
+            42,
+            confirm_retries=3,
+            confirm_delay_seconds=0,
+            gh_runner=fake_gh,
         )

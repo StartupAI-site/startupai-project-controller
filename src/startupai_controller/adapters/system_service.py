@@ -12,7 +12,9 @@ class SystemServiceAdapter:
     def __init__(
         self,
         *,
-        subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        subprocess_runner: (
+            Callable[..., subprocess.CompletedProcess[str]] | None
+        ) = None,
     ) -> None:
         self._subprocess_runner = subprocess_runner or subprocess.run
 

@@ -114,7 +114,9 @@ class ReconciliationDeps:
 
     issue_ref_for_snapshot: Callable[[Any], str | None]
     reconcile_active_repair_review_items: Callable[..., list[str]]
-    reconcile_stale_in_progress_items: Callable[..., tuple[list[str], list[str], list[str]]]
+    reconcile_stale_in_progress_items: Callable[
+        ..., tuple[list[str], list[str], list[str]]
+    ]
 
 
 def reconcile_board_truth(
@@ -139,9 +141,7 @@ def reconcile_board_truth(
     active_workers = store.active_workers()
     active_issue_refs = {worker.issue_ref for worker in active_workers}
     active_repair_issue_refs = {
-        worker.issue_ref
-        for worker in active_workers
-        if worker.session_kind == "repair"
+        worker.issue_ref for worker in active_workers if worker.session_kind == "repair"
     }
     moved_ready: list[str] = []
     moved_in_progress: list[str] = []

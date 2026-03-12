@@ -393,7 +393,9 @@ def run_multi_worker_daemon_loop(
     """Run the daemon loop with multiple concurrent worker slots."""
     sleeper = sleep_fn or time.sleep
     active_tasks: dict[Any, Any] = {}
-    with deps.executor_factory(max_workers=max(1, config.global_concurrency)) as executor:
+    with deps.executor_factory(
+        max_workers=max(1, config.global_concurrency)
+    ) as executor:
         while True:
             deps.log_completed_worker_results(active_tasks)
 

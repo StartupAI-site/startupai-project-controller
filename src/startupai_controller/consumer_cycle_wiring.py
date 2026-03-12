@@ -209,7 +209,8 @@ def prepare_launch_candidate(
         subprocess_runner=process_runner_port,
         review_state_port=review_state_port,
         gh_runner=gh_port,
-        pr_port=pr_port or build_github_port_bundle(
+        pr_port=pr_port
+        or build_github_port_bundle(
             config.project_owner,
             config.project_number,
             config=prepared.cp_config,
@@ -248,7 +249,10 @@ def resolve_launch_context_for_cycle(
     logger: Any,
 ) -> tuple[Any | None, Any | None]:
     """Resolve or prepare launch-ready work for this cycle."""
-    def _select_launch_candidate(*, config: Any, db: Any, prepared: Any, target_issue: str | None) -> tuple[Any | None, Any | None]:
+
+    def _select_launch_candidate(
+        *, config: Any, db: Any, prepared: Any, target_issue: str | None
+    ) -> tuple[Any | None, Any | None]:
         return select_launch_candidate_for_cycle(
             config=config,
             db=db,
@@ -426,6 +430,7 @@ def handoff_execution_to_review(
     record_metric: Callable[..., None],
 ) -> Any:
     """Transition a claimed session into Review and perform immediate rescue."""
+
     def _transition_claimed_session_to_review(
         *,
         db: Any,
@@ -529,6 +534,7 @@ def handle_non_review_execution_outcome(
     logger: Any,
 ) -> tuple[str, Any | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
+
     def _verify_resolution_payload(
         issue_ref: str,
         resolution: dict[str, Any] | None,
@@ -643,9 +649,12 @@ def execute_claimed_session(
     session_status_from_codex_result: Callable[..., tuple[str, str | None]],
     create_pr_for_execution_result: Callable[..., Any],
     handoff_execution_to_review: Callable[..., Any],
-    handle_non_review_execution_outcome: Callable[..., tuple[str, Any | None, str | None]],
+    handle_non_review_execution_outcome: Callable[
+        ..., tuple[str, Any | None, str | None]
+    ],
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
+
     def _create_pr_for_execution_result(
         *,
         config: Any,
@@ -731,7 +740,9 @@ def execute_claimed_session(
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_poster=comment_poster,
-            subprocess_runner=process_runner.run if process_runner is not None else None,
+            subprocess_runner=(
+                process_runner.run if process_runner is not None else None
+            ),
             gh_runner=effective_gh_runner,
         )
 

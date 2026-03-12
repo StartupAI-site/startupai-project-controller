@@ -10,9 +10,16 @@ import pytest
 
 import startupai_controller.board_control_plane as control_plane
 import startupai_controller.control_plane_tick_runtime as tick_runtime
-from startupai_controller.board_automation import BoardAutomationConfig, ExecutorRoutingDecision, AdmissionConfig
+from startupai_controller.board_automation import (
+    BoardAutomationConfig,
+    ExecutorRoutingDecision,
+    AdmissionConfig,
+)
 from startupai_controller.board_graph import AdmissionDecision
-from startupai_controller.adapters.github_types import CycleBoardSnapshot, CycleGitHubMemo
+from startupai_controller.adapters.github_types import (
+    CycleBoardSnapshot,
+    CycleGitHubMemo,
+)
 from startupai_controller.domain.models import IssueSnapshot
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
@@ -125,7 +132,9 @@ def test_tick_skips_review_rescue_when_no_review_items(
             admission=AdmissionConfig(enabled=True),
         ),
     )
-    monkeypatch.setattr(tick_runtime, "_apply_automation_runtime", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tick_runtime, "_apply_automation_runtime", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         tick_runtime,
         "_current_main_workflows",
@@ -179,7 +188,9 @@ def test_tick_skips_review_rescue_when_no_review_items(
             },
         ),
     )
-    monkeypatch.setattr(tick_runtime, "_persist_admission_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tick_runtime, "_persist_admission_summary", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         tick_runtime,
         "_drain_review_queue",
@@ -204,7 +215,9 @@ def test_tick_skips_review_rescue_when_no_review_items(
             CycleBoardSnapshot(items=(), by_status={}),
         ),
     )
-    monkeypatch.setattr(tick_runtime, "_record_successful_board_sync", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tick_runtime, "_record_successful_board_sync", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(tick_runtime, "_clear_degraded", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         tick_runtime,

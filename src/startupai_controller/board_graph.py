@@ -36,7 +36,6 @@ from startupai_controller.validate_critical_path_promotion import (
     parse_issue_ref,
 )
 
-
 # ---------------------------------------------------------------------------
 # Pure computation helpers
 # ---------------------------------------------------------------------------
@@ -71,7 +70,11 @@ def _canonical_issue_ref(issue_ref: str, config: CriticalPathConfig) -> str:
 
     repo_name, number_text = issue_ref.split("#", maxsplit=1)
     prefix = next(
-        (candidate for candidate, repo in config.issue_prefixes.items() if repo == repo_name),
+        (
+            candidate
+            for candidate, repo in config.issue_prefixes.items()
+            if repo == repo_name
+        ),
         None,
     )
     if prefix is None or not number_text.isdigit():

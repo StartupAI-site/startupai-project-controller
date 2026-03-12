@@ -68,7 +68,9 @@ def auto_promote_successors(
             config,
         )
 
-        if review_state_port.comment_exists(f"{succ_owner}/{succ_repo}", succ_number, marker):
+        if review_state_port.comment_exists(
+            f"{succ_owner}/{succ_repo}", succ_number, marker
+        ):
             result.skipped.append((successor_ref, "Bridge comment already exists"))
             continue
 

@@ -13,7 +13,6 @@ from typing import Any
 
 import yaml
 
-
 DEFAULT_WORKFLOW_FILENAME = "WORKFLOW.md"
 WORKFLOW_CONFIG_KEY = "startupai_consumer"
 ALLOWED_WORKFLOW_KEYS = {
@@ -91,7 +90,9 @@ def default_repo_roots() -> dict[str, Path]:
     }
 
 
-def workflow_path_for_root(root: Path, filename: str = DEFAULT_WORKFLOW_FILENAME) -> Path:
+def workflow_path_for_root(
+    root: Path, filename: str = DEFAULT_WORKFLOW_FILENAME
+) -> Path:
     """Resolve a workflow path from a repo root or worktree root."""
     return root / filename
 
@@ -141,9 +142,7 @@ def load_workflow_definition(
 
     unknown_keys = sorted(key for key in raw_config if key not in ALLOWED_WORKFLOW_KEYS)
     if unknown_keys:
-        raise WorkflowConfigError(
-            f"unknown-keys:{path}:{','.join(unknown_keys)}"
-        )
+        raise WorkflowConfigError(f"unknown-keys:{path}:{','.join(unknown_keys)}")
 
     def _parse_optional_int(key: str) -> int | None:
         value = raw_config.get(key)
@@ -156,9 +155,7 @@ def load_workflow_definition(
                 f"invalid-{key}:{path}:expected-positive-integer"
             ) from error
         if parsed < 1:
-            raise WorkflowConfigError(
-                f"invalid-{key}:{path}:expected-positive-integer"
-            )
+            raise WorkflowConfigError(f"invalid-{key}:{path}:expected-positive-integer")
         return parsed
 
     validation_cmd = raw_config.get("validation_cmd")
@@ -171,11 +168,11 @@ def load_workflow_definition(
 
     workspace_hooks_raw = raw_config.get("workspace_hooks", {}) or {}
     if not isinstance(workspace_hooks_raw, dict):
-        raise WorkflowConfigError(
-            f"invalid-workspace_hooks:{path}:expected-object"
-        )
+        raise WorkflowConfigError(f"invalid-workspace_hooks:{path}:expected-object")
     unknown_hooks = sorted(
-        hook_name for hook_name in workspace_hooks_raw if hook_name not in ALLOWED_WORKFLOW_HOOKS
+        hook_name
+        for hook_name in workspace_hooks_raw
+        if hook_name not in ALLOWED_WORKFLOW_HOOKS
     )
     if unknown_hooks:
         raise WorkflowConfigError(
@@ -187,7 +184,9 @@ def load_workflow_definition(
             raise WorkflowConfigError(
                 f"invalid-workspace-hooks:{path}:{hook_name}:expected-list"
             )
-        normalized = tuple(str(command).strip() for command in commands if str(command).strip())
+        normalized = tuple(
+            str(command).strip() for command in commands if str(command).strip()
+        )
         workspace_hooks[str(hook_name)] = normalized
 
     prompt_template = match.group(2).strip()

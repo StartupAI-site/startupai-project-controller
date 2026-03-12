@@ -104,7 +104,9 @@ def select_launch_candidate_for_cycle(
             error=err,
         ):
             mark_degraded(db, f"selection-error:{gh_reason_code(err)}:{err}")
-        return None, cycle_result_factory(action="error", reason=f"selection-error:{err}")
+        return None, cycle_result_factory(
+            action="error", reason=f"selection-error:{err}"
+        )
     except Exception as err:
         logger.exception("Unexpected selection failure")
         return None, cycle_result_factory(
@@ -401,7 +403,9 @@ def open_pending_claim_session(
     db.update_session(session_id, provenance_id=session_id, phase="launch_ready")
     now = datetime.now(timezone.utc)
     try:
-        lease_acquired = db.acquire_lease(candidate, session_id, slot_id=slot_id, now=now)
+        lease_acquired = db.acquire_lease(
+            candidate, session_id, slot_id=slot_id, now=now
+        )
     except TypeError:
         lease_acquired = db.acquire_lease(candidate, session_id, now=now)
     if not lease_acquired:

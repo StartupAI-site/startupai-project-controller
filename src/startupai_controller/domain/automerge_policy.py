@@ -5,7 +5,6 @@ Pure policy module: NO GitHub, SQLite, subprocess, or logging imports.
 
 from __future__ import annotations
 
-
 # ---------------------------------------------------------------------------
 # Auto-merge gate evaluation
 # ---------------------------------------------------------------------------
@@ -40,10 +39,18 @@ def automerge_gate_decision(
     label = f"{pr_repo}#{pr_number}"
 
     if not review_refs:
-        return 2, f"{label}: not in board Review scope; automerge controller no-op", "no_op"
+        return (
+            2,
+            f"{label}: not in board Review scope; automerge controller no-op",
+            "no_op",
+        )
 
     if not copilot_review_present:
-        return 2, f"{label}: missing Copilot review signal (COMMENTED|APPROVED)", "no_op"
+        return (
+            2,
+            f"{label}: missing Copilot review signal (COMMENTED|APPROVED)",
+            "no_op",
+        )
 
     if codex_gate_code != 0:
         return codex_gate_code, codex_gate_message, "no_op"
@@ -61,10 +68,18 @@ def automerge_gate_decision(
         return 2, f"{label}: required checks failed {sorted(required_failed)}", "no_op"
 
     if required_pending:
-        return 2, f"{label}: required checks pending {sorted(required_pending)}", "no_op"
+        return (
+            2,
+            f"{label}: required checks pending {sorted(required_pending)}",
+            "no_op",
+        )
 
     if merge_state_status == "BEHIND":
-        return 0, f"{label}: would update branch then enable auto-merge", "update_branch_then_enable"
+        return (
+            0,
+            f"{label}: would update branch then enable auto-merge",
+            "update_branch_then_enable",
+        )
 
     if mergeable not in {"MERGEABLE", "UNKNOWN"}:
         return 2, f"{label}: mergeable={mergeable}, cannot auto-merge", "no_op"

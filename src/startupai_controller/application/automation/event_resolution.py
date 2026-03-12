@@ -27,9 +27,7 @@ def resolve_issues_from_event(
     try:
         event_data = json.loads(Path(event_path).read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as error:
-        raise ConfigError(
-            f"Failed reading event file {event_path}: {error}"
-        ) from error
+        raise ConfigError(f"Failed reading event file {event_path}: {error}") from error
 
     results: list[tuple[str, str, list[str] | None]] = []
 
@@ -49,7 +47,10 @@ def resolve_issues_from_event(
         owner, repo = pr_repo.split("/", maxsplit=1)
 
         linked = _resolve_linked_issues(
-            owner, repo, pr_number, config,
+            owner,
+            repo,
+            pr_number,
+            config,
             pr_port=pr_port,
         )
 
@@ -82,7 +83,10 @@ def resolve_issues_from_event(
         owner, repo = pr_repo.split("/", maxsplit=1)
 
         linked = _resolve_linked_issues(
-            owner, repo, pr_number, config,
+            owner,
+            repo,
+            pr_number,
+            config,
             pr_port=pr_port,
         )
 
@@ -101,9 +105,7 @@ def resolve_issues_from_event(
 
         for pr_info in pull_requests:
             pr_number = pr_info.get("number")
-            pr_repo_full = (
-                pr_info.get("base", {}).get("repo", {}).get("full_name", "")
-            )
+            pr_repo_full = pr_info.get("base", {}).get("repo", {}).get("full_name", "")
 
             if not pr_number or not pr_repo_full:
                 continue
@@ -113,7 +115,10 @@ def resolve_issues_from_event(
             owner, repo = pr_repo_full.split("/", maxsplit=1)
 
             linked = _resolve_linked_issues(
-                owner, repo, pr_number, config,
+                owner,
+                repo,
+                pr_number,
+                config,
                 pr_port=pr_port,
             )
 

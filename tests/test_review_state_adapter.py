@@ -34,7 +34,9 @@ def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
         recorded.append(args)
         return json.dumps({"items": [{"number": 84}, {"number": 85}]})
 
-    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_base._run_gh", fake_run_gh
+    )
     adapter = GitHubReviewStateAdapter(project_owner="StartupAI-site", project_number=1)
 
     numbers = adapter.search_open_issue_numbers_with_comment_marker(
@@ -46,7 +48,9 @@ def test_search_open_issue_numbers_with_comment_marker(monkeypatch) -> None:
     assert recorded[0][0:4] == ["api", "search/issues", "-X", "GET"]
 
 
-def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(monkeypatch) -> None:
+def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         "startupai_controller.adapters.github_base._run_gh",
         lambda args, gh_runner=None, operation_type="query": json.dumps(
@@ -67,7 +71,9 @@ def test_list_issue_comment_bodies_reads_bodies_from_issue_comments(monkeypatch)
     assert comments == ("first", "second", "")
 
 
-def test_latest_matching_comment_timestamp_delegates_to_query_helper(monkeypatch) -> None:
+def test_latest_matching_comment_timestamp_delegates_to_query_helper(
+    monkeypatch,
+) -> None:
     expected = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
     recorded: list[tuple[str, str, int, tuple[str, ...]]] = []
 
@@ -141,7 +147,9 @@ def test_build_cycle_board_snapshot_uses_adapter_owned_cache(monkeypatch) -> Non
         calls["count"] += 1
         return json.dumps(payload)
 
-    monkeypatch.setattr("startupai_controller.adapters.github_base._run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        "startupai_controller.adapters.github_base._run_gh", fake_run_gh
+    )
 
     first = build_cycle_board_snapshot("StartupAI-site", 1)
     second = build_cycle_board_snapshot("StartupAI-site", 1)

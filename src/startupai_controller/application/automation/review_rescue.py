@@ -258,14 +258,12 @@ def automerge_review(
 
     if status.mergeable not in {"MERGEABLE", "UNKNOWN"}:
         return 2, (
-            f"{pr_repo}#{pr_number}: mergeable={status.mergeable}, "
-            "cannot auto-merge"
+            f"{pr_repo}#{pr_number}: mergeable={status.mergeable}, " "cannot auto-merge"
         )
 
     if dry_run:
         return 0, (
-            f"{pr_repo}#{pr_number}: would enable auto-merge "
-            "(squash, strict gates)"
+            f"{pr_repo}#{pr_number}: would enable auto-merge " "(squash, strict gates)"
         )
 
     merge_status = pr_port.enable_automerge(

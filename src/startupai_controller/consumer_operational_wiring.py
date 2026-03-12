@@ -1072,7 +1072,9 @@ def execute_claimed_session(
         prepared=prepared,
         launch_context=launch_context,
         claimed_context=claimed_context,
-        process_runner=process_runner if process_runner is not None else subprocess_runner,
+        process_runner=(
+            process_runner if process_runner is not None else subprocess_runner
+        ),
         file_reader=file_reader,
         review_state_port=review_state_port,
         board_port=board_port,
@@ -1135,6 +1137,7 @@ def prepared_cycle_deps(
     comment_poster: Callable[..., None] | None,
 ):
     """Bind compatibility seams at the outer wiring boundary."""
+
     def _resolve_launch_context_for_cycle(
         *,
         config: Any,

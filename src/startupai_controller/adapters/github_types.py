@@ -11,7 +11,6 @@ from startupai_controller.domain.models import (
     ProjectItemSnapshot,
 )
 
-
 COPILOT_CODING_AGENT_LOGINS = {
     "app/copilot-swe-agent",
     "copilot-swe-agent[bot]",
@@ -24,7 +23,9 @@ class CycleGitHubMemo:
     """Cycle-local memoization for expensive GitHub reads."""
 
     issue_bodies: dict[tuple[str, str, int], str] = field(default_factory=dict)
-    issue_comment_bodies: dict[tuple[str, str, int], list[str]] = field(default_factory=dict)
+    issue_comment_bodies: dict[tuple[str, str, int], list[str]] = field(
+        default_factory=dict
+    )
     open_pull_requests: dict[str, list["OpenPullRequest"]] = field(default_factory=dict)
     dependency_ready: dict[str, bool] = field(default_factory=dict)
     review_pull_requests: dict[tuple[str, int], "PullRequestViewPayload"] = field(

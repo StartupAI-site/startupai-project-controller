@@ -19,7 +19,9 @@ class PreparedCycleDeps:
 
     claim_suppression_state: Callable[[Any], dict[str, Any] | None]
     next_available_slot: Callable[[Any, int], int | None]
-    resolve_launch_context_for_cycle: Callable[..., tuple[Any | None, CycleResult | None]]
+    resolve_launch_context_for_cycle: Callable[
+        ..., tuple[Any | None, CycleResult | None]
+    ]
     claim_launch_context: Callable[..., tuple[Any | None, CycleResult | None]]
     execute_claimed_session: Callable[..., Any]
     finalize_claimed_session: Callable[..., CycleResult]

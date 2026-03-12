@@ -37,15 +37,11 @@ class BoardMutationPort(Protocol):
         """Set the board status for an issue."""
         ...
 
-    def set_issue_field(
-        self, issue_ref: str, field_name: str, value: str
-    ) -> None:
+    def set_issue_field(self, issue_ref: str, field_name: str, value: str) -> None:
         """Set a text or single-select field on an issue."""
         ...
 
-    def post_issue_comment(
-        self, repo: str, issue_number: int, body: str
-    ) -> None:
+    def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
         """Post a comment on an issue."""
         ...
 

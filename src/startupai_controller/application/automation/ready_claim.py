@@ -53,7 +53,11 @@ def _query_issue_board_info(
     """Resolve board item identity through ReviewStatePort."""
     del config  # canonical issue refs are already encoded in the snapshot
     snapshot = next(
-        (item for item in review_state_port.build_board_snapshot().items if item.issue_ref == issue_ref),
+        (
+            item
+            for item in review_state_port.build_board_snapshot().items
+            if item.issue_ref == issue_ref
+        ),
         None,
     )
     if snapshot is None:
@@ -245,7 +249,9 @@ def _process_schedule_ready_snapshot(
     lane_wip_counts: dict[tuple[str, str], int],
 ) -> None:
     """Apply scheduling policy to one Ready snapshot."""
-    effective_dependency_review_state_port = dependency_review_state_port or review_state_port
+    effective_dependency_review_state_port = (
+        dependency_review_state_port or review_state_port
+    )
     del use_ports
     ref = getattr(snapshot, "issue_ref", None)
     if ref is None:
@@ -367,9 +373,7 @@ def schedule_ready_items(
 ) -> SchedulingDecision:
     """Classify and optionally claim Ready issues."""
     if mode not in {"advisory", "claim"}:
-        raise ConfigError(
-            f"Invalid schedule mode '{mode}'. Use advisory or claim."
-        )
+        raise ConfigError(f"Invalid schedule mode '{mode}'. Use advisory or claim.")
 
     decision = SchedulingDecision()
     (
@@ -488,7 +492,9 @@ def _attempt_claim_ready_candidate(
     wip_counts: dict[str, int],
 ) -> ClaimReadyResult | None:
     """Attempt to claim one Ready candidate for the executor."""
-    effective_dependency_review_state_port = dependency_review_state_port or review_state_port
+    effective_dependency_review_state_port = (
+        dependency_review_state_port or review_state_port
+    )
     item_executor = snapshot.executor.strip().lower()
     if item_executor != norm_executor:
         if issue_ref:
