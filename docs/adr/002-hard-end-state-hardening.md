@@ -102,13 +102,40 @@ The work proceeds phase by phase without waiting for additional human prompts:
 
 1. implement phase work on a branch/worktree
 2. open the PR
-3. get required checks green
-4. merge
-5. refresh from latest `origin/main`
-6. start the next phase from fresh mainline state
+3. immediately arm the merge boundary:
+   - enable GitHub auto-merge when the repository settings allow it
+   - start a background poller that checks PR status every 120 seconds
+   - keep a shorter foreground watch while actively working so green CI is acted
+     on immediately rather than waiting for the next background interval
+4. treat green CI as a merge trigger, not as informational output:
+   - if the PR is still open when checks are green, merge it immediately
+   - if GitHub auto-merge already merged it, treat that merged state as the same
+     trigger and move on at once
+   - a PR may not remain open after green unless a documented blocker prevents
+     merge
+5. stop the poller as soon as the PR is merged
+6. refresh from latest `origin/main`
+7. start the next phase from fresh mainline state
 
 Execution pauses only for blockers that cannot be resolved from the codebase,
 docs, or established contracts.
+
+### 8. CI signal handling is authoritative
+
+Background CI polling exists to remove human supervision from the merge gate.
+The poller is not a reminder for later review; it is the signal that the next
+action is safe.
+
+Operationally, this means:
+
+- the first observed all-green poll must be followed immediately by merge or by
+  confirmation that auto-merge already completed the merge
+- if a PR remains open across a second all-green poll, that is a process
+  failure and merge takes precedence over all new analysis
+- transient GitHub API failures do not justify waiting indefinitely; foreground
+  checks should retry until the merge state is known
+- after merge, the next unit of work begins from fresh `origin/main` without
+  waiting for human confirmation
 
 ## Consequences
 
