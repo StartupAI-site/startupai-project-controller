@@ -15,9 +15,14 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from startupai_controller.domain.models import (
+    CycleBoardSnapshot,
+    ReviewQueueDrainSummary,
+)
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.process_runner import GhRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 
@@ -39,7 +44,7 @@ class CycleRuntimeContext:
     effective_interval: int
     global_limit: int
     github_memo: Any  # CycleGitHubMemo
-    ready_flow_port: Any  # ReadyFlowPort
+    ready_flow_port: ReadyFlowPort
     pr_port: PullRequestPort
     review_state_port: ReviewStatePort
     board_port: BoardMutationPort
@@ -67,7 +72,10 @@ class PhaseHelperDeps:
     """Injected seams shared across individual phase functions."""
 
     replay_deferred_actions: Callable[..., tuple[int, ...]]
-    drain_review_queue: Callable[..., tuple[Any, Any]]
+    drain_review_queue: Callable[
+        ...,
+        tuple[ReviewQueueDrainSummary, CycleBoardSnapshot],
+    ]
     reconcile_board_truth: Callable[..., Any]
     record_successful_github_mutation: Callable[[Any], None]
     record_successful_board_sync: Callable[[Any], None]
@@ -105,7 +113,7 @@ def initialize_cycle_runtime(
     session_store: SessionStorePort,
     cp_config: Any,
     github_memo: Any,
-    ready_flow_port: Any,
+    ready_flow_port: ReadyFlowPort,
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
@@ -186,7 +194,7 @@ def load_board_snapshot_phase(
     runtime: CycleRuntimeContext,
     *,
     timings_ms: dict[str, int],
-) -> Any:
+) -> CycleBoardSnapshot:
     """Load the cycle board snapshot."""
     phase_started = time.monotonic()
     board_snapshot = runtime.review_state_port.build_board_snapshot()
@@ -200,7 +208,7 @@ def run_executor_routing_phase(
     runtime: CycleRuntimeContext,
     *,
     deps: PhaseHelperDeps,
-    board_snapshot: Any,
+    board_snapshot: CycleBoardSnapshot,
     timings_ms: dict[str, int],
     dry_run: bool,
 ) -> None:
