@@ -3,6 +3,10 @@
 This runbook defines how the hardening program advances from one PR to the next
 without human supervision.
 
+The current session handoff note lives in
+`docs/runbooks/codex-resume-hardening.md`. Update that file whenever the active
+worktree, current phase, or recommended next batch changes.
+
 ## Rule
 
 A green CI poll means it is safe to merge and continue immediately.
