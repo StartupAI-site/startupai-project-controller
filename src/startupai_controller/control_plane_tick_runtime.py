@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
-from startupai_controller.application.control_plane.tick import TickDeps
+from startupai_controller.application.control_plane.tick import GitHubBundle, TickDeps
 from startupai_controller.board_automation_config import load_automation_config
 from startupai_controller.control_plane_rescue import (
     _drain_review_queue,
@@ -30,6 +30,7 @@ from startupai_controller.runtime.wiring import (
     open_consumer_db,
     runtime_gh_reason_code,
 )
+from startupai_controller.ports.control_plane_state import ControlPlaneStatePort
 from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
     load_config,
@@ -40,7 +41,7 @@ from startupai_controller.validate_critical_path_promotion import (
 class TickRuntime:
     """Runtime resources assembled for one control-plane tick."""
 
-    db: Any
+    db: ControlPlaneStatePort
     finalize_payload: Callable[[dict[str, object]], dict[str, object]]
     deps: TickDeps
     cleanup: Callable[[], None]
@@ -77,7 +78,10 @@ def build_tick_runtime(*, args: Any, config: Any) -> TickRuntime:
         load_automation_config=load_automation_config,
         apply_automation_runtime=_apply_automation_runtime,
         current_main_workflows=_current_main_workflows,
-        build_github_port_bundle=build_github_port_bundle,
+        build_github_port_bundle=cast(
+            Callable[..., GitHubBundle],
+            build_github_port_bundle,
+        ),
         ready_flow_port=build_ready_flow_port(),
         replay_deferred_actions=_replay_deferred_actions,
         drain_review_queue=_drain_review_queue,

@@ -7,6 +7,7 @@ from typing import Any
 import json
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.ports.control_plane_state import ControlPlaneStatePort
 from startupai_controller.consumer_workflow import (
     WorkflowDefinition,
     effective_poll_interval,
@@ -28,7 +29,7 @@ CONTROL_KEY_LAST_RATE_LIMIT_AT = "last_rate_limit_at"
 
 
 def _record_control_timestamp(
-    db: Any,
+    db: ControlPlaneStatePort,
     key: str,
     *,
     now: datetime | None = None,
@@ -38,7 +39,7 @@ def _record_control_timestamp(
 
 
 def _record_successful_board_sync(
-    db: Any,
+    db: ControlPlaneStatePort,
     *,
     now=None,
 ) -> None:
@@ -47,7 +48,7 @@ def _record_successful_board_sync(
 
 
 def _record_successful_github_mutation(
-    db: Any,
+    db: ControlPlaneStatePort,
     *,
     now=None,
 ) -> None:
@@ -61,7 +62,7 @@ def _record_successful_github_mutation(
 
 
 def _mark_degraded(
-    db: Any,
+    db: ControlPlaneStatePort,
     reason: str,
 ) -> None:
     """Enter degraded mode with a machine-readable reason."""
@@ -70,7 +71,7 @@ def _mark_degraded(
 
 
 def _persist_admission_summary(
-    db: Any,
+    db: ControlPlaneStatePort,
     summary: dict[str, Any],
 ) -> None:
     """Persist the latest admission summary for local-only status surfaces."""
@@ -80,7 +81,7 @@ def _persist_admission_summary(
     )
 
 
-def _clear_degraded(db: Any) -> None:
+def _clear_degraded(db: ControlPlaneStatePort) -> None:
     """Clear degraded mode after a successful control-plane cycle."""
     db.set_control_value(CONTROL_KEY_DEGRADED, "false")
     db.set_control_value(CONTROL_KEY_DEGRADED_REASON, None)
