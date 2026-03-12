@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Callable
-
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
@@ -18,6 +16,8 @@ from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     parse_issue_ref,
 )
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.review_state import ReviewStatePort
 
 
 def protected_queue_executor_target(
@@ -41,39 +41,23 @@ def route_protected_queue_executors(
     statuses: tuple[str, ...] = PROTECTED_QUEUE_ROUTING_STATUSES,
     dry_run: bool = False,
     board_snapshot: CycleBoardSnapshot | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    # Injected board-automation helpers
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
-    list_project_items_by_status_fn: Callable[..., list] | None = None,
-    query_issue_board_info_fn: Callable[..., object] | None = None,
-    set_single_select_field_fn: Callable[..., None] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
 ) -> ExecutorRoutingDecision:
     """Normalize protected Backlog/Ready queue items onto the local executor lane."""
+    del project_owner, project_number
     decision = ExecutorRoutingDecision()
     target_executor = protected_queue_executor_target(automation_config)
     if target_executor is None:
         decision.skipped.append(("*", "no-deterministic-executor-target"))
         return decision
     assert automation_config is not None
-    board_port = None
-    if not dry_run and default_board_mutation_port_fn is not None:
-        board_port = default_board_mutation_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
 
     for status in statuses:
         if board_snapshot is not None:
             items = board_snapshot.items_with_status(status)
-        elif list_project_items_by_status_fn is not None:
-            items = list_project_items_by_status_fn(
-                status,
-                project_owner,
-                project_number,
-                gh_runner=gh_runner,
-            )
+        elif review_state_port is not None:
+            items = review_state_port.list_issues_by_status(status)
         else:
             items = []
         for snapshot in items:
@@ -95,14 +79,16 @@ def route_protected_queue_executors(
             project_id = snapshot.project_id.strip()
             item_id = snapshot.item_id.strip()
             if not project_id or not item_id:
-                if query_issue_board_info_fn is not None:
-                    info = query_issue_board_info_fn(
-                        issue_ref,
-                        config,
-                        project_owner,
-                        project_number,
+                if review_state_port is not None:
+                    info = next(
+                        (
+                            item
+                            for item in review_state_port.build_board_snapshot().items
+                            if item.issue_ref == issue_ref
+                        ),
+                        None,
                     )
-                    if info.status == "NOT_ON_BOARD":
+                    if info is None:
                         decision.skipped.append((issue_ref, "not-on-board"))
                         continue
                     project_id = info.project_id
@@ -111,17 +97,12 @@ def route_protected_queue_executors(
                     decision.skipped.append((issue_ref, "missing-board-ids"))
                     continue
 
-            if not dry_run and board_port is not None and set_single_select_field_fn is not None:
-                set_single_select_field_fn(
+            if not dry_run and board_port is not None:
+                board_port.set_project_single_select(
                     project_id,
                     item_id,
                     "Executor",
                     target_executor,
-                    board_port=board_port,
-                    project_owner=project_owner,
-                    project_number=project_number,
-                    config=config,
-                    gh_runner=gh_runner,
                 )
             decision.routed.append(issue_ref)
 

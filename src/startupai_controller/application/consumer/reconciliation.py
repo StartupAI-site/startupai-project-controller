@@ -50,10 +50,6 @@ class ReconciliationWiringDeps:
     reconcile_in_progress_decision: Callable[..., str]
     snapshot_to_issue_ref: Callable[[str, dict], str | None]
 
-    # Runtime wiring
-    build_session_store: Callable[[Any], Any]
-    build_github_port_bundle: Callable[..., Any]
-
 
 # ---------------------------------------------------------------------------
 # Wired helper functions
@@ -263,8 +259,6 @@ def wire_reconcile_board_truth(
         automation_config,
         db,
         deps=ReconciliationDeps(
-            build_session_store=deps.build_session_store,
-            build_github_port_bundle=deps.build_github_port_bundle,
             issue_ref_for_snapshot=_issue_ref_for_snapshot,
             reconcile_active_repair_review_items=_wired_reconcile_active_repair,
             reconcile_stale_in_progress_items=_wired_reconcile_stale,

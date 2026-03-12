@@ -669,8 +669,8 @@ def schedule_ready_items(
     missing_executor_block_cap: int = DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
     dry_run: bool = False,
     review_state_port=None,
+    dependency_review_state_port=None,
     board_port=None,
-    status_resolver: Callable[..., str] | None = None,
 ) -> SchedulingDecision:
     """Classify and optionally claim Ready issues.
 
@@ -682,6 +682,7 @@ def schedule_ready_items(
         project_owner,
         project_number,
         review_state_port=review_state_port,
+        dependency_review_state_port=dependency_review_state_port,
         board_port=board_port,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
@@ -690,7 +691,6 @@ def schedule_ready_items(
         automation_config=automation_config,
         missing_executor_block_cap=missing_executor_block_cap,
         dry_run=dry_run,
-        status_resolver=status_resolver,
     )
 
 
@@ -811,6 +811,14 @@ def wire_schedule_ready_items(
         board_info_resolver=board_info_resolver,
         gh_runner=gh_runner,
     )
+    dependency_review_state_port = _wrap_review_state_port(
+        review_state_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        status_resolver=status_resolver,
+        gh_runner=gh_runner,
+    )
     board_port = _wrap_board_port(
         board_port,
         config=config,
@@ -825,6 +833,7 @@ def wire_schedule_ready_items(
         project_owner,
         project_number,
         review_state_port=review_state_port,
+        dependency_review_state_port=dependency_review_state_port,
         board_port=board_port,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
@@ -833,7 +842,6 @@ def wire_schedule_ready_items(
         automation_config=automation_config,
         missing_executor_block_cap=missing_executor_block_cap,
         dry_run=dry_run,
-        status_resolver=status_resolver,
     )
 
 
@@ -898,6 +906,14 @@ def wire_claim_ready_issue(
         comment_exists_fn=comment_checker,
         gh_runner=gh_runner,
     )
+    dependency_review_state_port = _wrap_review_state_port(
+        review_state_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        status_resolver=status_resolver,
+        gh_runner=gh_runner,
+    )
     board_port = _wrap_board_port(
         board_port,
         config=config,
@@ -913,6 +929,7 @@ def wire_claim_ready_issue(
         project_owner,
         project_number,
         review_state_port=review_state_port,
+        dependency_review_state_port=dependency_review_state_port,
         board_port=board_port,
         executor=executor,
         issue_ref=issue_ref,
@@ -922,5 +939,4 @@ def wire_claim_ready_issue(
         per_executor_wip_limit=per_executor_wip_limit,
         automation_config=automation_config,
         dry_run=dry_run,
-        status_resolver=status_resolver,
     )

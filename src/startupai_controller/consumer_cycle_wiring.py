@@ -198,9 +198,6 @@ def prepare_launch_candidate(
         prepared=prepared,
         db=db,
         deps=PrepareLaunchDeps(
-            build_session_store=build_session_store,
-            build_github_port_bundle=build_github_port_bundle,
-            build_worktree_port=build_worktree_port,
             resolve_launch_candidate_metadata=_resolve_launch_candidate_metadata,
             resolve_launch_issue_context=_resolve_launch_issue_context,
             setup_launch_worktree=_setup_launch_worktree,
@@ -212,10 +209,22 @@ def prepare_launch_candidate(
         subprocess_runner=process_runner_port,
         review_state_port=review_state_port,
         gh_runner=gh_port,
-        pr_port=pr_port,
+        pr_port=pr_port or build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=prepared.cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner_fn,
+        ).pull_requests,
         issue_context_port=issue_context_port,
-        session_store=session_store,
-        worktree_port=worktree_port,
+        session_store=session_store or build_session_store(db),
+        worktree_port=worktree_port
+        or build_worktree_port(
+            subprocess_runner=(
+                process_runner_port.run if process_runner_port is not None else None
+            ),
+            gh_runner=gh_runner_fn,
+        ),
     )
 
 
@@ -404,12 +413,12 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    session_store: Any,
     review_state_port: Any | None,
     board_port: Any | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Any | None,
-    build_session_store: Callable[[Any], Any],
     transition_claimed_session_to_review: Callable[..., None],
     post_claimed_session_verdict_marker: Callable[..., None],
     queue_claimed_session_for_review: Callable[..., Any | None],
@@ -477,7 +486,6 @@ def handoff_execution_to_review(
         db=db,
         prepared=prepared,
         deps=ReviewHandoffDeps(
-            build_session_store=build_session_store,
             transition_claimed_session_to_review=_transition_claimed_session_to_review,
             post_claimed_session_verdict_marker=_post_claimed_session_verdict_marker,
             queue_claimed_session_for_review=queue_claimed_session_for_review,
@@ -488,6 +496,7 @@ def handoff_execution_to_review(
         session_id=session_id,
         pr_url=pr_url,
         session_status=session_status,
+        session_store=session_store,
         review_state_port=review_state_port,
         board_port=board_port,
     )
@@ -510,7 +519,6 @@ def handle_non_review_execution_outcome(
     comment_poster: Callable[..., None] | None,
     subprocess_runner: Callable[..., Any] | None,
     gh_runner: Any | None,
-    build_github_port_bundle: Callable[..., Any],
     verify_resolution_payload: Callable[..., Any],
     apply_resolution_action: Callable[..., str | None],
     return_issue_to_ready: Callable[..., None],
@@ -589,7 +597,6 @@ def handle_non_review_execution_outcome(
         db=db,
         prepared=prepared,
         deps=NonReviewOutcomeDeps(
-            build_github_port_bundle=build_github_port_bundle,
             verify_resolution_payload=_verify_resolution_payload,
             apply_resolution_action=_apply_resolution_action,
             return_issue_to_ready=_return_issue_to_ready,
@@ -670,9 +677,11 @@ def execute_claimed_session(
         session_id: str,
         pr_url: str,
         session_status: str,
+        session_store: Any,
         review_state_port: Any | None,
         board_port: Any | None,
     ) -> Any:
+        del session_store
         effective_gh_runner = (
             gh_runner.run_gh if hasattr(gh_runner, "run_gh") else gh_runner
         )
@@ -742,6 +751,7 @@ def execute_claimed_session(
         ),
         launch_context=launch_context,
         claimed_context=claimed_context,
+        session_store=build_session_store(db),
         gh_runner=gh_runner,
         process_runner=process_runner,
         file_reader=file_reader,

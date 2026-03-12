@@ -332,6 +332,55 @@ def test_consumer_recovery_use_case_has_no_legacy_board_or_gh_callables() -> Non
     )
 
 
+def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
+    source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
+    forbidden = [
+        "build_session_store:",
+        "build_github_port_bundle:",
+        "build_ready_flow_port:",
+        "build_gh_runner_port:",
+        "cycle_github_memo_factory:",
+    ]
+    offending = [token for token in forbidden if token in source]
+    assert offending == [], (
+        "application/consumer/preflight_runtime.py regained port-builder seams: "
+        f"{offending}"
+    )
+
+
+def test_consumer_status_module_has_no_db_or_github_query_builder_fields() -> None:
+    source = _source_text(APPLICATION_ROOT / "consumer" / "status.py")
+    forbidden = [
+        "open_consumer_db:",
+        "list_project_items_by_status:",
+    ]
+    offending = [token for token in forbidden if token in source]
+    assert offending == [], (
+        "application/consumer/status.py regained DB/GitHub builder seams: "
+        f"{offending}"
+    )
+
+
+def test_consumer_daemon_module_has_no_db_builder_fields() -> None:
+    source = _source_text(APPLICATION_ROOT / "consumer" / "daemon.py")
+    forbidden = ["open_consumer_db"]
+    offending = [token for token in forbidden if token in source]
+    assert offending == [], (
+        "application/consumer/daemon.py regained DB builder seams: "
+        f"{offending}"
+    )
+
+
+def test_consumer_launch_module_has_no_legacy_status_resolver_usage() -> None:
+    source = _source_text(APPLICATION_ROOT / "consumer" / "launch.py")
+    forbidden = ["status_resolver"]
+    offending = [token for token in forbidden if token in source]
+    assert offending == [], (
+        "application/consumer/launch.py regained legacy status-resolver seams: "
+        f"{offending}"
+    )
+
+
 def test_rebalance_application_module_no_longer_contains_outer_wiring_entry_points() -> None:
     source = _source_text(APPLICATION_ROOT / "automation" / "rebalance.py")
     assert "def load_rebalance_in_progress_items(" not in source, (
@@ -339,6 +388,28 @@ def test_rebalance_application_module_no_longer_contains_outer_wiring_entry_poin
     )
     assert "def wire_rebalance_wip(" not in source, (
         "application/automation/rebalance.py regained outer rebalance wiring"
+    )
+
+
+def test_automation_non_wiring_modules_have_no_default_port_or_wire_entrypoints() -> None:
+    forbidden = [
+        "default_pr_port_fn",
+        "default_review_state_port_fn",
+        "default_board_mutation_port_fn",
+        "list_project_items_by_status",
+        "def wire_",
+    ]
+    offending: dict[str, list[str]] = {}
+    for path in sorted((APPLICATION_ROOT / "automation").glob("*.py")):
+        if path.name.endswith("wiring.py"):
+            continue
+        source = _source_text(path)
+        hits = [token for token in forbidden if token in source]
+        if hits:
+            offending[path.name] = hits
+    assert offending == {}, (
+        "Non-wiring automation application modules regained outer composition seams: "
+        f"{offending}"
     )
 
 

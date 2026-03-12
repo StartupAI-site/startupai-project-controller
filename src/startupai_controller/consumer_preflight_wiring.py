@@ -58,15 +58,9 @@ logger = logging.getLogger("board-consumer")
 def build_init_cycle_runtime_deps() -> InitializeCycleRuntimeDeps:
     """Build the deps for cycle runtime initialization."""
     return InitializeCycleRuntimeDeps(
-        build_session_store=build_session_store,
-        load_config=load_config,
         load_automation_config=load_automation_config,
         apply_automation_runtime=_apply_automation_runtime,
         current_main_workflows=_current_main_workflows,
-        build_github_port_bundle=build_github_port_bundle,
-        build_ready_flow_port=build_ready_flow_port,
-        build_gh_runner_port=build_gh_runner_port,
-        cycle_github_memo_factory=CycleGitHubMemo,
         config_error_type=ConfigError,
         logger=logger,
     )
@@ -94,11 +88,27 @@ def initialize_cycle_runtime(
     gh_runner: Callable[..., str] | None = None,
 ) -> Any:
     """Build cycle-scoped runtime wiring and effective config."""
+    cp_config = load_config(config.critical_paths_path)
+    gh_port = gh_runner if hasattr(gh_runner, "run_gh") else build_gh_runner_port(gh_runner=gh_runner)
+    github_memo = CycleGitHubMemo()
+    github_bundle = build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
+        config=cp_config,
+        github_memo=github_memo,
+        gh_runner=gh_port.run_gh if gh_port is not None else None,
+    )
     return _initialize_cycle_runtime_use_case(
         config,
-        db,
         deps=build_init_cycle_runtime_deps(),
-        gh_runner=build_gh_runner_port(gh_runner=gh_runner),
+        session_store=build_session_store(db),
+        cp_config=cp_config,
+        github_memo=github_memo,
+        ready_flow_port=build_ready_flow_port(),
+        pr_port=github_bundle.pull_requests,
+        review_state_port=github_bundle.review_state,
+        board_port=github_bundle.board_mutations,
+        gh_port=gh_port,
     )
 
 
@@ -271,7 +281,7 @@ def prepare_cycle(
         config,
         db,
         deps=PrepareCycleDeps(
-            initialize_cycle_runtime_deps=build_init_cycle_runtime_deps(),
+            initialize_cycle_runtime=initialize_cycle_runtime,
             phase_helper_deps=build_phase_helper_deps(),
             begin_runtime_request_stats=begin_runtime_request_stats,
             end_runtime_request_stats=end_runtime_request_stats,

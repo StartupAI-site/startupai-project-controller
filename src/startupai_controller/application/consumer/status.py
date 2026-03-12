@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from startupai_controller.ports.review_state import ReviewStatePort
+
 
 @dataclass(frozen=True)
 class CollectStatusPayloadDeps:
@@ -16,9 +18,6 @@ class CollectStatusPayloadDeps:
     apply_automation_runtime: Callable[[Any, Any | None], None]
     current_main_workflows: Callable[..., tuple[dict[str, Any], dict[str, Any], int]]
     read_workflow_snapshot: Callable[[Any], Any | None]
-    open_consumer_db: Callable[[Any], Any]
-    load_config: Callable[[Any], Any]
-    list_project_items_by_status: Callable[..., list[Any]]
     parse_issue_ref: Callable[[str], Any]
     load_admission_summary: Callable[[dict[str, str], Any | None], dict[str, Any]]
     control_plane_health_summary: Callable[..., Any]
@@ -44,17 +43,12 @@ def _github_review_summary(
     db: Any,
     *,
     deps: CollectStatusPayloadDeps,
+    review_state_port: ReviewStatePort,
 ) -> dict[str, Any]:
     """Build review summary from GitHub with local fallback."""
     try:
-        cp_config = deps.load_config(config.critical_paths_path)
         review_refs: list[str] = []
-        for snapshot in deps.list_project_items_by_status(
-            "Review",
-            config.project_owner,
-            config.project_number,
-            config=cp_config,
-        ):
+        for snapshot in review_state_port.list_issues_by_status("Review"):
             issue_ref = snapshot.issue_ref
             if deps.parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
                 continue
@@ -366,41 +360,39 @@ def _collect_status_runtime_state(
     auto_config: Any | None,
     local_only: bool,
     status_now: datetime,
+    db: Any,
+    review_state_port: ReviewStatePort | None,
     deps: CollectStatusPayloadDeps,
 ) -> dict[str, Any]:
     """Collect DB-backed runtime state for status reporting."""
-    db = deps.open_consumer_db(config.db_path)
-    try:
-        leases = db.active_lease_count()
-        slots = sorted(db.active_slot_ids())
-        workers = db.active_workers()
-        sessions = db.recent_sessions(limit=10)
-        control_state = db.control_state_snapshot()
-        deferred_action_count = db.deferred_action_count()
-        oldest_deferred_action_age_seconds = db.oldest_deferred_action_age_seconds()
-        review_summary = (
-            _local_review_summary(db)
-            if local_only
-            else _github_review_summary(config, db, deps=deps)
-        )
-        review_queue = _local_review_queue_summary(db, now=status_now)
-        admission_summary = deps.load_admission_summary(control_state, auto_config)
-        throughput_1h = _augment_slo_window_payload(
-            db,
-            _metric_window_payload(db, hours=1, now=status_now),
-            hours=1,
-            now=status_now,
-            parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
-        )
-        throughput_24h = _augment_slo_window_payload(
-            db,
-            _metric_window_payload(db, hours=24, now=status_now),
-            hours=24,
-            now=status_now,
-            parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
-        )
-    finally:
-        db.close()
+    leases = db.active_lease_count()
+    slots = sorted(db.active_slot_ids())
+    workers = db.active_workers()
+    sessions = db.recent_sessions(limit=10)
+    control_state = db.control_state_snapshot()
+    deferred_action_count = db.deferred_action_count()
+    oldest_deferred_action_age_seconds = db.oldest_deferred_action_age_seconds()
+    review_summary = (
+        _local_review_summary(db)
+        if local_only or review_state_port is None
+        else _github_review_summary(config, db, deps=deps, review_state_port=review_state_port)
+    )
+    review_queue = _local_review_queue_summary(db, now=status_now)
+    admission_summary = deps.load_admission_summary(control_state, auto_config)
+    throughput_1h = _augment_slo_window_payload(
+        db,
+        _metric_window_payload(db, hours=1, now=status_now),
+        hours=1,
+        now=status_now,
+        parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
+    )
+    throughput_24h = _augment_slo_window_payload(
+        db,
+        _metric_window_payload(db, hours=24, now=status_now),
+        hours=24,
+        now=status_now,
+        parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
+    )
 
     return {
         "leases": leases,
@@ -517,6 +509,8 @@ def collect_status_payload(
     config: Any,
     *,
     local_only: bool = False,
+    db: Any,
+    review_state_port: ReviewStatePort | None,
     deps: CollectStatusPayloadDeps,
 ) -> dict[str, Any]:
     """Collect consumer status as a JSON-serializable payload."""
@@ -529,6 +523,8 @@ def collect_status_payload(
         auto_config=auto_config,
         local_only=local_only,
         status_now=status_now,
+        db=db,
+        review_state_port=review_state_port,
         deps=deps,
     )
     return _build_status_payload(

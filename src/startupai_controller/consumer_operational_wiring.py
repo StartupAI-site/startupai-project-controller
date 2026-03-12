@@ -83,8 +83,6 @@ def build_reconciliation_wiring_deps() -> ReconciliationWiringDeps:
         classify_open_pr_candidates=_codex_comment_wiring.classify_open_pr_candidates,
         reconcile_in_progress_decision=reconcile_in_progress_decision,
         snapshot_to_issue_ref=_snapshot_to_issue_ref,
-        build_session_store=build_session_store,
-        build_github_port_bundle=build_github_port_bundle,
     )
 
 
@@ -235,16 +233,25 @@ def reconcile_board_truth(
     gh_runner: Callable[..., str] | None = None,
 ) -> Any:
     """Make board In Progress truthful against local consumer state."""
+    effective_session_store = session_store or build_session_store(db)
+    github_bundle = None
+    if pr_port is None or review_state_port is None or board_port is None:
+        github_bundle = build_github_port_bundle(
+            consumer_config.project_owner,
+            consumer_config.project_number,
+            config=critical_path_config,
+            gh_runner=gh_runner,
+        )
     return _wire_reconcile_board_truth_use_case(
         consumer_config,
         critical_path_config,
         automation_config,
         db,
         deps=build_reconciliation_wiring_deps(),
-        session_store=session_store,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
+        session_store=effective_session_store,
+        pr_port=pr_port or github_bundle.pull_requests,
+        review_state_port=review_state_port or github_bundle.review_state,
+        board_port=board_port or github_bundle.board_mutations,
         dry_run=dry_run,
         board_snapshot=board_snapshot,
     )
@@ -286,6 +293,7 @@ def select_launch_candidate_for_cycle(
     db: Any,
     prepared: Any,
     target_issue: str | None,
+    review_state_port: Any | None = None,
     status_resolver: Callable[..., str] | None,
     gh_runner: Callable[..., str] | None,
 ) -> tuple[Any | None, Any | None]:
@@ -295,6 +303,7 @@ def select_launch_candidate_for_cycle(
         db=db,
         prepared=prepared,
         target_issue=target_issue,
+        review_state_port=review_state_port,
         status_resolver=status_resolver,
         gh_runner=gh_runner,
         cycle_result_factory=CycleResult,
@@ -786,7 +795,7 @@ def handoff_execution_to_review(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        build_session_store=build_session_store,
+        session_store=build_session_store(db),
         transition_claimed_session_to_review=transition_claimed_session_to_review,
         post_claimed_session_verdict_marker=post_claimed_session_verdict_marker,
         queue_claimed_session_for_review=queue_claimed_session_for_review,
@@ -914,6 +923,15 @@ def handle_non_review_execution_outcome(
     board_port: Any | None = None,
 ) -> tuple[str, Any | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
+    github_bundle = None
+    if pr_port is None or board_port is None:
+        github_bundle = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=prepared.cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner,
+        )
     return _execution_outcome_wiring.handle_non_review_execution_outcome(
         config=config,
         db=db,
@@ -923,14 +941,13 @@ def handle_non_review_execution_outcome(
         session_status=session_status,
         codex_result=codex_result,
         has_commits=has_commits,
-        pr_port=pr_port,
-        board_port=board_port,
+        pr_port=pr_port or github_bundle.pull_requests,
+        board_port=board_port or github_bundle.board_mutations,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_poster=comment_poster,
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
-        build_github_port_bundle=build_github_port_bundle,
         verify_resolution_payload=_support_wiring.verify_resolution_payload,
         apply_resolution_action=_resolution_helpers.apply_resolution_action_from_shell,
         return_issue_to_ready=_board_state_helpers.return_issue_to_ready_from_shell,

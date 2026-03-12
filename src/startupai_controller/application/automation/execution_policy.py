@@ -5,11 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from startupai_controller.board_automation_config import (
-    BoardAutomationConfig,
-    DEFAULT_PROJECT_NUMBER,
-    DEFAULT_PROJECT_OWNER,
-)
+from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.domain.models import ExecutionPolicyDecision, LinkedIssue
 from startupai_controller.domain.repair_policy import (
@@ -280,85 +276,4 @@ def load_execution_policy_pr_context(
         state=state,
         url=url,
         provenance=_parse_consumer_provenance(body),
-    )
-
-
-def wire_enforce_execution_policy(
-    pr_repo: str,
-    pr_number: int,
-    config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig | None = None,
-    project_owner: str = DEFAULT_PROJECT_OWNER,
-    project_number: int = DEFAULT_PROJECT_NUMBER,
-    *,
-    allow_copilot_coding_agent: bool = False,
-    dry_run: bool = False,
-    pr_port: PullRequestPort | None = None,
-    review_state_port: ReviewStatePort | None = None,
-    board_port: BoardMutationPort | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    default_pr_port_fn: Callable[..., object] | None = None,
-    default_review_state_port_fn: Callable[..., object] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
-    is_copilot_actor_fn: Callable[[str], bool] | None = None,
-) -> ExecutionPolicyDecision:
-    """Wire PR context loading and ports, then delegate to core policy."""
-    if "/" not in pr_repo:
-        raise ConfigError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
-    if is_copilot_actor_fn is None:
-        raise GhQueryError(f"Missing Copilot actor classifier for {pr_repo}#{pr_number}.")
-    if (
-        pr_port is None or review_state_port is None or board_port is None
-    ) and (
-        default_pr_port_fn is None
-        or default_review_state_port_fn is None
-        or default_board_mutation_port_fn is None
-    ):
-        raise GhQueryError(f"Missing port factories for {pr_repo}#{pr_number}.")
-    if pr_port is None:
-        pr_port = default_pr_port_fn(
-            project_owner,
-            project_number,
-            config=config,
-            gh_runner=gh_runner,
-        )
-    if review_state_port is None:
-        review_state_port = default_review_state_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    if board_port is None:
-        board_port = default_board_mutation_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    if pr_port is None or review_state_port is None or board_port is None:
-        raise GhQueryError(f"Missing runtime ports for {pr_repo}#{pr_number}.")
-
-    pr_context = load_execution_policy_pr_context(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        pr_port=pr_port,
-    )
-    return enforce_execution_policy(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        actor=pr_context.actor,
-        state=pr_context.state,
-        pr_url=pr_context.url,
-        provenance=pr_context.provenance,
-        config=config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        allow_copilot_coding_agent=allow_copilot_coding_agent,
-        dry_run=dry_run,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        is_copilot_actor=is_copilot_actor_fn,
     )

@@ -525,6 +525,43 @@ def route_protected_queue_executors(
 ) -> ExecutorRoutingDecision:
     """Normalize protected Backlog/Ready queue items onto the local executor lane."""
     core = _core()
+    def _list_status_items(status: str) -> list[_ProjectItemSnapshot]:
+        return list(
+            core._list_project_items_by_status(
+                status,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            )
+        )
+
+    def _build_snapshot() -> CycleBoardSnapshot:
+        items: list[_ProjectItemSnapshot] = []
+        by_status: dict[str, tuple[_ProjectItemSnapshot, ...]] = {}
+        for status in statuses:
+            status_items = tuple(_list_status_items(status))
+            items.extend(status_items)
+            by_status[status] = status_items
+        return CycleBoardSnapshot(items=tuple(items), by_status=by_status)
+
+    review_state_port = SimpleNamespace(
+        list_issues_by_status=_list_status_items,
+        build_board_snapshot=_build_snapshot,
+    )
+    board_port = None
+    if not dry_run:
+        board_port = SimpleNamespace(
+            set_project_single_select=lambda project_id, item_id, field_name, option_name: core._set_single_select_field(
+                project_id,
+                item_id,
+                field_name,
+                option_name,
+                project_owner=project_owner,
+                project_number=project_number,
+                config=config,
+                gh_runner=gh_runner,
+            )
+        )
     return _app_route_protected_queue_executors(
         config,
         automation_config,
@@ -533,11 +570,8 @@ def route_protected_queue_executors(
         statuses=statuses,
         dry_run=dry_run,
         board_snapshot=board_snapshot,
-        gh_runner=gh_runner,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        list_project_items_by_status_fn=core._list_project_items_by_status,
-        query_issue_board_info_fn=core._query_issue_board_info,
-        set_single_select_field_fn=core._set_single_select_field,
+        review_state_port=review_state_port,
+        board_port=board_port,
     )
 
 
@@ -555,6 +589,20 @@ def _set_handoff_target(
 ) -> None:
     """Set the board Handoff To field for an issue."""
     core = _core()
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if board_port is None:
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
     _app_set_handoff_target(
         issue_ref,
         target,
@@ -564,9 +612,6 @@ def _set_handoff_target(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
     )
 
 

@@ -35,13 +35,14 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 
 from startupai_controller.application.automation.audit_in_progress import (
-    wire_audit_in_progress as _wiring_audit_in_progress,
+    audit_in_progress as _app_audit_in_progress,
 )
 from startupai_controller.application.automation.dispatch_agent import (
-    wire_dispatch_agent as _wiring_dispatch_agent,
+    dispatch_agent as _app_dispatch_agent,
 )
 from startupai_controller.application.automation.execution_policy import (
-    wire_enforce_execution_policy as _wiring_enforce_execution_policy,
+    enforce_execution_policy as _app_enforce_execution_policy,
+    load_execution_policy_pr_context as _load_execution_policy_pr_context,
 )
 from startupai_controller.application.automation.rebalance import (
     rebalance_wip as _app_rebalance_wip,
@@ -132,6 +133,20 @@ def _apply_codex_fail_routing(
 ) -> None:
     """Route failed codex review back to In Progress with explicit handoff."""
     core = _core()
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if board_port is None:
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
     _app_apply_codex_fail_routing(
         issue_ref,
         route,
@@ -142,14 +157,7 @@ def _apply_codex_fail_routing(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        gh_runner=gh_runner,
-        transition_issue_status_fn=core._transition_issue_status,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        query_project_item_field_fn=core._query_project_item_field,
         issue_ref_to_repo_parts_fn=core._issue_ref_to_repo_parts,
-        comment_exists_fn=core._comment_exists,
     )
 
 
@@ -177,10 +185,32 @@ def audit_in_progress(
 ) -> list[str]:
     """Escalate stale In Progress issues with no linked PR."""
     core = _core()
-    return _wiring_audit_in_progress(
-        config,
-        project_owner,
-        project_number,
+    del board_info_resolver, comment_checker, comment_poster
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if board_port is None:
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if pr_port is None:
+        pr_port = core._default_pr_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    return _app_audit_in_progress(
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
         max_age_hours=max_age_hours,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
@@ -188,21 +218,6 @@ def audit_in_progress(
         review_state_port=review_state_port,
         board_port=board_port,
         pr_port=pr_port,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        default_pr_port_fn=core._default_pr_port,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        list_project_items_by_status_fn=core._list_project_items_by_status,
-        query_issue_board_info_fn=core._query_issue_board_info,
-        set_single_select_field_fn=core._set_single_select_field,
-        comment_exists_fn=core._comment_exists,
-        post_comment_fn=core._post_comment,
-        query_project_item_field_fn=core._query_project_item_field,
-        query_issue_updated_at_fn=core._query_issue_updated_at,
-        snapshot_to_issue_ref_fn=core._snapshot_to_issue_ref,
     )
 
 
@@ -227,24 +242,28 @@ def dispatch_agent(
 ) -> DispatchResult:
     """Dispatch eligible In Progress issues according to dispatch target."""
     core = _core()
-    return _wiring_dispatch_agent(
-        issue_refs,
-        config,
-        automation_config,
-        project_owner,
-        project_number,
+    del board_info_resolver, board_mutator
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if board_port is None:
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    return _app_dispatch_agent(
+        issue_refs=issue_refs,
+        config=config,
+        dispatch_target=automation_config.dispatch_target,
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        query_issue_board_info_fn=core._query_issue_board_info,
-        query_project_item_field_fn=core._query_project_item_field,
-        comment_exists_fn=core._comment_exists,
-        post_comment_fn=core._post_comment,
     )
 
 
@@ -356,10 +375,41 @@ def enforce_execution_policy(
 ) -> ExecutionPolicyDecision:
     """Enforce local execution authority for protected coding PRs."""
     core = _core()
-    return _wiring_enforce_execution_policy(
-        pr_repo,
-        pr_number,
-        config,
+    del board_info_resolver, board_mutator
+    if pr_port is None:
+        pr_port = core._default_pr_port(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if board_port is None:
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    pr_context = _load_execution_policy_pr_context(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        pr_port=pr_port,
+    )
+    return _app_enforce_execution_policy(
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        actor=pr_context.actor,
+        state=pr_context.state,
+        pr_url=pr_context.url,
+        provenance=pr_context.provenance,
+        config=config,
         automation_config=automation_config,
         project_owner=project_owner,
         project_number=project_number,
@@ -368,9 +418,5 @@ def enforce_execution_policy(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        gh_runner=gh_runner,
-        default_pr_port_fn=core._default_pr_port,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        is_copilot_actor_fn=core._is_copilot_coding_agent_actor,
+        is_copilot_actor=core._is_copilot_coding_agent_actor,
     )

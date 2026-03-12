@@ -31,7 +31,6 @@ class ExecutionDeps:
 class ReviewHandoffDeps:
     """Injected seams for claimed-session review handoff."""
 
-    build_session_store: Callable[[Any], Any]
     transition_claimed_session_to_review: Callable[..., None]
     post_claimed_session_verdict_marker: Callable[..., None]
     queue_claimed_session_for_review: Callable[..., Any | None]
@@ -43,7 +42,6 @@ class ReviewHandoffDeps:
 class NonReviewOutcomeDeps:
     """Injected seams for non-review execution outcomes."""
 
-    build_github_port_bundle: Callable[..., Any]
     verify_resolution_payload: Callable[..., Any]
     apply_resolution_action: Callable[..., str | None]
     return_issue_to_ready: Callable[..., None]
@@ -62,6 +60,7 @@ def execute_claimed_session(
     deps: ExecutionDeps,
     launch_context: Any,
     claimed_context: Any,
+    session_store: Any,
     gh_runner: GhRunnerPort | None,
     process_runner: ProcessRunnerPort | None,
     file_reader: Callable[[Path], str] | None,
@@ -134,6 +133,7 @@ def execute_claimed_session(
             session_id=session_id,
             pr_url=pr_outcome.pr_url or "",
             session_status=pr_outcome.session_status,
+            session_store=session_store,
             review_state_port=review_state_port,
             board_port=board_port,
         )
@@ -179,6 +179,7 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    session_store: Any,
     review_state_port: ReviewStatePort | None,
     board_port: BoardMutationPort | None,
 ) -> ReviewQueueDrainSummary:
@@ -202,7 +203,7 @@ def handoff_execution_to_review(
     if session_status != "success":
         return immediate_review_summary
 
-    handoff_store = deps.build_session_store(db)
+    handoff_store = session_store
     deps.post_claimed_session_verdict_marker(
         db=db,
         pr_url=pr_url,
@@ -239,8 +240,8 @@ def handle_non_review_execution_outcome(
     codex_result: dict[str, Any] | None,
     has_commits: bool,
     gh_runner: GhRunnerPort | None,
-    pr_port: PullRequestPort | None,
-    board_port: BoardMutationPort | None,
+    pr_port: PullRequestPort,
+    board_port: BoardMutationPort,
 ) -> tuple[str, Any | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
     cp_config = prepared.cp_config
@@ -253,19 +254,12 @@ def handle_non_review_execution_outcome(
     )
 
     if session_status == "success" and not has_commits:
-        github_bundle = deps.build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=cp_config,
-            github_memo=prepared.github_memo,
-            gh_runner=effective_gh_runner,
-        )
         resolution_evaluation = deps.verify_resolution_payload(
             candidate,
             codex_result.get("resolution") if codex_result else None,
             config=launch_context.effective_consumer_config,
             workflows=prepared.main_workflows,
-            pr_port=pr_port or github_bundle.pull_requests,
+            pr_port=pr_port,
         )
         done_reason = deps.apply_resolution_action(
             candidate,

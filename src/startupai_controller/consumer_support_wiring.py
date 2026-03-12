@@ -10,9 +10,6 @@ from typing import Any, Callable
 import startupai_controller.consumer_runtime_wiring as _runtime_wiring
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
 from startupai_controller.board_graph import admission_watermarks
-from startupai_controller.application.consumer.daemon import (
-    run_worker_cycle as _run_worker_cycle_use_case,
-)
 from startupai_controller.consumer_context_helpers import (
     fetch_issue_context as _fetch_issue_context_helper,
     hydrate_issue_context as _hydrate_issue_context_helper,
@@ -522,20 +519,27 @@ def run_worker_cycle(
     prepared: Any,
     launch_context: Any | None = None,
     dry_run: bool = False,
+    runtime: Any | None = None,
     di_kwargs: dict[str, Any] | None = None,
 ) -> Any:
     """Execute one issue in an isolated worker DB connection."""
-    return _run_worker_cycle_use_case(
-        config,
-        target_issue=target_issue,
-        slot_id=slot_id,
-        prepared=prepared,
-        launch_context=launch_context,
-        dry_run=dry_run,
-        di_kwargs=di_kwargs,
-        open_consumer_db=open_consumer_db,
-        run_one_cycle=_runtime_wiring.run_one_cycle_live,
-    )
+    worker_db = open_consumer_db(config.db_path)
+    worker_config = replace(config)
+    try:
+        return _runtime_wiring.run_one_cycle_live(
+            worker_config,
+            worker_db,
+            dry_run=dry_run,
+            target_issue=target_issue,
+            prepared=prepared,
+            launch_context=launch_context,
+            slot_id_override=slot_id,
+            skip_control_plane=True,
+            runtime=runtime,
+            di_kwargs=di_kwargs,
+        )
+    finally:
+        worker_db.close()
 
 
 def prepare_multi_worker_launch_context(
@@ -545,7 +549,8 @@ def prepare_multi_worker_launch_context(
     db: Any,
     prepared: Any,
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: Any | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Any | None, bool]:
     """Prepare launch context for one candidate."""
     return _runtime_wiring.prepare_multi_worker_launch_context(
@@ -554,6 +559,7 @@ def prepare_multi_worker_launch_context(
         db=db,
         prepared=prepared,
         dry_run=dry_run,
+        runtime=runtime,
         di_kwargs=di_kwargs,
     )
 
@@ -568,7 +574,8 @@ def submit_multi_worker_task(
     prepared: Any,
     launch_context: Any | None,
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: Any | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Submit one prepared candidate to a worker slot."""
     _runtime_wiring.submit_multi_worker_task(
@@ -580,6 +587,7 @@ def submit_multi_worker_task(
         prepared=prepared,
         launch_context=launch_context,
         dry_run=dry_run,
+        runtime=runtime,
         di_kwargs=di_kwargs,
     )
 
@@ -594,7 +602,8 @@ def dispatch_multi_worker_launches(
     active_issue_refs: set[str],
     active_tasks: dict[Any, Any],
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: Any | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> int:
     """Launch as many ready candidates as the current hydration budget allows."""
     return _runtime_wiring.dispatch_multi_worker_launches(
@@ -606,5 +615,6 @@ def dispatch_multi_worker_launches(
         active_issue_refs=active_issue_refs,
         active_tasks=active_tasks,
         dry_run=dry_run,
+        runtime=runtime,
         di_kwargs=di_kwargs,
     )

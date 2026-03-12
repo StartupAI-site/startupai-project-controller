@@ -27,9 +27,6 @@ class ResolveLaunchDeps:
 class PrepareLaunchDeps:
     """Injected seams for launch preparation."""
 
-    build_session_store: Callable[[Any], Any]
-    build_github_port_bundle: Callable[..., Any]
-    build_worktree_port: Callable[..., Any]
     resolve_launch_candidate_metadata: Callable[..., tuple[Any, ...]]
     resolve_launch_issue_context: Callable[..., tuple[Any, str]]
     setup_launch_worktree: Callable[..., tuple[str, str, str | None, str | None]]
@@ -91,31 +88,18 @@ def prepare_launch_candidate(
     subprocess_runner: ProcessRunnerPort | None = None,
     review_state_port: ReviewStatePort | None = None,
     gh_runner: GhRunnerPort | None = None,
-    pr_port: PullRequestPort | None = None,
+    pr_port: PullRequestPort,
     issue_context_port: IssueContextPort | None = None,
-    session_store: SessionStorePort | None = None,
-    worktree_port: WorktreePort | None = None,
+    session_store: SessionStorePort,
+    worktree_port: WorktreePort,
 ) -> Any:
     """Prepare local launch state for an issue before board claim."""
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
-    store = session_store or deps.build_session_store(db)
+    store = session_store
     effective_pr_port = pr_port
-    if effective_pr_port is None:
-        effective_pr_port = deps.build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=cp_config,
-            github_memo=prepared.github_memo,
-            gh_runner=gh_runner.run_gh if gh_runner is not None else None,
-        ).pull_requests
     effective_issue_context_port = issue_context_port or effective_pr_port
-    effective_worktree_port = worktree_port or deps.build_worktree_port(
-        subprocess_runner=(
-            subprocess_runner.run if subprocess_runner is not None else None
-        ),
-        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
-    )
+    effective_worktree_port = worktree_port
 
     (
         candidate_prefix,
@@ -182,9 +166,6 @@ def prepare_launch_candidate(
         cp_config,
         config.project_owner,
         config.project_number,
-        status_resolver=(
-            review_state_port.get_issue_status if review_state_port is not None else None
-        ),
     )
     return deps.assemble_prepared_launch_context(
         issue_ref,

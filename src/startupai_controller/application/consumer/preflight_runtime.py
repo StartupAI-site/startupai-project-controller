@@ -55,15 +55,9 @@ class CycleRuntimeContext:
 class InitializeCycleRuntimeDeps:
     """Injected seams for building cycle-scoped runtime context."""
 
-    build_session_store: Callable[[Any], Any]
-    load_config: Callable[[Any], Any]
     load_automation_config: Callable[[Any], Any]
     apply_automation_runtime: Callable[..., None]
     current_main_workflows: Callable[..., tuple[dict, dict, int]]
-    build_github_port_bundle: Callable[..., Any]
-    build_ready_flow_port: Callable[..., Any]
-    build_gh_runner_port: Callable[..., GhRunnerPort | None]
-    cycle_github_memo_factory: Callable[[], Any]
     config_error_type: type[Exception]
     logger: Any
 
@@ -87,7 +81,7 @@ class PhaseHelperDeps:
 class PrepareCycleDeps:
     """Injected seams for the top-level _prepare_cycle orchestrator."""
 
-    initialize_cycle_runtime_deps: InitializeCycleRuntimeDeps
+    initialize_cycle_runtime: Callable[..., CycleRuntimeContext]
     phase_helper_deps: PhaseHelperDeps
     begin_runtime_request_stats: Callable[[], Any]
     end_runtime_request_stats: Callable[[Any], Any]
@@ -106,15 +100,18 @@ class PrepareCycleDeps:
 
 def initialize_cycle_runtime(
     config: Any,
-    db: Any,
     *,
     deps: InitializeCycleRuntimeDeps,
-    gh_runner: GhRunnerPort | None = None,
+    session_store: Any,
+    cp_config: Any,
+    github_memo: Any,
+    ready_flow_port: Any,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    gh_port: GhRunnerPort | None = None,
 ) -> CycleRuntimeContext:
     """Build cycle-scoped runtime wiring and effective config."""
-    session_store = deps.build_session_store(db)
-
-    cp_config = deps.load_config(config.critical_paths_path)
     try:
         auto_config = deps.load_automation_config(config.automation_config_path)
     except deps.config_error_type as err:
@@ -131,15 +128,6 @@ def initialize_cycle_runtime(
         if workflow_statuses[repo_prefix].available
     )
     config.poll_interval_seconds = effective_interval
-    github_memo = deps.cycle_github_memo_factory()
-    gh_port = gh_runner or deps.build_gh_runner_port()
-    github_ports = deps.build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=cp_config,
-        github_memo=github_memo,
-        gh_runner=gh_port.run_gh if gh_port is not None else None,
-    )
     global_limit = (
         auto_config.global_concurrency
         if auto_config is not None
@@ -156,10 +144,10 @@ def initialize_cycle_runtime(
         effective_interval=effective_interval,
         global_limit=global_limit,
         github_memo=github_memo,
-        ready_flow_port=deps.build_ready_flow_port(),
-        pr_port=github_ports.pull_requests,
-        review_state_port=github_ports.review_state,
-        board_port=github_ports.board_mutations,
+        ready_flow_port=ready_flow_port,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
         gh_port=gh_port,
     )
 
@@ -378,10 +366,9 @@ def prepare_cycle(
     if expired:
         deps.phase_helper_deps.logger.info("Expired stale leases: %s", expired)
 
-    runtime = initialize_cycle_runtime(
+    runtime = deps.initialize_cycle_runtime(
         config,
         db,
-        deps=deps.initialize_cycle_runtime_deps,
         gh_runner=gh_runner,
     )
 

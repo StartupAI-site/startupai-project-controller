@@ -239,12 +239,13 @@ def _process_schedule_ready_snapshot(
     dry_run: bool,
     decision: SchedulingDecision,
     review_state_port: ReviewStatePort,
+    dependency_review_state_port: ReviewStatePort | None,
     board_port: BoardMutationPort,
-    status_resolver: Callable[..., str] | None,
     wip_counts: dict[str, int],
     lane_wip_counts: dict[tuple[str, str], int],
 ) -> None:
     """Apply scheduling policy to one Ready snapshot."""
+    effective_dependency_review_state_port = dependency_review_state_port or review_state_port
     del use_ports
     ref = getattr(snapshot, "issue_ref", None)
     if ref is None:
@@ -283,8 +284,9 @@ def _process_schedule_ready_snapshot(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=status_resolver
-            or (lambda candidate_ref, *_args, **_kwargs: review_state_port.get_issue_status(candidate_ref)),
+            status_resolver=lambda candidate_ref, *_args, **_kwargs: effective_dependency_review_state_port.get_issue_status(
+                candidate_ref
+            ),
             require_in_graph=True,
         )
         if val_code != 0:
@@ -353,6 +355,7 @@ def schedule_ready_items(
     project_number: int,
     *,
     review_state_port: ReviewStatePort,
+    dependency_review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort,
     this_repo_prefix: str | None = None,
     all_prefixes: bool = False,
@@ -361,7 +364,6 @@ def schedule_ready_items(
     automation_config: BoardAutomationConfig | None = None,
     missing_executor_block_cap: int = DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
     dry_run: bool = False,
-    status_resolver: Callable[..., str] | None = None,
 ) -> SchedulingDecision:
     """Classify and optionally claim Ready issues."""
     if mode not in {"advisory", "claim"}:
@@ -397,8 +399,8 @@ def schedule_ready_items(
             dry_run=dry_run,
             decision=decision,
             review_state_port=review_state_port,
+            dependency_review_state_port=dependency_review_state_port,
             board_port=board_port,
-            status_resolver=status_resolver,
             wip_counts=wip_counts,
             lane_wip_counts=lane_wip_counts,
         )
@@ -475,17 +477,18 @@ def _attempt_claim_ready_candidate(
     config: CriticalPathConfig,
     project_owner: str,
     project_number: int,
-    status_resolver: Callable[..., str] | None,
     per_executor_wip_limit: int,
     automation_config: BoardAutomationConfig | None,
     dry_run: bool,
     review_state_port: ReviewStatePort,
+    dependency_review_state_port: ReviewStatePort | None,
     board_port: BoardMutationPort,
     norm_executor: str,
     lane_wip_counts: dict[tuple[str, str], int],
     wip_counts: dict[str, int],
 ) -> ClaimReadyResult | None:
     """Attempt to claim one Ready candidate for the executor."""
+    effective_dependency_review_state_port = dependency_review_state_port or review_state_port
     item_executor = snapshot.executor.strip().lower()
     if item_executor != norm_executor:
         if issue_ref:
@@ -500,8 +503,9 @@ def _attempt_claim_ready_candidate(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=status_resolver
-            or (lambda candidate_ref, *_args, **_kwargs: review_state_port.get_issue_status(candidate_ref)),
+            status_resolver=lambda candidate_ref, *_args, **_kwargs: effective_dependency_review_state_port.get_issue_status(
+                candidate_ref
+            ),
             require_in_graph=True,
         )
         if val_code != 0:
@@ -560,6 +564,7 @@ def claim_ready_issue(
     project_number: int,
     *,
     review_state_port: ReviewStatePort,
+    dependency_review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort,
     executor: str,
     issue_ref: str | None = None,
@@ -569,7 +574,6 @@ def claim_ready_issue(
     per_executor_wip_limit: int = 3,
     automation_config: BoardAutomationConfig | None = None,
     dry_run: bool = False,
-    status_resolver: Callable[..., str] | None = None,
 ) -> ClaimReadyResult:
     """Claim one Ready issue for a specific executor."""
     norm_executor = executor.strip().lower()
@@ -608,11 +612,11 @@ def claim_ready_issue(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=status_resolver,
             per_executor_wip_limit=per_executor_wip_limit,
             automation_config=automation_config,
             dry_run=dry_run,
             review_state_port=review_state_port,
+            dependency_review_state_port=dependency_review_state_port,
             board_port=board_port,
             norm_executor=norm_executor,
             lane_wip_counts=lane_wip_counts,
