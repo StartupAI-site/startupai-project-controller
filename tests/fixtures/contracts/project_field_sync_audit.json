@@ -1,0 +1,39 @@
+{
+  "active_missing": {
+    "agent": 2,
+    "assignees": 2,
+    "blocked_reason": 1,
+    "ci": 2,
+    "executor": 2,
+    "handoff_to": 2,
+    "milestone": 2,
+    "owner": 2,
+    "pr": 2,
+    "priority": 2,
+    "source": 2,
+    "sprint": 2,
+    "start_date": 2,
+    "target_date": 2
+  },
+  "missing": {
+    "agent": 2,
+    "assignees": 2,
+    "blocked_reason": 1,
+    "ci": 2,
+    "executor": 2,
+    "handoff_to": 2,
+    "milestone": 2,
+    "owner": 2,
+    "pr": 2,
+    "priority": 2,
+    "source": 2,
+    "sprint": 2,
+    "start_date": 2,
+    "target_date": 2
+  },
+  "status_counts": {
+    "Blocked": 1,
+    "Ready": 1
+  },
+  "total_issues": 2
+}

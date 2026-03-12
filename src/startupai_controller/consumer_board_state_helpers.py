@@ -13,6 +13,7 @@ from startupai_controller import (
 import startupai_controller.consumer_resolution_helpers as _resolution_helpers
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.domain.repair_policy import marker_for as _marker_for
+from startupai_controller.ports.session_store import SessionUpdateFields
 from startupai_controller.runtime.wiring import build_github_port_bundle
 from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
@@ -211,7 +212,10 @@ def reconcile_single_in_progress_item(
     if target == "ready":
         if classification == "adoptable" and pr_match is not None:
             if latest_session is not None and not dry_run:
-                store.update_session(latest_session.id, pr_url=pr_match.url)
+                store.update_session(
+                    latest_session.id,
+                    SessionUpdateFields(pr_url=pr_match.url),
+                )
         if not dry_run:
             return_issue_to_ready(
                 issue_ref,
@@ -228,8 +232,10 @@ def reconcile_single_in_progress_item(
         if latest_session is not None and pr_match is not None and not dry_run:
             store.update_session(
                 latest_session.id,
-                pr_url=pr_match.url,
-                phase="review",
+                SessionUpdateFields(
+                    pr_url=pr_match.url,
+                    phase="review",
+                ),
             )
         if not dry_run:
             transition_issue_to_review(

@@ -1,0 +1,68 @@
+{
+  "admission": {
+    "admitted": [],
+    "controller_owned_admission_rejections": 0,
+    "eligible_count": 0,
+    "enabled": true,
+    "error": null,
+    "needed": 2,
+    "partial_failure": false,
+    "ready_cap": 6,
+    "ready_count": 1,
+    "ready_floor": 4,
+    "scanned_backlog": 3,
+    "skip_reason_counts": {},
+    "top_candidates": [],
+    "top_skipped": []
+  },
+  "consumer_service_active": true,
+  "deferred_action_count": 0,
+  "executor_routing": {
+    "routed": [
+      "crew#19"
+    ],
+    "skipped": [
+      {
+        "issue_ref": "app#109",
+        "reason": "repo-not-governed"
+      }
+    ],
+    "unchanged": [
+      "crew#32"
+    ]
+  },
+  "github_request_counts": {
+    "graphql": 0,
+    "rest": 0
+  },
+  "health": "healthy",
+  "oldest_deferred_action_age_seconds": null,
+  "poll_interval_seconds": 180,
+  "reason_code": "none",
+  "replayed_actions": [],
+  "repo_workflows": {},
+  "review_rescue": {
+    "auto_merge_enabled": [],
+    "blocked": [],
+    "due_count": 0,
+    "error": null,
+    "partial_failure": false,
+    "queued_count": 0,
+    "removed": [],
+    "requeued": [],
+    "rerun": [],
+    "seeded": [],
+    "skipped": [
+      "control-plane:no-review-items"
+    ],
+    "verdict_backfill": []
+  },
+  "timings_ms": {
+    "admission": "<non-negative-int>",
+    "board_snapshot": "<non-negative-int>",
+    "deferred_replay": "<non-negative-int>",
+    "executor_routing": "<non-negative-int>",
+    "review_queue": "<non-negative-int>"
+  },
+  "verdict_backfill": []
+}

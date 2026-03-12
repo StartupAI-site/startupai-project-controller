@@ -25,6 +25,10 @@ import sys
 import time
 from typing import Callable
 
+from startupai_controller.adapters.github_http_adapter import (
+    GitHubTransportError,
+    run_github_command,
+)
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     ConfigError,
@@ -34,7 +38,6 @@ from startupai_controller.validate_critical_path_promotion import (
     parse_issue_ref,
 )
 from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
-from startupai_controller.github_http import GitHubTransportError, run_github_command
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_AUTOMATION_CONFIG_PATH = str(

@@ -1,0 +1,60 @@
+{
+  "audit": {
+    "active_missing": {
+      "agent": 0,
+      "assignees": 0,
+      "blocked_reason": 0,
+      "ci": 0,
+      "executor": 0,
+      "handoff_to": 0,
+      "milestone": 0,
+      "owner": 0,
+      "pr": 0,
+      "priority": 0,
+      "source": 0,
+      "sprint": 0,
+      "start_date": 0,
+      "target_date": 0
+    },
+    "missing": {
+      "agent": 0,
+      "assignees": 0,
+      "blocked_reason": 0,
+      "ci": 0,
+      "executor": 0,
+      "handoff_to": 0,
+      "milestone": 0,
+      "owner": 0,
+      "pr": 0,
+      "priority": 0,
+      "source": 0,
+      "sprint": 0,
+      "start_date": 0,
+      "target_date": 0
+    },
+    "status_counts": {
+      "Blocked": 1,
+      "Ready": 1
+    },
+    "total_issues": 2
+  },
+  "changed_fields": {
+    "Agent": 2,
+    "Blocked Reason": 1,
+    "CI": 3,
+    "Executor": 2,
+    "Handoff To": 2,
+    "Owner": 2,
+    "PR": 3,
+    "Priority": 2,
+    "Source": 2,
+    "Sprint": 2,
+    "Start Date": 2,
+    "Target Date": 2
+  },
+  "changed_issue_assignees": 2,
+  "changed_issue_milestones": 2,
+  "command": "sync-all",
+  "created_milestones": 0,
+  "processed_issues": 2
+}

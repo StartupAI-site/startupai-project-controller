@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from startupai_controller.domain.models import CycleResult, ReviewQueueDrainSummary
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ def execute_claimed_session(
     deps: ExecutionDeps,
     launch_context: Any,
     claimed_context: Any,
-    session_store: Any,
+    session_store: SessionStorePort,
     gh_runner: GhRunnerPort | None,
     process_runner: ProcessRunnerPort | None,
     file_reader: Callable[[Path], str] | None,
@@ -181,7 +182,7 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
-    session_store: Any,
+    session_store: SessionStorePort,
     review_state_port: ReviewStatePort | None,
     board_port: BoardMutationPort | None,
 ) -> ReviewQueueDrainSummary:
@@ -241,7 +242,7 @@ def handle_non_review_execution_outcome(
     session_status: str,
     codex_result: dict[str, Any] | None,
     has_commits: bool,
-    gh_runner: GhRunnerPort | None,
+    gh_runner: GhRunnerPort | Callable[..., str] | None,
     pr_port: PullRequestPort,
     board_port: BoardMutationPort,
 ) -> tuple[str, Any | None, str | None]:
@@ -251,9 +252,12 @@ def handle_non_review_execution_outcome(
     resolution_evaluation = None
     done_reason: str | None = None
     updated_session_status = session_status
-    effective_gh_runner = (
-        gh_runner.run_gh if hasattr(gh_runner, "run_gh") else gh_runner
-    )
+    if gh_runner is None:
+        effective_gh_runner = None
+    elif hasattr(gh_runner, "run_gh"):
+        effective_gh_runner = cast(GhRunnerPort, gh_runner).run_gh
+    else:
+        effective_gh_runner = cast(Callable[..., str], gh_runner)
 
     if session_status == "success" and not has_commits:
         resolution_evaluation = deps.verify_resolution_payload(

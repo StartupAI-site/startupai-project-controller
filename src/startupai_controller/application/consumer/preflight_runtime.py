@@ -19,6 +19,7 @@ from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.process_runner import GhRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
 
 # ---------------------------------------------------------------------------
 # Cycle runtime context (moved from board_consumer.py)
@@ -29,7 +30,7 @@ from startupai_controller.ports.review_state import ReviewStatePort
 class CycleRuntimeContext:
     """Cycle-scoped runtime wiring and configuration."""
 
-    session_store: Any  # SessionStorePort
+    session_store: SessionStorePort
     cp_config: Any  # CriticalPathConfig
     auto_config: Any  # BoardAutomationConfig | None
     main_workflows: dict[str, Any]
@@ -101,7 +102,7 @@ def initialize_cycle_runtime(
     config: Any,
     *,
     deps: InitializeCycleRuntimeDeps,
-    session_store: Any,
+    session_store: SessionStorePort,
     cp_config: Any,
     github_memo: Any,
     ready_flow_port: Any,
