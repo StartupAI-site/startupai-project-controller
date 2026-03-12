@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-31`
-- Active branch: `refactor/controller-10-10-phase-31`
-- Fresh-main baseline already includes merged work through `origin/main` commit `ad9452c`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-32`
+- Active branch: `refactor/controller-10-10-phase-32`
+- Fresh-main baseline already includes merged work through `origin/main` commit `d1a7a81`
 
-Do not resume from the main checkout. Continue from the phase-31 worktree.
+Do not resume from the main checkout. Continue from the phase-32 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -63,35 +63,40 @@ Recent merged phases:
 - `PR #70` `refactor: extract pr review state adapter cluster`
 - `PR #71` `refactor: type review comment operational cluster`
 - `PR #72` `refactor: type launch cycle support cluster`
+- `PR #73` `refactor: split project field sync core query cluster`
 
-Latest successful validation on the current phase-31 worktree:
+Latest successful validation on the current phase-32 worktree:
 
-- targeted `mypy` on field-sync split modules: passed
-- targeted `pytest` on field-sync and architecture-boundary slices: `48 passed`
+- targeted `mypy` on field-sync shell/core/query/mutation/operation modules: passed
+- targeted `pytest` on field-sync, contract-output, and architecture-boundary slices: `52 passed`
 - full suite: `872 passed`
 
-No PR is open yet for phase 31. No poller should be running until the next PR
+No PR is open yet for phase 32. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining structural hotspots after the phase-31 field-sync core/query split:
+Remaining structural hotspots after the phase-32 field-sync shell split:
 
 - `1972` lines in `src/startupai_controller/adapters/pull_requests.py`
 - `984` lines in `src/startupai_controller/consumer_review_queue_processing.py`
-- `734` lines in `src/startupai_controller/project_field_sync.py`
 - `1333` lines in `src/startupai_controller/consumer_operational_wiring.py`
 - `623` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
 - `466` lines in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `464` lines in `src/startupai_controller/consumer_cycle_wiring.py`
 - `352` lines in `src/startupai_controller/project_field_sync_core.py`
+- `377` lines in `src/startupai_controller/project_field_sync_operations.py`
 - `341` lines in `src/startupai_controller/project_field_sync_queries.py`
+- `252` lines in `src/startupai_controller/project_field_sync_mutations.py`
+- `168` lines in `src/startupai_controller/project_field_sync.py`
 - `263` lines in `src/startupai_controller/consumer_launch_support_wiring.py`
 - `556` lines in `src/startupai_controller/consumer_claim_wiring.py`
 - `443` lines in `src/startupai_controller/adapters/pull_request_review_state.py`
 - `251` lines in `src/startupai_controller/consumer_launch_helpers.py`
-- `3` `Any` usages in `src/startupai_controller/project_field_sync.py`
+- `0` `Any` usages in `src/startupai_controller/project_field_sync.py`
+- `3` `Any` usages in `src/startupai_controller/project_field_sync_operations.py`
 - `4` `Any` usages in `src/startupai_controller/project_field_sync_queries.py`
+- `0` `Any` usages in `src/startupai_controller/project_field_sync_mutations.py`
 - `2` `Any` usages in `src/startupai_controller/project_field_sync_core.py`
 - `4` `Any` usages in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `3` `Any` usages in `src/startupai_controller/consumer_comment_pr_wiring.py`
@@ -105,32 +110,34 @@ Remaining structural hotspots after the phase-31 field-sync core/query split:
 Bounded-context completion estimate at handoff time:
 
 - consumer/control-plane: about 94-95%
-- automation/review: about 86-88%
-- field sync: about 35-40%
-- overall program: about 89-90%
+- automation/review: about 88-90%
+- field sync: about 60-65%
+- overall program: about 91-92%
 
 ## Recommended Next Batch
 
-If phase 31 is not yet merged, finish shipping the current field-sync core and
-query extraction:
+If phase 32 is not yet merged, finish shipping the current field-sync shell,
+mutation, and operations split:
 
 - `src/startupai_controller/project_field_sync.py`
 - `src/startupai_controller/project_field_sync_core.py`
 - `src/startupai_controller/project_field_sync_queries.py`
+- `src/startupai_controller/project_field_sync_mutations.py`
+- `src/startupai_controller/project_field_sync_operations.py`
 
-Once phase 31 is merged, the strongest next target is the remaining
-field-sync mutation/sync-pass shell:
+Once phase 32 is merged, the strongest next target shifts back to the
+remaining oversized adapter and review-processing seams:
 
-- `src/startupai_controller/project_field_sync.py`
-- `src/startupai_controller/project_field_sync_core.py`
-- `src/startupai_controller/project_field_sync_queries.py`
+- `src/startupai_controller/adapters/pull_requests.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
+- `src/startupai_controller/control_plane_rescue.py`
 
 After that, the biggest structural work still pending is:
 
 - deeper helper typing around `src/startupai_controller/consumer_launch_helpers.py`
 - worktree helper typing around `src/startupai_controller/consumer_worktree_helpers.py`
 - the remaining typed-shell cleanup around control-plane rescue and comment/replay wiring
-- deeper adapter decomposition in `src/startupai_controller/adapters/pull_requests.py`
+- any final field-sync follow-up if the operations/query modules still need another ratchet
 
 ## Fresh-Session Prompt
 
@@ -141,8 +148,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-31
-- active branch: refactor/controller-10-10-phase-31
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-32
+- active branch: refactor/controller-10-10-phase-32
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -161,8 +168,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66, #67, #68, #69, #70, #71, and #72
-- no PR is open yet for phase 31
-- latest full local validation on phase 31 was 872 passed
-- current batch is the field-sync core/query extraction; next batch after merge is the remaining mutation and sync-pass split inside `project_field_sync.py`
+- latest merged PRs: #66, #67, #68, #69, #70, #71, #72, and #73
+- no PR is open yet for phase 32
+- latest full local validation on phase 32 was 872 passed
+- current batch is the field-sync shell/mutation/operations split; next batch after merge is the remaining oversized adapter/review-processing cluster
 ```
