@@ -1116,7 +1116,9 @@ def execute_claimed_session(
     prepared: PreparedCycleContext,
     launch_context: PreparedLaunchContext,
     claimed_context: ClaimedSessionContext,
-    process_runner: ProcessRunnerPort | Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    process_runner: (
+        ProcessRunnerPort | Callable[..., subprocess.CompletedProcess[str]] | None
+    ) = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     file_reader: Callable[[Path], str] | None = None,
     board_info_resolver: BoardInfoResolverFn | None = None,
@@ -1135,7 +1137,9 @@ def execute_claimed_session(
         prepared=prepared,
         launch_context=launch_context,
         claimed_context=claimed_context,
-        process_runner=process_runner if process_runner is not None else subprocess_runner,
+        process_runner=(
+            process_runner if process_runner is not None else subprocess_runner
+        ),
         file_reader=file_reader,
         review_state_port=review_state_port,
         board_port=board_port,
