@@ -4,14 +4,138 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Protocol, cast
 
+from startupai_controller.consumer_types import (
+    ClaimedSessionContext,
+    PrCreationOutcome,
+    PreparedLaunchContext,
+    SessionExecutionOutcome,
+)
 from startupai_controller.domain.models import CycleResult, ReviewQueueDrainSummary
+from startupai_controller.domain.models import ResolutionEvaluation, ReviewQueueEntry
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
+
+
+class CreatePrForExecutionResultFn(Protocol):
+    """Create or salvage a PR for one claimed execution result."""
+
+    def __call__(
+        self,
+        *,
+        config: Any,
+        launch_context: PreparedLaunchContext,
+        claimed_context: ClaimedSessionContext,
+        codex_result: dict[str, Any] | None,
+        session_status: str,
+        failure_reason: str | None,
+        subprocess_runner: Callable[..., Any] | None,
+        gh_runner: Callable[..., str] | None,
+    ) -> PrCreationOutcome: ...
+
+
+class HandoffExecutionToReviewFn(Protocol):
+    """Transition a claimed execution into review and rescue processing."""
+
+    def __call__(
+        self,
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: PreparedLaunchContext,
+        session_id: str,
+        pr_url: str,
+        session_status: str,
+        session_store: SessionStorePort,
+        review_state_port: ReviewStatePort | None,
+        board_port: BoardMutationPort | None,
+    ) -> ReviewQueueDrainSummary: ...
+
+
+class HandleNonReviewExecutionOutcomeFn(Protocol):
+    """Apply non-review post-execution state transitions."""
+
+    def __call__(
+        self,
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: PreparedLaunchContext,
+        session_id: str,
+        session_status: str,
+        codex_result: dict[str, Any] | None,
+        has_commits: bool,
+        gh_runner: GhRunnerPort | Callable[..., str] | None,
+        pr_port: PullRequestPort,
+        board_port: BoardMutationPort,
+    ) -> tuple[str, ResolutionEvaluation | None, str | None]: ...
+
+
+class BuildSessionExecutionOutcomeFn(Protocol):
+    """Build the final session-execution outcome value object."""
+
+    def __call__(
+        self,
+        *,
+        session_status: str,
+        failure_reason: str | None,
+        pr_url: str | None,
+        has_commits: bool,
+        codex_result: dict[str, Any] | None,
+        should_transition_to_review: bool,
+        immediate_review_summary: ReviewQueueDrainSummary,
+        resolution_evaluation: ResolutionEvaluation | None,
+        done_reason: str | None,
+    ) -> SessionExecutionOutcome: ...
+
+
+class VerifyResolutionPayloadFn(Protocol):
+    """Verify the structured resolution payload emitted by Codex."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        resolution: dict[str, Any] | None,
+        *,
+        config: Any,
+        workflows: dict[str, Any],
+        pr_port: PullRequestPort,
+    ) -> ResolutionEvaluation: ...
+
+
+class ApplyResolutionActionFn(Protocol):
+    """Apply the verified resolution action to board/runtime state."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        resolution_evaluation: ResolutionEvaluation,
+        *,
+        session_id: str,
+        db: Any,
+        config: Any,
+        critical_path_config: Any,
+        board_port: BoardMutationPort,
+    ) -> str | None: ...
+
+
+class QueueClaimedSessionForReviewFn(Protocol):
+    """Queue a claimed session for review processing."""
+
+    def __call__(
+        self,
+        *,
+        store: SessionStorePort,
+        issue_ref: str,
+        pr_url: str,
+        session_id: str,
+    ) -> ReviewQueueEntry | None: ...
 
 
 @dataclass(frozen=True)
@@ -22,12 +146,10 @@ class ExecutionDeps:
     run_codex_session: Callable[..., int]
     parse_codex_result: Callable[..., dict[str, Any] | None]
     session_status_from_codex_result: Callable[..., tuple[str, str | None]]
-    create_pr_for_execution_result: Callable[..., Any]
-    handoff_execution_to_review: Callable[..., ReviewQueueDrainSummary]
-    handle_non_review_execution_outcome: Callable[
-        ..., tuple[str, Any | None, str | None]
-    ]
-    build_session_execution_outcome: Callable[..., Any]
+    create_pr_for_execution_result: CreatePrForExecutionResultFn
+    handoff_execution_to_review: HandoffExecutionToReviewFn
+    handle_non_review_execution_outcome: HandleNonReviewExecutionOutcomeFn
+    build_session_execution_outcome: BuildSessionExecutionOutcomeFn
 
 
 @dataclass(frozen=True)
@@ -36,7 +158,7 @@ class ReviewHandoffDeps:
 
     transition_claimed_session_to_review: Callable[..., None]
     post_claimed_session_verdict_marker: Callable[..., None]
-    queue_claimed_session_for_review: Callable[..., Any | None]
+    queue_claimed_session_for_review: QueueClaimedSessionForReviewFn
     run_immediate_review_handoff: Callable[..., ReviewQueueDrainSummary]
     record_metric: Callable[..., None]
 
@@ -45,8 +167,8 @@ class ReviewHandoffDeps:
 class NonReviewOutcomeDeps:
     """Injected seams for non-review execution outcomes."""
 
-    verify_resolution_payload: Callable[..., Any]
-    apply_resolution_action: Callable[..., str | None]
+    verify_resolution_payload: VerifyResolutionPayloadFn
+    apply_resolution_action: ApplyResolutionActionFn
     return_issue_to_ready: Callable[..., None]
     record_successful_github_mutation: Callable[..., None]
     mark_degraded: Callable[..., None]
@@ -70,7 +192,7 @@ def execute_claimed_session(
     review_state_port: ReviewStatePort | None,
     board_port: BoardMutationPort | None,
     pr_port: PullRequestPort | None,
-) -> Any:
+) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
     candidate = launch_context.issue_ref
     session_id = claimed_context.session_id
@@ -141,6 +263,10 @@ def execute_claimed_session(
             board_port=board_port,
         )
     else:
+        if pr_port is None or board_port is None:
+            raise ValueError(
+                "pr_port and board_port are required for non-review execution outcomes"
+            )
         (
             effective_session_status,
             resolution_evaluation,
@@ -178,7 +304,7 @@ def handoff_execution_to_review(
     db: Any,
     prepared: Any,
     deps: ReviewHandoffDeps,
-    launch_context: Any,
+    launch_context: PreparedLaunchContext,
     session_id: str,
     pr_url: str,
     session_status: str,
@@ -237,7 +363,7 @@ def handle_non_review_execution_outcome(
     db: Any,
     prepared: Any,
     deps: NonReviewOutcomeDeps,
-    launch_context: Any,
+    launch_context: PreparedLaunchContext,
     session_id: str,
     session_status: str,
     codex_result: dict[str, Any] | None,
@@ -245,7 +371,7 @@ def handle_non_review_execution_outcome(
     gh_runner: GhRunnerPort | Callable[..., str] | None,
     pr_port: PullRequestPort,
     board_port: BoardMutationPort,
-) -> tuple[str, Any | None, str | None]:
+) -> tuple[str, ResolutionEvaluation | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
     cp_config = prepared.cp_config
     candidate = launch_context.issue_ref
@@ -321,9 +447,9 @@ def finalize_claimed_session(
     db: Any,
     prepared: Any,
     deps: FinalizeClaimedSessionDeps,
-    launch_context: Any,
-    claimed_context: Any,
-    execution_outcome: Any,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    execution_outcome: SessionExecutionOutcome,
     review_state_port: ReviewStatePort | None,
 ) -> CycleResult:
     """Persist final session state and return the cycle result."""
