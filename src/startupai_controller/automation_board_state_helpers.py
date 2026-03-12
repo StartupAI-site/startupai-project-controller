@@ -17,7 +17,7 @@ from startupai_controller.board_automation_config import (
     DEFAULT_PROJECT_OWNER,
 )
 from startupai_controller.domain.models import LinkedIssue
-from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig, GhQueryError
 
 if TYPE_CHECKING:
     from startupai_controller.board_automation import BoardInfo
@@ -204,6 +204,18 @@ def set_blocked_with_reason(
             config,
             gh_runner=gh_runner,
         )
+    if board_info_resolver is not None or status_mutator is not None:
+        info = board_info_resolver(issue_ref, config, project_owner, project_number)
+        if info.status == "NOT_ON_BOARD":
+            raise GhQueryError(f"{issue_ref} is not on the project board.")
+        if dry_run:
+            return
+        if status_mutator is not None:
+            status_mutator(info.project_id, info.item_id)
+        elif info.status != "Blocked":
+            board_port.set_issue_status(issue_ref, "Blocked")
+        board_port.set_issue_field(issue_ref, "Blocked Reason", reason)
+        return
     app_set_blocked_with_reason_fn(
         issue_ref,
         reason,
@@ -213,9 +225,6 @@ def set_blocked_with_reason(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
-        gh_runner=gh_runner,
     )
 
 
@@ -265,6 +274,17 @@ def transition_issue_status(
             config,
             gh_runner=gh_runner,
         )
+    if board_info_resolver is not None or status_mutator is not None:
+        info = board_info_resolver(issue_ref, config, project_owner, project_number)
+        current_status = info.status
+        if current_status not in from_statuses:
+            return False, current_status
+        if not dry_run:
+            if status_mutator is not None:
+                status_mutator(info.project_id, info.item_id, to_status)
+            else:
+                board_port.set_issue_status(issue_ref, to_status)
+        return True, current_status
     return app_transition_issue_status_fn(
         issue_ref,
         from_statuses,
@@ -275,9 +295,6 @@ def transition_issue_status(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
-        gh_runner=gh_runner,
     )
 
 

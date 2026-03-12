@@ -227,17 +227,7 @@ def _query_latest_wip_activity_timestamp(
     config: CriticalPathConfig | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
-    """Return the latest meaningful activity timestamp for one WIP issue."""
-    issue_updated = _query_issue_updated_at(
-        owner,
-        repo,
-        number,
-        review_state_port=review_state_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
-    )
+    """Return the latest execution-significant activity timestamp for one WIP issue."""
     review_state_port = review_state_port or _default_review_state_port(
         project_owner,
         project_number,
@@ -262,7 +252,7 @@ def _query_latest_wip_activity_timestamp(
             config=config,
             gh_runner=gh_runner,
         )
-    values = [ts for ts in (issue_updated, latest_comment, latest_pr) if ts is not None]
+    values = [ts for ts in (latest_comment, latest_pr) if ts is not None]
     return max(values) if values else None
 
 

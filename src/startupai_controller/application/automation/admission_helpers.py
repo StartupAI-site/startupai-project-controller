@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
 
 from startupai_controller.board_graph import (
     _admission_candidate_rank,
@@ -28,6 +27,10 @@ from startupai_controller.domain.scheduling_policy import (
     priority_rank as _priority_rank,
     snapshot_to_issue_ref as _snapshot_to_issue_ref,
 )
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     GhQueryError,
@@ -44,19 +47,12 @@ from startupai_controller.validate_critical_path_promotion import (
 
 @dataclass(frozen=True)
 class AdmissionPipelineDeps:
-    """Injected board-automation helpers for the admission pipeline."""
+    """Typed infrastructure capabilities for the admission pipeline."""
 
-    query_open_pull_requests: Callable[..., list]
-    list_issue_comment_bodies: Callable[..., list]
-    memoized_query_issue_body: Callable[..., str]
-    mark_issues_done: Callable[..., list[str]]
-    close_issue: Callable[..., None]
-    set_blocked_with_reason: Callable[..., None]
-    set_handoff_target: Callable[..., None]
-    default_board_mutation_port: Callable[..., Any]
-    set_single_select_field: Callable[..., None]
-    set_text_field: Callable[..., None]
-    list_project_items: Callable[..., list]
+    review_state_port: ReviewStatePort
+    pr_port: PullRequestPort
+    board_port: BoardMutationPort
+    issue_context_port: IssueContextPort
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +173,7 @@ def _query_open_prs_by_prefix(
     repo_prefixes: tuple[str, ...],
     *,
     deps: AdmissionPipelineDeps,
-    pr_port=None,
     github_memo=None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, list[OpenPullRequest]]:
     """Return open PRs keyed by governed repo prefix."""
     result: dict[str, list[OpenPullRequest]] = {}
@@ -191,23 +185,11 @@ def _query_open_prs_by_prefix(
         if github_memo is not None:
             cached = github_memo.open_pull_requests.get(repo_slug)
             if cached is None:
-                if pr_port is not None:
-                    cached = pr_port.list_open_prs(repo_slug)
-                else:
-                    cached = deps.query_open_pull_requests(
-                        repo_slug,
-                        gh_runner=gh_runner,
-                    )
+                cached = deps.pr_port.list_open_prs(repo_slug)
                 github_memo.open_pull_requests[repo_slug] = list(cached)
             result[repo_prefix] = list(cached)
         else:
-            if pr_port is not None:
-                result[repo_prefix] = pr_port.list_open_prs(repo_slug)
-            else:
-                result[repo_prefix] = deps.query_open_pull_requests(
-                    repo_slug,
-                    gh_runner=gh_runner,
-                )
+            result[repo_prefix] = deps.pr_port.list_open_prs(repo_slug)
     return result
 
 
@@ -218,44 +200,26 @@ def _latest_resolution_signal(
     number: int,
     *,
     deps: AdmissionPipelineDeps,
-    review_state_port=None,
     github_memo=None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> dict[str, object] | None:
     """Return the latest machine-readable resolution signal, if any."""
     if github_memo is not None:
         key = (owner, repo, number)
         cached = github_memo.issue_comment_bodies.get(key)
         if cached is None:
-            if review_state_port is not None:
-                cached = review_state_port.list_issue_comment_bodies(
-                    f"{owner}/{repo}",
-                    number,
-                )
-            else:
-                cached = deps.list_issue_comment_bodies(
-                    owner,
-                    repo,
-                    number,
-                    gh_runner=gh_runner,
-                )
+            cached = deps.review_state_port.list_issue_comment_bodies(
+                f"{owner}/{repo}",
+                number,
+            )
             github_memo.issue_comment_bodies[key] = list(cached)
         comment_bodies = list(cached)
     else:
-        if review_state_port is not None:
-            comment_bodies = list(
-                review_state_port.list_issue_comment_bodies(
-                    f"{owner}/{repo}",
-                    number,
-                )
-            )
-        else:
-            comment_bodies = deps.list_issue_comment_bodies(
-                owner,
-                repo,
+        comment_bodies = list(
+            deps.review_state_port.list_issue_comment_bodies(
+                f"{owner}/{repo}",
                 number,
-                gh_runner=gh_runner,
             )
+        )
 
     for body in reversed(comment_bodies):
         parsed = parse_resolution_comment(body)
@@ -287,10 +251,7 @@ def _apply_prior_resolution_signal(
     project_number: int,
     *,
     deps: AdmissionPipelineDeps,
-    review_state_port=None,
-    board_port=None,
     dry_run: bool = False,
-    gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Apply a prior machine-verified resolution signal before admission."""
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
@@ -301,48 +262,14 @@ def _apply_prior_resolution_signal(
 
     if verification_class == "strong" and final_action == "closed_as_already_resolved":
         if not dry_run:
-            deps.mark_issues_done(
-                [LinkedIssue(owner=owner, repo=repo, number=number, ref=issue_ref)],
-                config,
-                project_owner,
-                project_number,
-                review_state_port=review_state_port,
-                board_port=board_port,
-                gh_runner=gh_runner,
-            )
-            deps.close_issue(
-                owner,
-                repo,
-                number,
-                board_port=board_port,
-                project_owner=project_owner,
-                project_number=project_number,
-                config=config,
-                gh_runner=gh_runner,
-            )
+            deps.board_port.set_issue_status(issue_ref, "Done")
+            deps.board_port.close_issue(f"{owner}/{repo}", number)
         return "resolved"
 
     if not dry_run:
-        deps.set_blocked_with_reason(
-            issue_ref,
-            blocked_reason,
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            gh_runner=gh_runner,
-        )
-        deps.set_handoff_target(
-            issue_ref,
-            "claude",
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            gh_runner=gh_runner,
-        )
+        deps.board_port.set_issue_status(issue_ref, "Blocked")
+        deps.board_port.set_issue_field(issue_ref, "Blocked Reason", blocked_reason)
+        deps.board_port.set_issue_field(issue_ref, "Handoff To", "claude")
     return "blocked"
 
 
@@ -352,67 +279,37 @@ def _admit_backlog_item(
     deps: AdmissionPipelineDeps,
     executor: str,
     assignment_owner: str,
-    board_port,
-    project_owner: str = "",
-    project_number: int = 0,
-    config=None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Mutate one backlog card into a controller-owned Ready card."""
-    deps.set_single_select_field(
+    deps.board_port.set_project_single_select(
         candidate.project_id,
         candidate.item_id,
         "Status",
         "Ready",
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
     )
-    deps.set_single_select_field(
+    deps.board_port.set_project_single_select(
         candidate.project_id,
         candidate.item_id,
         "Executor",
         executor,
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
     )
-    deps.set_text_field(
+    deps.board_port.set_project_text_field(
         candidate.project_id,
         candidate.item_id,
         "Owner",
         assignment_owner,
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
     )
-    deps.set_single_select_field(
+    deps.board_port.set_project_single_select(
         candidate.project_id,
         candidate.item_id,
         "Handoff To",
         "none",
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
     )
-    deps.set_text_field(
+    deps.board_port.set_project_text_field(
         candidate.project_id,
         candidate.item_id,
         "Blocked Reason",
         "",
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
-        gh_runner=gh_runner,
     )
 
 
@@ -425,30 +322,17 @@ def load_admission_source_items(
     automation_config,
     *,
     deps: AdmissionPipelineDeps,
-    review_state_port=None,
     board_snapshot=None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
     """Load backlog/ready items needed for one admission pass."""
     statuses = set(automation_config.admission.source_statuses)
     statuses.add("Ready")
     if board_snapshot is None:
-        if review_state_port is not None:
-            return [
-                item
-                for item in review_state_port.build_board_snapshot().items
-                if item.status in statuses
-            ]
-        from startupai_controller.board_automation_config import (
-            DEFAULT_PROJECT_NUMBER,
-            DEFAULT_PROJECT_OWNER,
-        )
-        return deps.list_project_items(
-            DEFAULT_PROJECT_OWNER,
-            DEFAULT_PROJECT_NUMBER,
-            statuses=statuses,
-            gh_runner=gh_runner,
-        )
+        return [
+            item
+            for item in deps.review_state_port.build_board_snapshot().items
+            if item.status in statuses
+        ]
     return [item for item in board_snapshot.items if item.status in statuses]
 
 
@@ -548,10 +432,6 @@ def evaluate_admission_candidates(
     dry_run: bool,
     memo,
     skipped: list[AdmissionSkip],
-    pr_port=None,
-    review_state_port=None,
-    board_port=None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> tuple[
     list[AdmissionCandidate],
     list[str],
@@ -576,13 +456,14 @@ def evaluate_admission_candidates(
         assert issue_ref is not None
         repo_prefix = parse_issue_ref(issue_ref).prefix
         owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
-        body = item.body or deps.memoized_query_issue_body(
-            memo,
-            owner,
-            repo,
-            number,
-            gh_runner=gh_runner,
-        )
+        if item.body:
+            body = item.body
+        else:
+            key = (owner, repo, number)
+            body = memo.issue_bodies.get(key)
+            if body is None:
+                body = deps.issue_context_port.get_issue_context(owner, repo, number).body
+                memo.issue_bodies[key] = body
         if not has_structured_acceptance_criteria(
             body,
             automation_config.admission.acceptance_headings,
@@ -597,9 +478,7 @@ def evaluate_admission_candidates(
                 config,
                 (repo_prefix,),
                 deps=deps,
-                pr_port=pr_port,
                 github_memo=memo,
-                gh_runner=gh_runner,
             ).get(repo_prefix, []),
             automation_config,
         )
@@ -628,9 +507,7 @@ def evaluate_admission_candidates(
             repo,
             number,
             deps=deps,
-            review_state_port=review_state_port,
             github_memo=memo,
-            gh_runner=gh_runner,
         )
         if prior_resolution is not None:
             try:
@@ -641,10 +518,7 @@ def evaluate_admission_candidates(
                     project_owner,
                     project_number,
                     deps=deps,
-                    review_state_port=review_state_port,
-                    board_port=board_port,
                     dry_run=dry_run,
-                    gh_runner=gh_runner,
                 )
             except GhQueryError as exc:
                 partial_failure = True
@@ -684,12 +558,7 @@ def apply_admitted_backlog_candidates(
     deps: AdmissionPipelineDeps,
     executor: str,
     assignment_owner: str,
-    board_port,
-    project_owner: str,
-    project_number: int,
-    config,
     dry_run: bool,
-    gh_runner: Callable[..., str] | None = None,
 ) -> tuple[list[str], bool, str | None]:
     """Apply backlog-to-ready mutations for the selected candidates."""
     admitted: list[str] = []
@@ -697,12 +566,6 @@ def apply_admitted_backlog_candidates(
     error: str | None = None
     if dry_run:
         return admitted, partial_failure, error
-    board_port = board_port or deps.default_board_mutation_port(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
     for candidate in selected:
         try:
             _admit_backlog_item(
@@ -710,11 +573,6 @@ def apply_admitted_backlog_candidates(
                 deps=deps,
                 executor=executor,
                 assignment_owner=assignment_owner,
-                board_port=board_port,
-                project_owner=project_owner,
-                project_number=project_number,
-                config=config,
-                gh_runner=gh_runner,
             )
         except GhQueryError as exc:
             partial_failure = True

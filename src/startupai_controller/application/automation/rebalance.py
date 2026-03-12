@@ -18,19 +18,30 @@ from startupai_controller.domain.repair_policy import (
     parse_pr_url as _parse_pr_url,
 )
 from startupai_controller.domain.scheduling_policy import VALID_EXECUTORS, wip_limit_for_lane
+from startupai_controller.application.automation.ready_claim import _transition_issue_status
+from startupai_controller.application.automation.ready_wiring import (
+    _wrap_board_port,
+    _wrap_review_state_port,
+)
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     direct_predecessors,
+    evaluate_ready_promotion,
+    in_any_critical_path,
     parse_issue_ref,
 )
 
 if TYPE_CHECKING:
     from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
+    from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
     from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
-
-
+else:
+    _BoardMutationPort = None
+    _PullRequestPort = None
+    _ReviewStatePort = None
 @dataclass(frozen=True)
 class _WipCandidate:
     ref: str
@@ -43,50 +54,58 @@ class _WipCandidate:
     has_open_pr: bool
 
 
+def _parse_github_timestamp(raw: str | None) -> datetime | None:
+    """Parse one GitHub timestamp string into an aware datetime."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _latest_wip_activity_timestamp(
+    issue_ref: str,
+    *,
+    review_state_port: ReviewStatePort,
+    pr_port: PullRequestPort,
+    owner: str,
+    repo: str,
+    number: int,
+    pr_field: str,
+) -> datetime | None:
+    """Return the latest execution-significant activity timestamp for one WIP issue."""
+    latest_comment = review_state_port.latest_non_automation_comment_timestamp(
+        f"{owner}/{repo}",
+        number,
+    )
+    latest_pr = None
+    parsed_pr = _parse_pr_url(pr_field)
+    if parsed_pr is not None:
+        pr_owner, pr_repo, pr_number = parsed_pr
+        latest_pr = _parse_github_timestamp(
+            pr_port.pull_request_updated_at(f"{pr_owner}/{pr_repo}", pr_number)
+        )
+    values = [ts for ts in (latest_comment, latest_pr) if ts is not None]
+    return max(values) if values else None
+
+
 def _handle_dependency_blocked_rebalance_item(
     ref: str,
     *,
     config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
     dry_run: bool,
     decision: RebalanceDecision,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
-    board_info_resolver,
-    board_mutator,
-    gh_runner,
-    set_blocked_with_reason: Callable[..., None],
-    set_handoff_target: Callable[..., None],
-) -> BoardMutationPort | None:
+    board_port: BoardMutationPort,
+) -> None:
     """Route a dependency-blocked WIP item to Blocked with claude handoff."""
     preds = ",".join(sorted(direct_predecessors(config, ref)))
     reason = f"dependency-unmet:{preds}"
     if not dry_run:
-        set_blocked_with_reason(
-            ref,
-            reason,
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-        )
-        set_handoff_target(
-            ref,
-            "claude",
-            config,
-            project_owner,
-            project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            gh_runner=gh_runner,
-        )
+        board_port.set_issue_status(ref, "Blocked")
+        board_port.set_issue_field(ref, "Blocked Reason", reason)
+        board_port.set_issue_field(ref, "Handoff To", "claude")
     decision.moved_blocked.append(ref)
-    return board_port
 
 
 def _handle_stale_rebalance_item(
@@ -103,24 +122,15 @@ def _handle_stale_rebalance_item(
     config: CriticalPathConfig,
     dry_run: bool,
     decision: RebalanceDecision,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
-    board_info_resolver,
-    board_mutator,
-    gh_runner,
-    query_latest_marker_timestamp: Callable[..., datetime | None],
-    comment_exists: Callable[..., bool],
-    ensure_board_port: Callable[[BoardMutationPort | None], BoardMutationPort],
-    transition_issue_status: Callable[..., tuple[bool, str]],
-) -> tuple[bool, BoardMutationPort | None]:
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+) -> bool:
     """Mark a stale item or demote it back to Ready after confirmation."""
     stale_prefix = f"<!-- {MARKER_PREFIX}:stale-candidate:{ref}"
-    stale_ts = query_latest_marker_timestamp(
-        owner,
-        repo,
+    stale_ts = review_state_port.latest_matching_comment_timestamp(
+        f"{owner}/{repo}",
         number,
-        stale_prefix,
-        gh_runner=gh_runner,
+        (stale_prefix,),
     )
     if (
         stale_ts is None
@@ -133,8 +143,7 @@ def _handle_stale_rebalance_item(
                 f"<!-- {MARKER_PREFIX}:stale-candidate:{ref}:"
                 f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')} -->"
             )
-            if not comment_exists(owner, repo, number, stale_marker, gh_runner=gh_runner):
-                board_port = ensure_board_port(board_port)
+            if not review_state_port.comment_exists(f"{owner}/{repo}", number, stale_marker):
                 board_port.post_issue_comment(
                     f"{owner}/{repo}",
                     number,
@@ -143,9 +152,9 @@ def _handle_stale_rebalance_item(
                         "Stale candidate detected; will demote on next cycle if still inactive."
                     ),
                 )
-        return True, board_port
+        return True
 
-    changed, _old = transition_issue_status(
+    changed, _old = _transition_issue_status(
         ref,
         {"In Progress"},
         "Ready",
@@ -155,14 +164,10 @@ def _handle_stale_rebalance_item(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
     if changed and not dry_run:
         demote_marker = _marker_for("stale-demote", ref)
-        if not comment_exists(owner, repo, number, demote_marker, gh_runner=gh_runner):
-            board_port = ensure_board_port(board_port)
+        if not review_state_port.comment_exists(f"{owner}/{repo}", number, demote_marker):
             board_port.post_issue_comment(
                 f"{owner}/{repo}",
                 number,
@@ -173,7 +178,7 @@ def _handle_stale_rebalance_item(
                 ),
             )
     decision.moved_ready.append(ref)
-    return True, board_port
+    return True
 
 
 def _evaluate_rebalance_snapshot(
@@ -189,24 +194,12 @@ def _evaluate_rebalance_snapshot(
     now: datetime,
     dry_run: bool,
     decision: RebalanceDecision,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
-    board_info_resolver,
-    board_mutator,
-    status_resolver,
-    gh_runner,
-    is_graph_member: Callable[..., bool],
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    pr_port: PullRequestPort,
+    is_graph_member: Callable[[CriticalPathConfig, str], bool],
     ready_promotion_evaluator: Callable[..., tuple[int, str]],
-    set_blocked_with_reason: Callable[..., None],
-    set_handoff_target: Callable[..., None],
-    query_project_item_field: Callable[..., str],
-    query_open_pr_updated_at: Callable[..., datetime | None],
-    query_latest_wip_activity_timestamp: Callable[..., datetime | None],
-    query_latest_marker_timestamp: Callable[..., datetime | None],
-    comment_exists: Callable[..., bool],
-    ensure_board_port: Callable[[BoardMutationPort | None], BoardMutationPort],
-    transition_issue_status: Callable[..., tuple[bool, str]],
-) -> tuple[_WipCandidate | None, BoardMutationPort | None]:
+) -> _WipCandidate | None:
     """Evaluate one in-progress item for dependency, staleness, and lane placement."""
     ref = snapshot.issue_ref
     parsed = parse_issue_ref(ref)
@@ -225,57 +218,42 @@ def _evaluate_rebalance_snapshot(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=status_resolver,
+            status_resolver=lambda issue_ref, *_args, **_kwargs: review_state_port.get_issue_status(
+                issue_ref
+            ),
             require_in_graph=True,
         )
         if code != 0:
-            board_port = _handle_dependency_blocked_rebalance_item(
+            _handle_dependency_blocked_rebalance_item(
                 ref,
                 config=config,
-                project_owner=project_owner,
-                project_number=project_number,
                 dry_run=dry_run,
                 decision=decision,
-                review_state_port=review_state_port,
                 board_port=board_port,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
-                set_blocked_with_reason=set_blocked_with_reason,
-                set_handoff_target=set_handoff_target,
             )
-            return None, board_port
+            return None
 
-    pr_field = query_project_item_field(
-        ref,
-        "PR",
-        config,
-        project_owner,
-        project_number,
-        gh_runner=gh_runner,
-    )
+    pr_field = review_state_port.project_field_value(ref, "PR")
     has_open_pr = False
     parsed_pr = _parse_pr_url(pr_field)
     if parsed_pr is not None:
         pr_owner, pr_repo, pr_number = parsed_pr
-        has_open_pr = query_open_pr_updated_at(
-            pr_owner,
-            pr_repo,
-            pr_number,
-            gh_runner=gh_runner,
-        ) is not None
-    activity_at = query_latest_wip_activity_timestamp(
+        has_open_pr = (
+            pr_port.pull_request_updated_at(f"{pr_owner}/{pr_repo}", pr_number) is not None
+        )
+    activity_at = _latest_wip_activity_timestamp(
         ref,
-        owner,
-        repo,
-        number,
-        pr_field,
-        gh_runner=gh_runner,
+        review_state_port=review_state_port,
+        pr_port=pr_port,
+        owner=owner,
+        repo=repo,
+        number=number,
+        pr_field=pr_field,
     )
 
     is_fresh = activity_at is not None and activity_at >= freshness_cutoff
     if not has_open_pr and not is_fresh:
-        handled, board_port = _handle_stale_rebalance_item(
+        handled = _handle_stale_rebalance_item(
             ref,
             owner=owner,
             repo=repo,
@@ -290,29 +268,19 @@ def _evaluate_rebalance_snapshot(
             decision=decision,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-            query_latest_marker_timestamp=query_latest_marker_timestamp,
-            comment_exists=comment_exists,
-            ensure_board_port=ensure_board_port,
-            transition_issue_status=transition_issue_status,
         )
         if handled:
-            return None, board_port
+            return None
 
-    return (
-        _WipCandidate(
-            ref=ref,
-            owner=owner,
-            repo=repo,
-            number=number,
-            lane=parsed.prefix,
-            executor=executor,
-            activity_at=activity_at or datetime.min.replace(tzinfo=timezone.utc),
-            has_open_pr=has_open_pr,
-        ),
-        board_port,
+    return _WipCandidate(
+        ref=ref,
+        owner=owner,
+        repo=repo,
+        number=number,
+        lane=parsed.prefix,
+        executor=executor,
+        activity_at=activity_at or datetime.min.replace(tzinfo=timezone.utc),
+        has_open_pr=has_open_pr,
     )
 
 
@@ -327,15 +295,9 @@ def _apply_rebalance_lane_overflow(
     project_number: int,
     dry_run: bool,
     decision: RebalanceDecision,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
-    board_info_resolver,
-    board_mutator,
-    gh_runner,
-    comment_exists: Callable[..., bool],
-    ensure_board_port: Callable[[BoardMutationPort | None], BoardMutationPort],
-    transition_issue_status: Callable[..., tuple[bool, str]],
-) -> BoardMutationPort | None:
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+) -> None:
     """Keep the freshest lane items and demote overflow back to Ready."""
     limit = wip_limit_for_lane(
         automation_config.wip_limits,
@@ -355,7 +317,7 @@ def _apply_rebalance_lane_overflow(
     overflow = ranked[limit:]
     decision.kept.extend(item.ref for item in keep)
     for item in overflow:
-        changed, _old = transition_issue_status(
+        changed, _old = _transition_issue_status(
             item.ref,
             {"In Progress"},
             "Ready",
@@ -365,27 +327,20 @@ def _apply_rebalance_lane_overflow(
             dry_run=dry_run,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
         if changed and not dry_run:
             marker = _marker_for("wip-rebalance", item.ref)
-            if not comment_exists(
-                item.owner,
-                item.repo,
+            if not review_state_port.comment_exists(
+                f"{item.owner}/{item.repo}",
                 item.number,
                 marker,
-                gh_runner=gh_runner,
             ):
-                board_port = ensure_board_port(board_port)
                 board_port.post_issue_comment(
                     f"{item.owner}/{item.repo}",
                     item.number,
                     f"{marker}\nMoved back to `Ready` by lane WIP rebalance (limit={limit}).",
                 )
         decision.moved_ready.append(item.ref)
-    return board_port
 
 
 def rebalance_wip(
@@ -395,29 +350,15 @@ def rebalance_wip(
     project_owner: str,
     project_number: int,
     in_progress_items: list[IssueSnapshot],
-    use_ports: bool,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    pr_port: PullRequestPort,
+    is_graph_member: Callable[[CriticalPathConfig, str], bool],
+    ready_promotion_evaluator: Callable[..., tuple[int, str]],
     this_repo_prefix: str | None = None,
     all_prefixes: bool = False,
     cycle_minutes: int = DEFAULT_REBALANCE_CYCLE_MINUTES,
     dry_run: bool = False,
-    board_info_resolver=None,
-    board_mutator=None,
-    status_resolver=None,
-    gh_runner=None,
-    is_graph_member: Callable[..., bool],
-    ready_promotion_evaluator: Callable[..., tuple[int, str]],
-    set_blocked_with_reason: Callable[..., None],
-    set_handoff_target: Callable[..., None],
-    query_project_item_field: Callable[..., str],
-    query_open_pr_updated_at: Callable[..., datetime | None],
-    query_latest_wip_activity_timestamp: Callable[..., datetime | None],
-    query_latest_marker_timestamp: Callable[..., datetime | None],
-    comment_exists: Callable[..., bool],
-    ensure_board_port: Callable[[BoardMutationPort | None], BoardMutationPort],
-    transition_issue_status: Callable[..., tuple[bool, str]],
-    snapshot_to_issue_ref: Callable[[str, dict[str, str]], str | None],
 ) -> RebalanceDecision:
     """Rebalance In Progress lanes with stale demotion and dependency blocking."""
     now = datetime.now(timezone.utc)
@@ -429,27 +370,8 @@ def rebalance_wip(
     lane_buckets: dict[tuple[str, str], list[_WipCandidate]] = {}
 
     for snapshot in in_progress_items:
-        if use_ports:
-            normalized_snapshot = snapshot
-        else:
-            normalized_ref = snapshot_to_issue_ref(
-                snapshot.issue_ref,
-                config.issue_prefixes,
-            )
-            if normalized_ref is None:
-                decision.skipped.append((snapshot.issue_ref, "invalid-ref"))
-                continue
-            normalized_snapshot = IssueSnapshot(
-                issue_ref=normalized_ref,
-                status=snapshot.status,
-                executor=snapshot.executor,
-                priority=snapshot.priority,
-                title=snapshot.title,
-                item_id=snapshot.item_id,
-                project_id=snapshot.project_id,
-            )
-        candidate, board_port = _evaluate_rebalance_snapshot(
-            normalized_snapshot,
+        candidate = _evaluate_rebalance_snapshot(
+            snapshot,
             config=config,
             project_owner=project_owner,
             project_number=project_number,
@@ -462,21 +384,9 @@ def rebalance_wip(
             decision=decision,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            status_resolver=status_resolver,
-            gh_runner=gh_runner,
+            pr_port=pr_port,
             is_graph_member=is_graph_member,
             ready_promotion_evaluator=ready_promotion_evaluator,
-            set_blocked_with_reason=set_blocked_with_reason,
-            set_handoff_target=set_handoff_target,
-            query_project_item_field=query_project_item_field,
-            query_open_pr_updated_at=query_open_pr_updated_at,
-            query_latest_wip_activity_timestamp=query_latest_wip_activity_timestamp,
-            query_latest_marker_timestamp=query_latest_marker_timestamp,
-            comment_exists=comment_exists,
-            ensure_board_port=ensure_board_port,
-            transition_issue_status=transition_issue_status,
         )
         if candidate is not None:
             lane_buckets.setdefault((candidate.executor, candidate.lane), []).append(
@@ -496,12 +406,6 @@ def rebalance_wip(
             decision=decision,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-            comment_exists=comment_exists,
-            ensure_board_port=ensure_board_port,
-            transition_issue_status=transition_issue_status,
         )
 
     return decision
@@ -519,58 +423,34 @@ def load_rebalance_in_progress_items(
     project_number: int,
     review_state_port: _ReviewStatePort | None,
     board_port: _BoardMutationPort | None,
-    board_info_resolver: Callable[..., object] | None,
-    board_mutator: Callable[..., None] | None,
+    pr_port: _PullRequestPort | None,
     gh_runner: Callable[..., str] | None,
     # Injected board-automation helpers
     default_review_state_port_fn: Callable[..., object] | None = None,
     default_board_mutation_port_fn: Callable[..., object] | None = None,
-    list_project_items_by_status_fn: Callable[..., list] | None = None,
-) -> tuple[bool, _ReviewStatePort | None, _BoardMutationPort | None, list[IssueSnapshot]]:
+    default_pr_port_fn: Callable[..., object] | None = None,
+) -> tuple[_ReviewStatePort, _BoardMutationPort, _PullRequestPort, list[IssueSnapshot]]:
     """Load the current In Progress set for WIP rebalance."""
-    use_ports = (
-        board_info_resolver is None and board_mutator is None
-    ) or review_state_port is not None or board_port is not None
-    if use_ports:
-        review_state_port = review_state_port or default_review_state_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        board_port = board_port or default_board_mutation_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-        in_progress = review_state_port.list_issues_by_status("In Progress")
-    else:
-        in_progress = list_project_items_by_status_fn(
-            "In Progress",
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-        )
-    return use_ports, review_state_port, board_port, in_progress
-
-
-def ensure_rebalance_board_port(
-    board_port: _BoardMutationPort | None,
-    *,
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    gh_runner: Callable[..., str] | None,
-    # Injected board-automation helper
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
-) -> _BoardMutationPort:
-    """Materialize a board mutation port when the rebalance flow needs one."""
-    return board_port or default_board_mutation_port_fn(
+    review_state_port = review_state_port or default_review_state_port_fn(
         project_owner,
         project_number,
         config,
         gh_runner=gh_runner,
+    )
+    board_port = board_port or default_board_mutation_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    pr_port = pr_port or default_pr_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    return review_state_port, board_port, pr_port, review_state_port.list_issues_by_status(
+        "In Progress"
     )
 
 
@@ -586,6 +466,7 @@ def wire_rebalance_wip(
     dry_run: bool = False,
     review_state_port: _ReviewStatePort | None = None,
     board_port: _BoardMutationPort | None = None,
+    pr_port: _PullRequestPort | None = None,
     board_info_resolver: Callable[..., object] | None = None,
     board_mutator: Callable[..., None] | None = None,
     status_resolver: Callable[..., str] | None = None,
@@ -593,34 +474,41 @@ def wire_rebalance_wip(
     # Injected board-automation helpers
     default_review_state_port_fn: Callable[..., object] | None = None,
     default_board_mutation_port_fn: Callable[..., object] | None = None,
-    list_project_items_by_status_fn: Callable[..., list] | None = None,
-    is_graph_member_fn: Callable[..., bool] | None = None,
+    default_pr_port_fn: Callable[..., object] | None = None,
+    is_graph_member_fn: Callable[[CriticalPathConfig, str], bool] | None = None,
     ready_promotion_evaluator_fn: Callable[..., tuple[int, str]] | None = None,
-    set_blocked_with_reason_fn: Callable[..., None] | None = None,
-    set_handoff_target_fn: Callable[..., None] | None = None,
-    query_project_item_field_fn: Callable[..., str] | None = None,
-    query_open_pr_updated_at_fn: Callable[..., datetime | None] | None = None,
-    query_latest_wip_activity_timestamp_fn: Callable[..., datetime | None] | None = None,
-    query_latest_marker_timestamp_fn: Callable[..., datetime | None] | None = None,
     comment_exists_fn: Callable[..., bool] | None = None,
-    transition_issue_status_fn: Callable[..., tuple[bool, str]] | None = None,
-    snapshot_to_issue_ref_fn: Callable[..., str | None] | None = None,
 ) -> RebalanceDecision:
     """Wire port materialization, then delegate to core rebalance."""
-    use_ports, review_state_port, board_port, in_progress = (
-        load_rebalance_in_progress_items(
-            config=config,
-            project_owner=project_owner,
-            project_number=project_number,
-            review_state_port=review_state_port,
-            board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
-            default_review_state_port_fn=default_review_state_port_fn,
-            default_board_mutation_port_fn=default_board_mutation_port_fn,
-            list_project_items_by_status_fn=list_project_items_by_status_fn,
-        )
+    review_state_port, board_port, pr_port, in_progress = load_rebalance_in_progress_items(
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        pr_port=pr_port,
+        gh_runner=gh_runner,
+        default_review_state_port_fn=default_review_state_port_fn,
+        default_board_mutation_port_fn=default_board_mutation_port_fn,
+        default_pr_port_fn=default_pr_port_fn,
+    )
+    review_state_port = _wrap_review_state_port(
+        review_state_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        status_resolver=status_resolver,
+        comment_exists_fn=comment_exists_fn,
+        gh_runner=gh_runner,
+    )
+    board_port = _wrap_board_port(
+        board_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
     )
     return rebalance_wip(
         config=config,
@@ -628,34 +516,13 @@ def wire_rebalance_wip(
         project_owner=project_owner,
         project_number=project_number,
         in_progress_items=in_progress,
-        use_ports=use_ports,
         review_state_port=review_state_port,
         board_port=board_port,
+        pr_port=pr_port,
+        is_graph_member=is_graph_member_fn or in_any_critical_path,
+        ready_promotion_evaluator=ready_promotion_evaluator_fn or evaluate_ready_promotion,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         cycle_minutes=cycle_minutes,
         dry_run=dry_run,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        status_resolver=status_resolver,
-        gh_runner=gh_runner,
-        is_graph_member=is_graph_member_fn,
-        ready_promotion_evaluator=ready_promotion_evaluator_fn,
-        set_blocked_with_reason=set_blocked_with_reason_fn,
-        set_handoff_target=set_handoff_target_fn,
-        query_project_item_field=query_project_item_field_fn,
-        query_open_pr_updated_at=query_open_pr_updated_at_fn,
-        query_latest_wip_activity_timestamp=query_latest_wip_activity_timestamp_fn,
-        query_latest_marker_timestamp=query_latest_marker_timestamp_fn,
-        comment_exists=comment_exists_fn,
-        ensure_board_port=lambda current_board_port: ensure_rebalance_board_port(
-            current_board_port,
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-            default_board_mutation_port_fn=default_board_mutation_port_fn,
-        ),
-        transition_issue_status=transition_issue_status_fn,
-        snapshot_to_issue_ref=snapshot_to_issue_ref_fn,
     )

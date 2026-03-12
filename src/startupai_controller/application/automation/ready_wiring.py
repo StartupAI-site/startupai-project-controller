@@ -89,17 +89,27 @@ def _wrap_review_state_port(
     project_owner: str,
     project_number: int,
     status_resolver: Callable[..., str] | None = None,
+    board_info_resolver: Callable[..., BoardInfo] | None = None,
     comment_exists_fn: Callable[..., bool] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ):
     """Overlay legacy status/comment seams onto a typed review-state port."""
     if review_state_port is None or (
-        status_resolver is None and comment_exists_fn is None
+        status_resolver is None
+        and board_info_resolver is None
+        and comment_exists_fn is None
     ):
         return review_state_port
 
     class _CompatReviewStatePort(_DelegatingPort):
         def get_issue_status(self, issue_ref: str):
+            if board_info_resolver is not None:
+                return board_info_resolver(
+                    issue_ref,
+                    config,
+                    project_owner,
+                    project_number,
+                ).status
             if status_resolver is not None:
                 return status_resolver(
                     issue_ref,
@@ -372,31 +382,17 @@ def auto_promote_successors(
 
 def build_admission_pipeline_deps(
     *,
-    query_open_pull_requests_fn: Callable,
-    list_issue_comment_bodies_fn: Callable,
-    memoized_query_issue_body_fn: Callable,
-    mark_issues_done_fn: Callable,
-    close_issue_fn: Callable,
-    set_blocked_with_reason_fn: Callable,
-    set_handoff_target_fn: Callable,
-    default_board_mutation_port_fn: Callable,
-    set_single_select_field_fn: Callable,
-    set_text_field_fn: Callable,
-    list_project_items_fn: Callable,
+    review_state_port,
+    pr_port,
+    board_port,
+    issue_context_port,
 ) -> AdmissionPipelineDeps:
     """Assemble the wiring deps for the admission pipeline."""
     return AdmissionPipelineDeps(
-        query_open_pull_requests=query_open_pull_requests_fn,
-        list_issue_comment_bodies=list_issue_comment_bodies_fn,
-        memoized_query_issue_body=memoized_query_issue_body_fn,
-        mark_issues_done=mark_issues_done_fn,
-        close_issue=close_issue_fn,
-        set_blocked_with_reason=set_blocked_with_reason_fn,
-        set_handoff_target=set_handoff_target_fn,
-        default_board_mutation_port=default_board_mutation_port_fn,
-        set_single_select_field=set_single_select_field_fn,
-        set_text_field=set_text_field_fn,
-        list_project_items=list_project_items_fn,
+        review_state_port=review_state_port,
+        pr_port=pr_port,
+        board_port=board_port,
+        issue_context_port=issue_context_port,
     )
 
 
@@ -418,12 +414,11 @@ def load_admission_source_items(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[ProjectItemSnapshot]:
     """Load backlog/ready items needed for one admission pass."""
+    del review_state_port, gh_runner
     return _app_load_admission_source_items(
         automation_config,
         deps=deps,
-        review_state_port=review_state_port,
         board_snapshot=board_snapshot,
-        gh_runner=gh_runner,
     )
 
 
@@ -486,6 +481,7 @@ def evaluate_admission_candidates(
     bool,
 ]:
     """Run the expensive admission checks needed to choose candidates."""
+    del pr_port, review_state_port, board_port, gh_runner
     return _app_evaluate_admission_candidates(
         provisional_candidates,
         deps=deps,
@@ -497,10 +493,6 @@ def evaluate_admission_candidates(
         dry_run=dry_run,
         memo=memo,
         skipped=skipped,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        gh_runner=gh_runner,
     )
 
 
@@ -511,24 +503,20 @@ def apply_admitted_backlog_candidates(
     executor: str,
     assignment_owner: str,
     board_port=None,
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
+    project_owner: str | None = None,
+    project_number: int | None = None,
+    config: CriticalPathConfig | None = None,
     dry_run: bool,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[list[str], bool, str | None]:
     """Apply backlog-to-ready mutations for the selected candidates."""
+    del board_port, project_owner, project_number, config, gh_runner
     return _app_apply_admitted_backlog_candidates(
         selected,
         deps=deps,
         executor=executor,
         assignment_owner=assignment_owner,
-        board_port=board_port,
-        project_owner=project_owner,
-        project_number=project_number,
-        config=config,
         dry_run=dry_run,
-        gh_runner=gh_runner,
     )
 
 
@@ -683,9 +671,6 @@ def schedule_ready_items(
     review_state_port=None,
     board_port=None,
     status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> SchedulingDecision:
     """Classify and optionally claim Ready issues.
 
@@ -706,9 +691,6 @@ def schedule_ready_items(
         missing_executor_block_cap=missing_executor_block_cap,
         dry_run=dry_run,
         status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
 
 
@@ -826,6 +808,7 @@ def wire_schedule_ready_items(
         config=config,
         project_owner=project_owner,
         project_number=project_number,
+        board_info_resolver=board_info_resolver,
         gh_runner=gh_runner,
     )
     board_port = _wrap_board_port(
@@ -843,10 +826,6 @@ def wire_schedule_ready_items(
         project_number,
         review_state_port=review_state_port,
         board_port=board_port,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
-        gh_runner=gh_runner,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         mode=mode,
@@ -854,6 +833,7 @@ def wire_schedule_ready_items(
         automation_config=automation_config,
         missing_executor_block_cap=missing_executor_block_cap,
         dry_run=dry_run,
+        status_resolver=status_resolver,
     )
 
 
@@ -914,6 +894,7 @@ def wire_claim_ready_issue(
         config=config,
         project_owner=project_owner,
         project_number=project_number,
+        board_info_resolver=board_info_resolver,
         comment_exists_fn=comment_checker,
         gh_runner=gh_runner,
     )
@@ -942,6 +923,4 @@ def wire_claim_ready_issue(
         automation_config=automation_config,
         dry_run=dry_run,
         status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
     )

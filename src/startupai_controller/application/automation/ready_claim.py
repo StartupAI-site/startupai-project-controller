@@ -89,40 +89,14 @@ def _set_blocked_with_reason(
     dry_run: bool = False,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Set Status=Blocked and Blocked Reason on a board item."""
-    if board_info_resolver is None and board_mutator is None:
-        current_status = review_state_port.get_issue_status(issue_ref)
-        if current_status in {None, "NOT_ON_BOARD"}:
-            raise GhQueryError(f"{issue_ref} is not on the project board.")
-        if dry_run:
-            return
-        if current_status != "Blocked":
-            board_port.set_issue_status(issue_ref, "Blocked")
-        board_port.set_issue_field(issue_ref, "Blocked Reason", reason)
-        return
-
-    resolve_info = board_info_resolver or (
-        lambda ref, cfg, _owner, _number: _query_issue_board_info(
-            ref,
-            cfg,
-            review_state_port,
-        )
-    )
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-
-    if info.status == "NOT_ON_BOARD":
+    current_status = review_state_port.get_issue_status(issue_ref)
+    if current_status in {None, "NOT_ON_BOARD"}:
         raise GhQueryError(f"{issue_ref} is not on the project board.")
-
     if dry_run:
         return
-
-    if board_mutator is not None:
-        board_mutator(info.project_id, info.item_id)
-    elif info.status != "Blocked":
+    if current_status != "Blocked":
         board_port.set_issue_status(issue_ref, "Blocked")
     board_port.set_issue_field(issue_ref, "Blocked Reason", reason)
 
@@ -138,37 +112,13 @@ def _transition_issue_status(
     dry_run: bool = False,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> tuple[bool, str]:
     """Transition issue status through ports, with legacy fallback for tests."""
-    del gh_runner
-    resolve_info = board_info_resolver or (
-        lambda ref, cfg, _owner, _number: _query_issue_board_info(
-            ref,
-            cfg,
-            review_state_port,
-        )
-    )
-
-    if board_info_resolver is None and board_mutator is None:
-        old_status = review_state_port.get_issue_status(issue_ref) or "NOT_ON_BOARD"
-        if old_status not in from_statuses:
-            return False, old_status
-        if not dry_run:
-            board_port.set_issue_status(issue_ref, to_status)
-        return True, old_status
-
-    info = resolve_info(issue_ref, config, project_owner, project_number)
-    current_status = info.status
+    current_status = review_state_port.get_issue_status(issue_ref) or "NOT_ON_BOARD"
     if current_status not in from_statuses:
         return False, current_status
     if not dry_run:
-        if board_mutator is not None:
-            board_mutator(info.project_id, info.item_id, to_status)
-        else:
-            board_port.set_issue_status(issue_ref, to_status)
+        board_port.set_issue_status(issue_ref, to_status)
     return True, current_status
 
 
@@ -251,9 +201,6 @@ def _record_missing_executor_ready_item(
     project_number: int,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
 ) -> None:
     """Block or skip one Ready item with a missing/invalid executor."""
     if len(decision.blocked_missing_executor) < missing_executor_block_cap:
@@ -268,9 +215,6 @@ def _record_missing_executor_ready_item(
                     dry_run=dry_run,
                     review_state_port=review_state_port,
                     board_port=board_port,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
                 )
             except GhQueryError:
                 pass
@@ -297,9 +241,6 @@ def _process_schedule_ready_snapshot(
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
     status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     wip_counts: dict[str, int],
     lane_wip_counts: dict[tuple[str, str], int],
 ) -> None:
@@ -331,9 +272,6 @@ def _process_schedule_ready_snapshot(
             project_number=project_number,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
         return
 
@@ -345,7 +283,8 @@ def _process_schedule_ready_snapshot(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=status_resolver,
+            status_resolver=status_resolver
+            or (lambda candidate_ref, *_args, **_kwargs: review_state_port.get_issue_status(candidate_ref)),
             require_in_graph=True,
         )
         if val_code != 0:
@@ -362,9 +301,6 @@ def _process_schedule_ready_snapshot(
                         dry_run=dry_run,
                         review_state_port=review_state_port,
                         board_port=board_port,
-                        board_info_resolver=board_info_resolver,
-                        board_mutator=board_mutator,
-                        gh_runner=gh_runner,
                     )
                 except GhQueryError:
                     pass
@@ -398,8 +334,6 @@ def _process_schedule_ready_snapshot(
             dry_run=dry_run,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
         )
         if not changed:
             return
@@ -428,9 +362,6 @@ def schedule_ready_items(
     missing_executor_block_cap: int = DEFAULT_MISSING_EXECUTOR_BLOCK_CAP,
     dry_run: bool = False,
     status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> SchedulingDecision:
     """Classify and optionally claim Ready issues."""
     if mode not in {"advisory", "claim"}:
@@ -468,9 +399,6 @@ def schedule_ready_items(
             review_state_port=review_state_port,
             board_port=board_port,
             status_resolver=status_resolver,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
             wip_counts=wip_counts,
             lane_wip_counts=lane_wip_counts,
         )
@@ -553,8 +481,6 @@ def _attempt_claim_ready_candidate(
     dry_run: bool,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
     norm_executor: str,
     lane_wip_counts: dict[tuple[str, str], int],
     wip_counts: dict[str, int],
@@ -574,7 +500,8 @@ def _attempt_claim_ready_candidate(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=status_resolver,
+            status_resolver=status_resolver
+            or (lambda candidate_ref, *_args, **_kwargs: review_state_port.get_issue_status(candidate_ref)),
             require_in_graph=True,
         )
         if val_code != 0:
@@ -608,8 +535,6 @@ def _attempt_claim_ready_candidate(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
     )
     if not changed:
         return ClaimReadyResult(reason=f"status-not-ready:{old_status}")
@@ -645,8 +570,6 @@ def claim_ready_issue(
     automation_config: BoardAutomationConfig | None = None,
     dry_run: bool = False,
     status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
 ) -> ClaimReadyResult:
     """Claim one Ready issue for a specific executor."""
     norm_executor = executor.strip().lower()
@@ -691,8 +614,6 @@ def claim_ready_issue(
             dry_run=dry_run,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
             norm_executor=norm_executor,
             lane_wip_counts=lane_wip_counts,
             wip_counts=wip_counts,
