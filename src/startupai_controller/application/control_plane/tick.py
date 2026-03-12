@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
 )
+from startupai_controller.ports.control_plane_state import ControlPlaneStatePort
 from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.service_control import ServiceControlPort
 
 
-@dataclass(frozen=True)
-class GitHubBundle:
+class GitHubBundle(Protocol):
     """Minimal GitHub bundle surface consumed by the control-plane tick."""
 
     pull_requests: PullRequestPort
@@ -38,11 +38,11 @@ class TickDeps:
         ...,
         tuple[ReviewQueueDrainSummary, CycleBoardSnapshot],
     ]
-    persist_admission_summary: Callable[..., None]
-    record_successful_github_mutation: Callable[..., None]
-    record_successful_board_sync: Callable[..., None]
-    clear_degraded: Callable[..., None]
-    mark_degraded: Callable[..., None]
+    persist_admission_summary: Callable[[ControlPlaneStatePort, dict[str, Any]], None]
+    record_successful_github_mutation: Callable[[ControlPlaneStatePort], None]
+    record_successful_board_sync: Callable[[ControlPlaneStatePort], None]
+    clear_degraded: Callable[[ControlPlaneStatePort], None]
+    mark_degraded: Callable[[ControlPlaneStatePort, str], None]
     control_plane_health_summary: Callable[..., dict[str, Any]]
     runtime_gh_reason_code: Callable[[Exception], str]
     service_control_port: ServiceControlPort
@@ -53,7 +53,7 @@ def run_tick(
     *,
     args: Any,
     config: Any,
-    db: Any,
+    db: ControlPlaneStatePort,
     finalize_payload: Callable[[dict[str, object]], dict[str, object]],
     deps: TickDeps,
 ) -> tuple[int, dict[str, object]]:
