@@ -3,12 +3,48 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+import subprocess
+from typing import Any, Callable, Protocol
+
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_types import (
+    ClaimedSessionContext,
+    PrCreationOutcome,
+    PreparedLaunchContext,
+    SessionExecutionOutcome,
+)
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
+from startupai_controller.ports.ready_flow import (
+    BoardInfoResolverFn,
+    CommentCheckerFn,
+    CommentPosterFn,
+    GitHubRunnerFn,
+)
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+CodexResultPayload = dict[str, Any]
+SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
+
+
+class LoggerLike(Protocol):
+    """Minimal logger surface used by the completion helpers."""
+
+    def error(self, msg: str, *args: object) -> None:
+        """Record one error log line."""
+        ...
+
+
+class RetryCountStatePort(ConsumerRuntimeStatePort, Protocol):
+    """Runtime state that can report retry counts for one issue."""
+
+    def count_retries(self, issue_ref: str) -> int:
+        """Return the persisted retry count for one issue."""
+        ...
 
 
 def session_status_from_codex_result(
     exit_code: int,
-    codex_result: dict[str, Any] | None,
+    codex_result: CodexResultPayload | None,
 ) -> tuple[str, str | None]:
     """Map Codex exit/result into session status and failure reason."""
     if exit_code == 0 and codex_result and codex_result.get("outcome") == "success":
@@ -22,19 +58,19 @@ def session_status_from_codex_result(
 
 def create_pr_for_execution_result(
     *,
-    config: Any,
-    launch_context: Any,
-    claimed_context: Any,
-    codex_result: dict[str, Any] | None,
+    config: ConsumerConfig,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    codex_result: CodexResultPayload | None,
     session_status: str,
     failure_reason: str | None,
-    subprocess_runner: Callable[..., Any] | None,
-    gh_runner: Callable[..., str] | None,
+    subprocess_runner: SubprocessRunnerFn | None,
+    gh_runner: GitHubRunnerFn | None,
     has_commits_on_branch: Callable[..., bool],
     create_or_update_pr: Callable[..., str],
-    pr_creation_outcome_factory: Callable[..., Any],
-    logger: Any,
-) -> Any:
+    pr_creation_outcome_factory: type[PrCreationOutcome],
+    logger: LoggerLike,
+) -> PrCreationOutcome:
     """Reuse or create a PR from claimed-session output."""
     pr_url = codex_result.get("pr_url") if codex_result else None
     has_commits = False
@@ -76,8 +112,8 @@ def create_pr_for_execution_result(
 
 def final_phase_for_claimed_session(
     *,
-    launch_context: Any,
-    execution_outcome: Any,
+    launch_context: PreparedLaunchContext,
+    execution_outcome: SessionExecutionOutcome,
 ) -> str:
     """Determine the final persisted phase for a claimed session."""
     review_requeued = (
@@ -112,10 +148,10 @@ def final_phase_for_claimed_session(
 
 def persist_claimed_session_completion(
     *,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     session_id: str,
     issue_ref: str,
-    execution_outcome: Any,
+    execution_outcome: SessionExecutionOutcome,
     final_phase: str,
     complete_session: Callable[..., None],
 ) -> None:
@@ -159,13 +195,13 @@ def post_claimed_session_result_comment(
     *,
     issue_ref: str,
     session_id: str,
-    codex_result: dict[str, Any] | None,
-    cp_config: Any,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    codex_result: CodexResultPayload | None,
+    cp_config: CriticalPathConfig,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
     post_result_comment: Callable[..., None],
-    logger: Any,
+    logger: LoggerLike,
 ) -> None:
     """Post the session result comment when Codex produced structured output."""
     if not codex_result:
@@ -186,19 +222,19 @@ def post_claimed_session_result_comment(
 
 def maybe_escalate_claimed_session_failure(
     *,
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: RetryCountStatePort,
     issue_ref: str,
     effective_max_retries: int,
     session_status: str,
-    codex_result: dict[str, Any] | None,
-    cp_config: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    codex_result: CodexResultPayload | None,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: BoardInfoResolverFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
     escalate_to_claude: Callable[..., None],
-    logger: Any,
+    logger: LoggerLike,
 ) -> None:
     """Escalate terminal failed/timeout sessions once retry ceiling is reached."""
     if session_status not in {"failed", "timeout"}:

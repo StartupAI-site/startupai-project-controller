@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import subprocess
 from typing import Any, Callable, cast
 
 import startupai_controller.consumer_automation_bridge as _automation_bridge
@@ -59,6 +60,7 @@ from startupai_controller.domain.launch_policy import reconcile_in_progress_deci
 from startupai_controller.domain.models import (
     ClaimReadyResult,
     CycleResult,
+    ResolutionEvaluation,
     ReviewQueueDrainSummary,
     ReviewQueueEntry,
 )
@@ -80,6 +82,7 @@ from startupai_controller.ports.ready_flow import (
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.runtime.wiring import (
+    ConsumerDB,
     GitHubRuntimeMemo as CycleGitHubMemo,
     build_github_port_bundle,
     build_session_store,
@@ -87,6 +90,7 @@ from startupai_controller.runtime.wiring import (
 )
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
+    CriticalPathConfig,
     GhQueryError,
     load_config,
     parse_issue_ref,
@@ -801,15 +805,15 @@ def claim_launch_context(
 
 def create_pr_for_execution_result(
     *,
-    config: Any,
-    launch_context: Any,
-    claimed_context: Any,
+    config: ConsumerConfig,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
     codex_result: dict[str, Any] | None,
     session_status: str,
     failure_reason: str | None,
-    subprocess_runner: Callable[..., Any] | None,
-    gh_runner: Callable[..., str] | None,
-) -> Any:
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> PrCreationOutcome:
     """Reuse or create a PR from claimed-session output."""
     return _execution_outcome_wiring.create_pr_for_execution_result(
         config=config,
@@ -836,6 +840,7 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    session_store: SessionStorePort | None = None,
     review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort | None = None,
     board_info_resolver: BoardInfoResolverFn | None = None,
@@ -843,7 +848,7 @@ def handoff_execution_to_review(
     gh_runner: GitHubRunnerFn | None = None,
 ) -> ReviewQueueDrainSummary:
     """Transition a claimed session into Review and perform immediate rescue."""
-    return _cycle_wiring.handoff_execution_to_review(
+    return _execution_outcome_wiring.handoff_execution_to_review(
         config=config,
         db=db,
         prepared=prepared,
@@ -851,12 +856,12 @@ def handoff_execution_to_review(
         session_id=session_id,
         pr_url=pr_url,
         session_status=session_status,
+        session_store=session_store or build_session_store(cast(ConsumerDB, db)),
         review_state_port=review_state_port,
         board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        session_store=build_session_store(cast(Any, db)),
         transition_claimed_session_to_review=transition_claimed_session_to_review,
         post_claimed_session_verdict_marker=post_claimed_session_verdict_marker,
         queue_claimed_session_for_review=queue_claimed_session_for_review,
@@ -871,7 +876,7 @@ def transition_claimed_session_to_review(
     issue_ref: str,
     session_id: str,
     config: ConsumerConfig,
-    critical_path_config: Any,
+    critical_path_config: CriticalPathConfig,
     review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort | None = None,
     board_info_resolver: BoardInfoResolverFn | None = None,
@@ -937,7 +942,7 @@ def queue_claimed_session_for_review(
 def run_immediate_review_handoff(
     *,
     config: ConsumerConfig,
-    critical_path_config: Any,
+    critical_path_config: CriticalPathConfig,
     automation_config: BoardAutomationConfig,
     store: SessionStorePort,
     queue_entry: ReviewQueueEntry,
@@ -973,42 +978,23 @@ def run_immediate_review_handoff(
 
 def handle_non_review_execution_outcome(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
     session_id: str,
     session_status: str,
     codex_result: dict[str, Any] | None,
     has_commits: bool,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_poster: Callable[..., None] | None,
-    subprocess_runner: Callable[..., Any] | None,
-    gh_runner: Callable[..., str] | None,
-    pr_port: Any | None = None,
-    board_port: Any | None = None,
-) -> tuple[str, Any | None, str | None]:
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    comment_poster: CommentPosterFn | None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    gh_runner: GitHubRunnerFn | GhRunnerPort | None,
+    pr_port: PullRequestPort | None = None,
+    board_port: BoardMutationPort | None = None,
+) -> tuple[str, ResolutionEvaluation | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
-    github_bundle = None
-    if pr_port is None or board_port is None:
-        github_bundle = build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=prepared.cp_config,
-            github_memo=prepared.github_memo,
-            gh_runner=gh_runner,
-        )
-    if pr_port is None:
-        assert github_bundle is not None
-        effective_pr_port = github_bundle.pull_requests
-    else:
-        effective_pr_port = pr_port
-    if board_port is None:
-        assert github_bundle is not None
-        effective_board_port = github_bundle.board_mutations
-    else:
-        effective_board_port = board_port
     return _execution_outcome_wiring.handle_non_review_execution_outcome(
         config=config,
         db=db,
@@ -1018,8 +1004,8 @@ def handle_non_review_execution_outcome(
         session_status=session_status,
         codex_result=codex_result,
         has_commits=has_commits,
-        pr_port=effective_pr_port,
-        board_port=effective_board_port,
+        pr_port=pr_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_poster=comment_poster,
@@ -1038,8 +1024,8 @@ def handle_non_review_execution_outcome(
 
 def final_phase_for_claimed_session(
     *,
-    launch_context: Any,
-    execution_outcome: Any,
+    launch_context: PreparedLaunchContext,
+    execution_outcome: SessionExecutionOutcome,
 ) -> str:
     """Determine the final persisted phase for a claimed session."""
     return _execution_outcome_wiring.final_phase_for_claimed_session(
@@ -1050,10 +1036,10 @@ def final_phase_for_claimed_session(
 
 def persist_claimed_session_completion(
     *,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     session_id: str,
     issue_ref: str,
-    execution_outcome: Any,
+    execution_outcome: SessionExecutionOutcome,
     final_phase: str,
 ) -> None:
     """Persist the final session record for a claimed execution outcome."""
@@ -1072,10 +1058,10 @@ def post_claimed_session_result_comment(
     issue_ref: str,
     session_id: str,
     codex_result: dict[str, Any] | None,
-    cp_config: Any,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    cp_config: CriticalPathConfig,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
 ) -> None:
     """Post the session result comment when Codex produced structured output."""
     _execution_outcome_wiring.post_claimed_session_result_comment(
@@ -1093,17 +1079,17 @@ def post_claimed_session_result_comment(
 
 def maybe_escalate_claimed_session_failure(
     *,
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     issue_ref: str,
     effective_max_retries: int,
     session_status: str,
     codex_result: dict[str, Any] | None,
-    cp_config: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: BoardInfoResolverFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
 ) -> None:
     """Escalate terminal failed/timeout sessions once retry ceiling is reached."""
     _execution_outcome_wiring.maybe_escalate_claimed_session_failure(
@@ -1125,23 +1111,25 @@ def maybe_escalate_claimed_session_failure(
 
 def execute_claimed_session(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any,
-    claimed_context: Any,
-    process_runner: Any | None = None,
-    subprocess_runner: Callable[..., Any] | None = None,
-    file_reader: Callable[..., Any] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: GhRunnerPort | Callable[..., str] | None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    pr_port: Any | None = None,
-) -> Any:
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    process_runner: (
+        ProcessRunnerPort | Callable[..., subprocess.CompletedProcess[str]] | None
+    ) = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    file_reader: Callable[[Path], str] | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    comment_checker: CommentCheckerFn | None = None,
+    comment_poster: CommentPosterFn | None = None,
+    gh_runner: GhRunnerPort | GitHubRunnerFn | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    pr_port: PullRequestPort | None = None,
+) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
     return _execution_outcome_wiring.execute_claimed_session(
         config=config,
@@ -1160,7 +1148,7 @@ def execute_claimed_session(
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
-        gh_runner=cast(Callable[..., str] | None, gh_runner),
+        gh_runner=gh_runner,
         assemble_codex_prompt=_codex_comment_wiring.assemble_codex_prompt,
         run_codex_session=_codex_comment_wiring.run_codex_session,
         parse_codex_result=_codex_comment_wiring.parse_codex_result,
@@ -1173,18 +1161,18 @@ def execute_claimed_session(
 
 def finalize_claimed_session(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any,
-    claimed_context: Any,
-    execution_outcome: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    review_state_port: Any | None = None,
-) -> Any:
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
+    execution_outcome: SessionExecutionOutcome,
+    board_info_resolver: BoardInfoResolverFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
+    gh_runner: GitHubRunnerFn | None,
+    review_state_port: ReviewStatePort | None = None,
+) -> CycleResult:
     """Persist final session state and return the cycle result."""
     return _execution_outcome_wiring.finalize_claimed_session(
         config=config,
