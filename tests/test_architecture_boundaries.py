@@ -100,6 +100,15 @@ def _function_parameter_names(path: Path, function_name: str) -> set[str]:
     raise AssertionError(f"Function {function_name} not found in {path}")
 
 
+def _function_length(path: Path, function_name: str) -> int:
+    tree = ast.parse(_source_text(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            assert node.end_lineno is not None
+            return node.end_lineno - node.lineno + 1
+    raise AssertionError(f"Function {function_name} not found in {path}")
+
+
 def test_orchestrators_use_canonical_runtime_boundaries() -> None:
     for path in ORCHESTRATOR_MODULES:
         imported = _runtime_imported_modules(path)
@@ -111,10 +120,17 @@ def test_orchestrators_use_canonical_runtime_boundaries() -> None:
         assert offending == [], (
             f"{path.name} imports concrete adapter/shim modules at runtime: {offending}"
         )
-        assert any(
-            module.startswith(PORTS_PREFIX) or module.startswith(RUNTIME_PREFIX)
+        owns_runtime_boundary = any(
+            module.startswith(PORTS_PREFIX)
+            or module.startswith(RUNTIME_PREFIX)
+            or module.startswith("startupai_controller.control_plane_")
+            or module.startswith("startupai_controller.application.control_plane.")
             for module in imported
-        ), f"{path.name} does not import canonical ports/runtime wiring"
+        )
+        assert owns_runtime_boundary, (
+            f"{path.name} does not import canonical ports/runtime or "
+            "control-plane composition wiring"
+        )
 
 
 def test_board_graph_has_no_adapter_or_shim_imports() -> None:
@@ -409,6 +425,65 @@ def test_automation_non_wiring_modules_have_no_default_port_or_wire_entrypoints(
             offending[path.name] = hits
     assert offending == {}, (
         "Non-wiring automation application modules regained outer composition seams: "
+        f"{offending}"
+    )
+
+
+def test_board_automation_does_not_construct_github_port_bundles_inline() -> None:
+    source = _source_text(SRC_ROOT / "board_automation.py")
+    assert "build_github_port_bundle(" not in source, (
+        "board_automation.py still constructs GitHub port bundles inline"
+    )
+    forbidden_defs = [
+        "def _ensure_github_bundle(",
+        "def _default_pr_port(",
+        "def _default_review_state_port(",
+        "def _default_board_mutation_port(",
+        "def _default_issue_context_port(",
+    ]
+    offending = [token for token in forbidden_defs if token in source]
+    assert offending == [], (
+        "board_automation.py still owns default port factory helpers: "
+        f"{offending}"
+    )
+
+
+def test_board_control_plane_tick_does_not_construct_tickdeps_inline() -> None:
+    source = _source_text(SRC_ROOT / "board_control_plane.py")
+    assert "TickDeps(" not in source, (
+        "board_control_plane._tick still constructs TickDeps inline"
+    )
+
+
+def test_ready_and_review_wiring_do_not_define_inline_compat_wrappers() -> None:
+    offending: dict[str, list[str]] = {}
+    for path in (
+        APPLICATION_ROOT / "automation" / "ready_wiring.py",
+        APPLICATION_ROOT / "automation" / "review_wiring.py",
+    ):
+        source = _source_text(path)
+        hits = [token for token in ("def _wrap_", "class _DelegatingPort") if token in source]
+        if hits:
+            offending[path.name] = hits
+    assert offending == {}, (
+        "major wiring modules still define inline compatibility wrappers: "
+        f"{offending}"
+    )
+
+
+def test_outer_wiring_hotspots_stay_under_refined_size_ceiling() -> None:
+    limits = {
+        (APPLICATION_ROOT / "automation" / "ready_wiring.py", "auto_promote_successors"): 70,
+        (APPLICATION_ROOT / "automation" / "review_wiring.py", "sync_review_state"): 60,
+        (SRC_ROOT / "board_control_plane.py", "_tick"): 20,
+    }
+    offending: dict[str, int] = {}
+    for (path, function_name), limit in limits.items():
+        length = _function_length(path, function_name)
+        if length > limit:
+            offending[f"{path.name}:{function_name}"] = length
+    assert offending == {}, (
+        "outer wiring hotspots regressed in size/complexity: "
         f"{offending}"
     )
 

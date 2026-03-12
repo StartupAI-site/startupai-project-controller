@@ -115,12 +115,16 @@ from startupai_controller.application.automation.ready_claim import (
     _transition_issue_status as _app_transition_issue_status,
 )
 from startupai_controller.runtime.wiring import (
-    build_github_port_bundle,
     GitHubPortBundle,
     GitHubRuntimeMemo as CycleGitHubMemo,
 )
 from startupai_controller.automation_port_helpers import (
     BoardInfo as BoardInfo,
+    _ensure_github_bundle as _ensure_github_bundle,
+    _default_pr_port as _default_pr_port,
+    _default_review_state_port as _default_review_state_port,
+    _default_board_mutation_port as _default_board_mutation_port,
+    _default_issue_context_port as _default_issue_context_port,
     _query_issue_board_info as _query_issue_board_info,
     _comment_exists as _comment_exists,
     list_issue_comment_bodies as list_issue_comment_bodies,
@@ -152,95 +156,6 @@ from startupai_controller.automation_port_helpers import (
     memoized_query_issue_body,
     rerun_actions_run,
 )
-
-# BoardInfo, I/O helpers, and small utilities now live in automation_port_helpers.py
-# and are re-exported via the import block above.
-#
-# Port factories remain here so that tests patching ``build_github_port_bundle``
-# on this module continue to intercept the port-creation call path.
-
-
-def _ensure_github_bundle(
-    github_bundle: GitHubPortBundle | None,
-    *,
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> GitHubPortBundle:
-    """Return the per-command/per-cycle GitHub bundle for runtime paths."""
-    return github_bundle or build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
-    )
-
-
-def _default_pr_port(
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> _PullRequestPort:
-    """Construct a default PullRequestPort adapter from context params."""
-    return build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).pull_requests
-
-
-def _default_review_state_port(
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    gh_runner: Callable[..., str] | None = None,
-) -> _ReviewStatePort:
-    """Construct a default ReviewStatePort adapter from context params."""
-    return build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).review_state
-
-
-def _default_board_mutation_port(
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    gh_runner: Callable[..., str] | None = None,
-) -> _BoardMutationPort:
-    """Construct a default BoardMutationPort adapter from context params."""
-    return build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).board_mutations
-
-
-def _default_issue_context_port(
-    project_owner: str,
-    project_number: int,
-    config: CriticalPathConfig,
-    *,
-    github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> _IssueContextPort:
-    """Construct a default IssueContextPort adapter from context params."""
-    return build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
-    ).issue_context
-
 
 # ---------------------------------------------------------------------------
 # Ready/review wiring (implementations in automation_ready_review_wiring.py)
@@ -275,7 +190,6 @@ from startupai_controller.automation_state_admission_wiring import (  # noqa: E4
     _legacy_board_status_mutator,
     mark_issues_done,
     _wip_limit_for_lane,
-    _has_copilot_review_signal,
     promote_to_ready,
     _controller_owned_admission,
     auto_promote_successors,

@@ -41,6 +41,9 @@ from startupai_controller.runtime.wiring import (
 
 from startupai_controller.automation_port_helpers import (
     BoardInfo,
+    _default_board_mutation_port,
+    _default_pr_port,
+    _default_review_state_port,
 )
 from startupai_controller.board_graph import (
     find_unmet_ready_dependencies,
@@ -121,8 +124,8 @@ def schedule_ready_items(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         legacy_board_status_mutator_fn=core._legacy_board_status_mutator,
     )
 
@@ -171,8 +174,8 @@ def claim_ready_issue(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         legacy_board_status_mutator_fn=core._legacy_board_status_mutator,
     )
 
@@ -207,8 +210,8 @@ def enforce_ready_dependency_guard(
         gh_runner=gh_runner,
         review_state_port=review_state_port,
         board_port=board_port,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         find_unmet_dependencies_fn=find_unmet_ready_dependencies,
     )
 
@@ -228,7 +231,7 @@ def resolve_issues_from_event(
     """Parse GITHUB_EVENT_PATH -> list of (issue_ref, event_kind, failed_checks)."""
     core = _core()
     if pr_port is None:
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             DEFAULT_PROJECT_OWNER,
             DEFAULT_PROJECT_NUMBER,
             config,
@@ -252,7 +255,7 @@ def resolve_pr_to_issues(
     """Resolve PR -> linked issue refs using closingIssuesReferences."""
     core = _core()
     if pr_port is None:
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             DEFAULT_PROJECT_OWNER,
             DEFAULT_PROJECT_NUMBER,
             config,
@@ -291,7 +294,7 @@ def _has_copilot_review_signal(
         project_owner=project_owner,
         project_number=project_number,
         gh_runner=gh_runner,
-        default_pr_port_fn=core._default_pr_port,
+        default_pr_port_fn=_default_pr_port,
     )
 
 
@@ -337,9 +340,9 @@ def sync_review_state(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        default_pr_port_fn=core._default_pr_port,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         legacy_board_status_mutator_fn=core._legacy_board_status_mutator,
     )
 
@@ -355,13 +358,13 @@ def _review_scope_refs(
 ) -> list[str]:
     """Return linked issue refs currently in Review for a PR."""
     core = _core()
-    pr_port = core._default_pr_port(
+    pr_port = _default_pr_port(
         project_owner,
         project_number,
         config,
         gh_runner=gh_runner,
     )
-    review_state_port = core._default_review_state_port(
+    review_state_port = _default_review_state_port(
         project_owner,
         project_number,
         config,
@@ -392,14 +395,14 @@ def codex_review_gate(
     """Evaluate strict codex review verdict contract for a PR."""
     core = _core()
     if pr_port is None:
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if review_state_port is None:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
@@ -443,13 +446,13 @@ def _build_review_snapshot(
     """Project PR review state into one explicit snapshot."""
     core = _core()
     if pr_port is None:
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-    review_state_port = core._default_review_state_port(
+    review_state_port = _default_review_state_port(
         project_owner,
         project_number,
         config,
@@ -494,9 +497,9 @@ def review_rescue(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        default_pr_port_fn=core._default_pr_port,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         automerge_review_fn=core.automerge_review,
     )
 
@@ -525,9 +528,9 @@ def review_rescue_all(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        default_pr_port_fn=core._default_pr_port,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         review_rescue_fn=core.review_rescue,
     )
 
@@ -564,7 +567,7 @@ def automerge_review(
         gh_runner=gh_runner,
         pr_port=pr_port,
         review_state_port=review_state_port,
-        default_pr_port_fn=core._default_pr_port,
-        default_review_state_port_fn=core._default_review_state_port,
+        default_pr_port_fn=_default_pr_port,
+        default_review_state_port_fn=_default_review_state_port,
         codex_review_gate_fn=core.codex_review_gate,
     )

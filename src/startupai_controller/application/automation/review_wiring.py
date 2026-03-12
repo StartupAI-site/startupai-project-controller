@@ -12,7 +12,6 @@ parameters instead of importing concrete factories directly.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Callable
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
@@ -35,6 +34,10 @@ from startupai_controller.application.automation.review_rescue import (
 )
 from startupai_controller.application.automation.review_sync import (
     sync_review_state as _app_sync_review_state,
+)
+from startupai_controller.automation_compat_ports import (
+    wrap_status_transition_board_port,
+    wrap_status_transition_review_state_port,
 )
 
 
@@ -118,73 +121,6 @@ def build_review_snapshot(
     )[(pr_repo, pr_number)]
 
 
-class _DelegatingPort:
-    """Delegate unknown attributes to an underlying port implementation."""
-
-    def __init__(self, base) -> None:
-        self._base = base
-
-    def __getattr__(self, name: str):
-        return getattr(self._base, name)
-
-
-def _wrap_status_transition_board_port(
-    board_port,
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    board_info_resolver: Callable[..., object] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-):
-    """Overlay legacy board-mutator behavior on a typed board port."""
-    if board_mutator is None or board_info_resolver is None:
-        return board_port
-
-    if board_port is None:
-        board_port = SimpleNamespace()
-
-    class _CompatBoardMutationPort(_DelegatingPort):
-        def set_issue_status(self, issue_ref: str, status: str) -> None:
-            info = board_info_resolver(
-                issue_ref,
-                config,
-                project_owner,
-                project_number,
-            )
-            board_mutator(info.project_id, info.item_id, status)
-
-    return _CompatBoardMutationPort(board_port)
-
-
-def _wrap_status_transition_review_state_port(
-    review_state_port,
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    board_info_resolver: Callable[..., object] | None = None,
-):
-    """Overlay legacy board-info status reads on a typed review-state port."""
-    if board_info_resolver is None:
-        return review_state_port
-
-    if review_state_port is None:
-        review_state_port = SimpleNamespace()
-
-    class _CompatReviewStatePort(_DelegatingPort):
-        def get_issue_status(self, issue_ref: str):
-            info = board_info_resolver(
-                issue_ref,
-                config,
-                project_owner,
-                project_number,
-            )
-            return info.status
-
-    return _CompatReviewStatePort(review_state_port)
-
-
 # ---------------------------------------------------------------------------
 # Subcommand wiring
 # ---------------------------------------------------------------------------
@@ -217,6 +153,59 @@ def sync_review_state(
     legacy_board_status_mutator_fn: Callable[..., Callable] | None = None,
 ) -> tuple[int, str]:
     """Assemble ports and delegate to the sync_review_state use case."""
+    pr_port, review_state_port, board_port = _resolve_sync_review_state_ports(
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        github_bundle=github_bundle,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+        default_pr_port_fn=default_pr_port_fn,
+        default_review_state_port_fn=default_review_state_port_fn,
+        default_board_mutation_port_fn=default_board_mutation_port_fn,
+        legacy_board_status_mutator_fn=legacy_board_status_mutator_fn,
+    )
+
+    return _app_sync_review_state(
+        event_kind=event_kind,
+        issue_ref=issue_ref,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        automation_config=automation_config,
+        pr_state=pr_state,
+        review_state=review_state,
+        checks_state=checks_state,
+        failed_checks=failed_checks,
+        dry_run=dry_run,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+    )
+
+
+def _resolve_sync_review_state_ports(
+    *,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    github_bundle,
+    pr_port,
+    review_state_port,
+    board_port,
+    board_info_resolver: Callable[..., object] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    default_pr_port_fn: Callable[..., object] | None,
+    default_review_state_port_fn: Callable[..., object] | None,
+    default_board_mutation_port_fn: Callable[..., object] | None,
+    legacy_board_status_mutator_fn: Callable[..., Callable] | None,
+):
+    """Acquire and adapt the ports needed by sync-review-state."""
     if github_bundle is not None:
         pr_port = pr_port or github_bundle.pull_requests
         review_state_port = review_state_port or github_bundle.review_state
@@ -241,7 +230,7 @@ def sync_review_state(
         board_mutator = legacy_board_status_mutator_fn(
             project_owner, project_number, config, gh_runner=gh_runner
         )
-    board_port = _wrap_status_transition_board_port(
+    board_port = wrap_status_transition_board_port(
         board_port,
         config=config,
         project_owner=project_owner,
@@ -249,30 +238,14 @@ def sync_review_state(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
     )
-    review_state_port = _wrap_status_transition_review_state_port(
+    review_state_port = wrap_status_transition_review_state_port(
         review_state_port,
         config=config,
         project_owner=project_owner,
         project_number=project_number,
         board_info_resolver=board_info_resolver,
     )
-
-    return _app_sync_review_state(
-        event_kind=event_kind,
-        issue_ref=issue_ref,
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        automation_config=automation_config,
-        pr_state=pr_state,
-        review_state=review_state,
-        checks_state=checks_state,
-        failed_checks=failed_checks,
-        dry_run=dry_run,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-    )
+    return pr_port, review_state_port, board_port
 
 
 def codex_review_gate(

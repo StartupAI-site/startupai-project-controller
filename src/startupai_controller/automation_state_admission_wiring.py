@@ -91,6 +91,13 @@ from startupai_controller.automation_board_state_helpers import (
     set_blocked_with_reason as _helpers_set_blocked_with_reason,
     mark_issues_done as _helpers_mark_issues_done,
 )
+from startupai_controller.automation_port_helpers import (
+    _default_board_mutation_port,
+    _default_issue_context_port,
+    _default_pr_port,
+    _default_review_state_port,
+    _ensure_github_bundle,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +205,8 @@ def _set_blocked_with_reason(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         legacy_board_status_mutator_fn=core._legacy_board_status_mutator,
         app_set_blocked_with_reason_fn=_app_set_blocked_with_reason,
     )
@@ -286,7 +293,7 @@ def _has_copilot_review_signal(
         project_owner=project_owner,
         project_number=project_number,
         gh_runner=gh_runner,
-        default_pr_port_fn=core._default_pr_port,
+        default_pr_port_fn=_default_pr_port,
     )
 
 
@@ -321,7 +328,7 @@ def promote_to_ready(
         controller_owned_resolver=controller_owned_resolver,
         gh_runner=gh_runner,
         query_issue_board_info_fn=core._query_issue_board_info,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
     )
 
 
@@ -384,7 +391,7 @@ def auto_promote_successors(
         comment_exists_fn=core._comment_exists,
         issue_ref_to_repo_parts_fn=core._issue_ref_to_repo_parts,
         new_handoff_job_id_fn=core._new_handoff_job_id,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
     )
 
 
@@ -412,13 +419,13 @@ def propagate_blocker(
 ) -> list[str]:
     """Propagate blocker info to successors. Returns list of commented refs."""
     core = _core()
-    review_state_port = review_state_port or core._default_review_state_port(
+    review_state_port = review_state_port or _default_review_state_port(
         project_owner,
         project_number,
         config,
         gh_runner=gh_runner,
     )
-    board_port = board_port or core._default_board_mutation_port(
+    board_port = board_port or _default_board_mutation_port(
         project_owner,
         project_number,
         config,
@@ -478,7 +485,7 @@ def reconcile_handoffs(
     """Reconcile handoff jobs. Returns {completed, retried, escalated, pending}."""
     core = _core()
     if review_state_port is None or board_port is None:
-        github_bundle = core._ensure_github_bundle(
+        github_bundle = _ensure_github_bundle(
             github_bundle,
             project_owner=project_owner,
             project_number=project_number,
@@ -590,14 +597,14 @@ def _set_handoff_target(
     """Set the board Handoff To field for an issue."""
     core = _core()
     if review_state_port is None:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
     if board_port is None:
-        board_port = core._default_board_mutation_port(
+        board_port = _default_board_mutation_port(
             project_owner,
             project_number,
             config,
@@ -809,25 +816,25 @@ def admit_backlog_items(
         board_port = github_bundle.board_mutations
         issue_context_port = github_bundle.issue_context
     else:
-        review_state_port = core._default_review_state_port(
+        review_state_port = _default_review_state_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-        pr_port = core._default_pr_port(
+        pr_port = _default_pr_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-        board_port = core._default_board_mutation_port(
+        board_port = _default_board_mutation_port(
             project_owner,
             project_number,
             config,
             gh_runner=gh_runner,
         )
-        issue_context_port = core._default_issue_context_port(
+        issue_context_port = _default_issue_context_port(
             project_owner,
             project_number,
             config,
@@ -906,7 +913,7 @@ def _post_claim_comment(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
+        default_review_state_port_fn=_default_review_state_port,
+        default_board_mutation_port_fn=_default_board_mutation_port,
         comment_exists_fn=core._comment_exists,
     )

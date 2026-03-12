@@ -15,12 +15,12 @@ import time
 from pathlib import Path
 
 
-from startupai_controller.application.control_plane.tick import TickDeps, run_tick
+from startupai_controller.application.control_plane.tick import run_tick
+from startupai_controller.control_plane_tick_runtime import build_tick_runtime
 from startupai_controller.board_automation_config import (
     DEFAULT_AUTOMATION_CONFIG_PATH,
     DEFAULT_PROJECT_NUMBER,
     DEFAULT_PROJECT_OWNER,
-    load_automation_config,
 )
 from startupai_controller.consumer_config import (
     ConsumerConfig,
@@ -31,36 +31,8 @@ from startupai_controller.consumer_config import (
     DEFAULT_SCHEMA_PATH,
     DEFAULT_WORKFLOW_STATE_PATH,
 )
-from startupai_controller.control_plane_runtime import (
-    _apply_automation_runtime,
-    _clear_degraded,
-    _control_plane_health_summary,
-    _current_main_workflows,
-    _mark_degraded,
-    _persist_admission_summary,
-    _record_successful_board_sync,
-    _record_successful_github_mutation,
-)
-from startupai_controller.control_plane_rescue import (
-    _drain_review_queue,
-    _replay_deferred_actions,
-)
 from startupai_controller.consumer_workflow import default_repo_roots
-from startupai_controller.runtime.wiring import (
-    begin_runtime_request_stats,
-    build_github_port_bundle,
-    build_ready_flow_port,
-    build_service_control_port,
-    end_runtime_request_stats,
-    open_consumer_db,
-    runtime_gh_reason_code,
-)
-from startupai_controller.validate_critical_path_promotion import (
-    ConfigError,
-    GhQueryError,
-    load_config,
-    parse_issue_ref,
-)
+from startupai_controller.validate_critical_path_promotion import ConfigError, parse_issue_ref
 
 
 def _consumer_config_from_args(args: argparse.Namespace) -> ConsumerConfig:
@@ -99,57 +71,17 @@ def _review_scope_refs(
 def _tick(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
     """Run one repo-tracked overnight control-plane tick."""
     config = _consumer_config_from_args(args)
-    db = open_consumer_db(config.db_path)
-    request_stats_token = begin_runtime_request_stats()
-    timings_ms: dict[str, int] = {}
-    request_counts_recorded = False
-
-    def _finalize_payload(
-        payload: dict[str, object],
-    ) -> dict[str, object]:
-        nonlocal request_counts_recorded
-        if not request_counts_recorded:
-            request_stats = end_runtime_request_stats(request_stats_token)
-            payload["github_request_counts"] = {
-                "graphql": request_stats.graphql,
-                "rest": request_stats.rest,
-            }
-            request_counts_recorded = True
-        return payload
-
+    runtime = build_tick_runtime(args=args, config=config)
     try:
         return run_tick(
             args=args,
             config=config,
-            db=db,
-            finalize_payload=_finalize_payload,
-            deps=TickDeps(
-                load_config=load_config,
-                load_automation_config=load_automation_config,
-                apply_automation_runtime=_apply_automation_runtime,
-                current_main_workflows=_current_main_workflows,
-                build_github_port_bundle=build_github_port_bundle,
-                ready_flow_port=build_ready_flow_port(),
-                replay_deferred_actions=_replay_deferred_actions,
-                drain_review_queue=_drain_review_queue,
-                persist_admission_summary=_persist_admission_summary,
-                record_successful_github_mutation=_record_successful_github_mutation,
-                record_successful_board_sync=_record_successful_board_sync,
-                clear_degraded=_clear_degraded,
-                mark_degraded=_mark_degraded,
-                control_plane_health_summary=_control_plane_health_summary,
-                runtime_gh_reason_code=runtime_gh_reason_code,
-                service_control_port=build_service_control_port(),
-                gh_query_error_type=GhQueryError,
-            ),
+            db=runtime.db,
+            finalize_payload=runtime.finalize_payload,
+            deps=runtime.deps,
         )
     finally:
-        if not request_counts_recorded:
-            try:
-                end_runtime_request_stats(request_stats_token)
-            except Exception:
-                pass
-        db.close()
+        runtime.cleanup()
 
 
 def build_parser() -> argparse.ArgumentParser:

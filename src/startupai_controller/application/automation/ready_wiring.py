@@ -62,120 +62,18 @@ from startupai_controller.application.automation.admission_helpers import (
     evaluate_admission_candidates as _app_evaluate_admission_candidates,
     apply_admitted_backlog_candidates as _app_apply_admitted_backlog_candidates,
 )
+from startupai_controller.automation_compat_ports import (
+    wrap_board_port,
+    wrap_review_state_port,
+)
 
 
 PROMOTABLE_STATUSES = frozenset({"Backlog", "Blocked"})
 
 
-class _DelegatingPort:
-    """Delegate unknown attributes to an underlying port implementation."""
-
-    def __init__(self, base) -> None:
-        self._base = base
-
-    def __getattr__(self, name: str):
-        return getattr(self._base, name)
-
-
 def _split_repo_slug(repo: str) -> tuple[str, str]:
     owner, repo_name = repo.split("/", 1)
     return owner, repo_name
-
-
-def _wrap_review_state_port(
-    review_state_port,
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    comment_exists_fn: Callable[..., bool] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-):
-    """Overlay legacy status/comment seams onto a typed review-state port."""
-    if review_state_port is None or (
-        status_resolver is None
-        and board_info_resolver is None
-        and comment_exists_fn is None
-    ):
-        return review_state_port
-
-    class _CompatReviewStatePort(_DelegatingPort):
-        def get_issue_status(self, issue_ref: str):
-            if board_info_resolver is not None:
-                return board_info_resolver(
-                    issue_ref,
-                    config,
-                    project_owner,
-                    project_number,
-                ).status
-            if status_resolver is not None:
-                return status_resolver(
-                    issue_ref,
-                    config,
-                    project_owner,
-                    project_number,
-                )
-            return self._base.get_issue_status(issue_ref)
-
-        def comment_exists(self, repo: str, issue_number: int, marker: str) -> bool:
-            if comment_exists_fn is not None:
-                owner, repo_name = _split_repo_slug(repo)
-                return comment_exists_fn(
-                    owner,
-                    repo_name,
-                    issue_number,
-                    marker,
-                    gh_runner=gh_runner,
-                )
-            return self._base.comment_exists(repo, issue_number, marker)
-
-    return _CompatReviewStatePort(review_state_port)
-
-
-def _wrap_board_port(
-    board_port,
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-):
-    """Overlay legacy board mutation/comment seams onto a typed board port."""
-    if board_port is None or (board_mutator is None and comment_poster is None):
-        return board_port
-
-    class _CompatBoardMutationPort(_DelegatingPort):
-        def set_issue_status(self, issue_ref: str, status: str) -> None:
-            if board_mutator is not None and board_info_resolver is not None:
-                info = board_info_resolver(
-                    issue_ref,
-                    config,
-                    project_owner,
-                    project_number,
-                )
-                board_mutator(info.project_id, info.item_id, status)
-                return
-            self._base.set_issue_status(issue_ref, status)
-
-        def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
-            if comment_poster is not None:
-                owner, repo_name = _split_repo_slug(repo)
-                comment_poster(
-                    owner,
-                    repo_name,
-                    issue_number,
-                    body,
-                    gh_runner=gh_runner,
-                )
-                return
-            self._base.post_issue_comment(repo, issue_number, body)
-
-    return _CompatBoardMutationPort(board_port)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +191,64 @@ def auto_promote_successors(
     default_board_mutation_port_fn: Callable[..., object] | None = None,
 ) -> PromotionResult:
     """Promote eligible successors of a Done issue."""
+    review_state_port, board_port = _resolve_auto_promote_ports(
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        comment_checker=comment_checker,
+        comment_exists_fn=comment_exists_fn,
+        comment_poster=comment_poster,
+        gh_runner=gh_runner,
+        default_board_mutation_port_fn=default_board_mutation_port_fn,
+    )
+    promote_to_ready = _build_promote_to_ready_delegate(
+        promote_to_ready_fn=promote_to_ready_fn,
+        controller_owned_resolver_fn=controller_owned_resolver_fn,
+        status_resolver=status_resolver,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+
+    return _app_auto_promote_successors(
+        issue_ref=issue_ref,
+        config=config,
+        this_repo_prefix=this_repo_prefix,
+        project_owner=project_owner,
+        project_number=project_number,
+        automation_config=automation_config,
+        dry_run=dry_run,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        promote_to_ready=promote_to_ready,
+        controller_owned_resolver=controller_owned_resolver_fn,
+        resolve_issue_parts=issue_ref_to_repo_parts_fn,
+        new_handoff_job_id=new_handoff_job_id_fn,
+    )
+
+
+def _resolve_auto_promote_ports(
+    *,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    review_state_port,
+    board_port,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_exists_fn: Callable[..., bool],
+    comment_poster: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+    default_board_mutation_port_fn: Callable[..., object] | None,
+):
+    """Acquire and adapt the ports needed by auto-promote."""
     comment_checker_fn = comment_checker or comment_exists_fn
     if review_state_port is None:
         if comment_checker_fn is not None:
@@ -305,7 +261,7 @@ def auto_promote_successors(
                 )
             )
     else:
-        review_state_port = _wrap_review_state_port(
+        review_state_port = wrap_review_state_port(
             review_state_port,
             config=config,
             project_owner=project_owner,
@@ -332,7 +288,7 @@ def auto_promote_successors(
                 )
             )
     if board_port is not None:
-        board_port = _wrap_board_port(
+        board_port = wrap_board_port(
             board_port,
             config=config,
             project_owner=project_owner,
@@ -340,6 +296,19 @@ def auto_promote_successors(
             comment_poster=comment_poster,
             gh_runner=gh_runner,
         )
+    return review_state_port, board_port
+
+
+def _build_promote_to_ready_delegate(
+    *,
+    promote_to_ready_fn: Callable[..., tuple[int, str]],
+    controller_owned_resolver_fn: Callable[[str], bool],
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable[..., BoardInfo] | None,
+    board_mutator: Callable[..., None] | None,
+    gh_runner: Callable[..., str] | None,
+):
+    """Bind legacy promotion compatibility into one delegate."""
 
     def _promote_to_ready(issue_ref: str, **kwargs):
         kwargs.pop("review_state_port", None)
@@ -357,22 +326,7 @@ def auto_promote_successors(
             issue_ref=issue_ref,
             **kwargs,
         )
-
-    return _app_auto_promote_successors(
-        issue_ref=issue_ref,
-        config=config,
-        this_repo_prefix=this_repo_prefix,
-        project_owner=project_owner,
-        project_number=project_number,
-        automation_config=automation_config,
-        dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        promote_to_ready=_promote_to_ready,
-        controller_owned_resolver=controller_owned_resolver_fn,
-        resolve_issue_parts=issue_ref_to_repo_parts_fn,
-        new_handoff_job_id=new_handoff_job_id_fn,
-    )
+    return _promote_to_ready
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +568,7 @@ def enforce_ready_dependency_guard(
     ready_items: list[IssueSnapshot] = []
     if review_state_port is not None:
         ready_items = review_state_port.list_issues_by_status("Ready")
-    review_state_port = _wrap_review_state_port(
+    review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
         project_owner=project_owner,
@@ -628,7 +582,7 @@ def enforce_ready_dependency_guard(
             config,
             gh_runner=gh_runner,
         )
-    board_port = _wrap_board_port(
+    board_port = wrap_board_port(
         board_port,
         config=config,
         project_owner=project_owner,
@@ -729,7 +683,7 @@ def post_claim_comment(
             config,
             gh_runner=gh_runner,
         )
-    review_state_port = _wrap_review_state_port(
+    review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
         project_owner=DEFAULT_PROJECT_OWNER,
@@ -737,7 +691,7 @@ def post_claim_comment(
         comment_exists_fn=comment_checker or comment_exists_fn,
         gh_runner=gh_runner,
     )
-    board_port = _wrap_board_port(
+    board_port = wrap_board_port(
         board_port,
         config=config,
         project_owner=DEFAULT_PROJECT_OWNER,
@@ -803,7 +757,7 @@ def wire_schedule_ready_items(
             config,
             gh_runner=gh_runner,
         )
-    review_state_port = _wrap_review_state_port(
+    review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
         project_owner=project_owner,
@@ -811,7 +765,7 @@ def wire_schedule_ready_items(
         board_info_resolver=board_info_resolver,
         gh_runner=gh_runner,
     )
-    dependency_review_state_port = _wrap_review_state_port(
+    dependency_review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
         project_owner=project_owner,
@@ -819,7 +773,7 @@ def wire_schedule_ready_items(
         status_resolver=status_resolver,
         gh_runner=gh_runner,
     )
-    board_port = _wrap_board_port(
+    board_port = wrap_board_port(
         board_port,
         config=config,
         project_owner=project_owner,
@@ -897,7 +851,7 @@ def wire_claim_ready_issue(
             config,
             gh_runner=gh_runner,
         )
-    review_state_port = _wrap_review_state_port(
+    review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
         project_owner=project_owner,
@@ -906,7 +860,7 @@ def wire_claim_ready_issue(
         comment_exists_fn=comment_checker,
         gh_runner=gh_runner,
     )
-    dependency_review_state_port = _wrap_review_state_port(
+    dependency_review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
         project_owner=project_owner,
@@ -914,7 +868,7 @@ def wire_claim_ready_issue(
         status_resolver=status_resolver,
         gh_runner=gh_runner,
     )
-    board_port = _wrap_board_port(
+    board_port = wrap_board_port(
         board_port,
         config=config,
         project_owner=project_owner,
