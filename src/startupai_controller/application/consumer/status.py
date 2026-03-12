@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from startupai_controller.domain.models import SessionInfo
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.status_store import MetricEventView, StatusStorePort
 
 
 @dataclass(frozen=True)
@@ -28,7 +30,7 @@ class CollectStatusPayloadDeps:
     control_keys: dict[str, str]
 
 
-def _local_review_summary(db: Any) -> dict[str, Any]:
+def _local_review_summary(db: StatusStorePort) -> dict[str, Any]:
     """Build review summary from local consumer state only."""
     review_refs = db.latest_review_issue_refs()
     return {
@@ -40,7 +42,7 @@ def _local_review_summary(db: Any) -> dict[str, Any]:
 
 def _github_review_summary(
     config: Any,
-    db: Any,
+    db: StatusStorePort,
     *,
     deps: CollectStatusPayloadDeps,
     review_state_port: ReviewStatePort,
@@ -68,7 +70,7 @@ def _github_review_summary(
 
 
 def _local_review_queue_summary(
-    db: Any,
+    db: StatusStorePort,
     *,
     now: datetime,
 ) -> dict[str, Any]:
@@ -83,7 +85,7 @@ def _local_review_queue_summary(
 
 
 def _metric_window_payload(
-    db: Any,
+    db: StatusStorePort,
     *,
     hours: int,
     now: datetime,
@@ -125,7 +127,7 @@ def _metric_window_payload(
 
 
 def _ready_pressure_hours(
-    events: list[Any],
+    events: list[MetricEventView],
     *,
     minimum_ready: int,
     since: datetime,
@@ -163,7 +165,7 @@ def _ready_pressure_hours(
 
 
 def _augment_slo_window_payload(
-    db: Any,
+    db: StatusStorePort,
     payload: dict[str, Any],
     *,
     hours: int,
@@ -296,7 +298,7 @@ def _worktree_reuse_status_payload(
 
 
 def _recent_session_status_payload(
-    session: Any,
+    session: SessionInfo,
     *,
     config: Any,
     workflows: dict[str, Any],
@@ -366,7 +368,7 @@ def _collect_status_runtime_state(
     auto_config: Any | None,
     local_only: bool,
     status_now: datetime,
-    db: Any,
+    db: StatusStorePort,
     review_state_port: ReviewStatePort | None,
     deps: CollectStatusPayloadDeps,
 ) -> dict[str, Any]:
@@ -429,8 +431,8 @@ def _build_status_payload(
     status_now: datetime,
     leases: int,
     slots: list[int],
-    workers: list[Any],
-    sessions: list[Any],
+    workers: list[SessionInfo],
+    sessions: list[SessionInfo],
     control_state: dict[str, str],
     deferred_action_count: int,
     oldest_deferred_action_age_seconds: float | None,
@@ -523,7 +525,7 @@ def collect_status_payload(
     config: Any,
     *,
     local_only: bool = False,
-    db: Any,
+    db: StatusStorePort,
     review_state_port: ReviewStatePort | None,
     deps: CollectStatusPayloadDeps,
 ) -> dict[str, Any]:
