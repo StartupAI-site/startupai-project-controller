@@ -29,9 +29,13 @@ from startupai_controller.application.consumer.reconciliation import (
     wire_reconcile_board_truth as _wire_reconcile_board_truth_use_case,
 )
 from startupai_controller.application.consumer.recovery import (
+    RecoveredLeaseInfo,
+    RecoveryStatePort,
     recover_interrupted_sessions as _recover_interrupted_sessions_use_case,
 )
+from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.board_automation_config import load_automation_config
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
@@ -53,6 +57,9 @@ from startupai_controller.domain.models import (
 from startupai_controller.domain.scheduling_policy import (
     snapshot_to_issue_ref as _snapshot_to_issue_ref,
 )
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.runtime.wiring import (
     GitHubRuntimeMemo as CycleGitHubMemo,
     build_github_port_bundle,
@@ -179,17 +186,15 @@ def reconcile_stale_in_progress_items(
 
 
 def recover_interrupted_sessions(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: RecoveryStatePort,
     *,
-    automation_config: Any | None = None,
-    pr_port: Any | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
+    automation_config: BoardAutomationConfig | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     gh_runner: Callable[..., str] | None = None,
-) -> list[Any]:
+) -> list[RecoveredLeaseInfo]:
     """Recover leases left behind by a previous interrupted daemon process."""
     return _recovery_helpers.recover_interrupted_sessions(
         config,
@@ -198,8 +203,6 @@ def recover_interrupted_sessions(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
         gh_runner=gh_runner,
         load_config=load_config,
         config_error_type=ConfigError,

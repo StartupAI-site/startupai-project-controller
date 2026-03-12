@@ -7,6 +7,12 @@ from datetime import datetime, timezone
 import time
 from typing import Any, Callable, Protocol, cast
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.application.consumer.recovery import (
+    RecoveredLeaseInfo,
+    RecoveryStatePort,
+)
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 
@@ -18,6 +24,14 @@ class DaemonRuntime:
     gh_runner: GhRunnerPort | None = None
     process_runner: ProcessRunnerPort | None = None
     file_reader: Callable[..., Any] | None = None
+
+
+class RecoverInterruptedStatePort(
+    ConsumerRuntimeStatePort,
+    RecoveryStatePort,
+    Protocol,
+):
+    """Runtime DB surface required for interrupted-session recovery."""
 
 
 class PrepareCycleFn(Protocol):
@@ -98,12 +112,12 @@ class RecoverInterruptedSessionsFn(Protocol):
 
     def __call__(
         self,
-        config: Any,
-        db: ConsumerRuntimeStatePort,
+        config: ConsumerConfig,
+        db: RecoverInterruptedStatePort,
         *,
-        automation_config: Any | None = None,
+        automation_config: BoardAutomationConfig | None = None,
         runtime: DaemonRuntime | None = None,
-    ) -> list[Any]: ...
+    ) -> list[RecoveredLeaseInfo]: ...
 
 
 class RunOneCycleFn(Protocol):
@@ -597,9 +611,10 @@ def run_daemon_loop(
         except deps.config_error_type:
             auto_config = None
         deps.apply_automation_runtime(config, auto_config)
+        recovery_db = cast(RecoverInterruptedStatePort, db)
         recovered = deps.recover_interrupted_sessions(
             config,
-            db,
+            recovery_db,
             automation_config=auto_config,
             runtime=runtime,
         )
