@@ -20,6 +20,105 @@ class DaemonRuntime:
     file_reader: Callable[..., Any] | None = None
 
 
+class PrepareCycleFn(Protocol):
+    """Prepare one consumer cycle against runtime state storage."""
+
+    def __call__(
+        self,
+        config: Any,
+        db: ConsumerRuntimeStatePort,
+        *,
+        dry_run: bool = False,
+        gh_runner: GhRunnerPort | None = None,
+    ) -> Any: ...
+
+
+class MarkDegradedFn(Protocol):
+    """Persist a degraded-state marker for the consumer runtime."""
+
+    def __call__(self, db: ConsumerRuntimeStatePort, reason: str) -> None: ...
+
+
+class PrepareLaunchCandidateFn(Protocol):
+    """Hydrate one candidate into launch context."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        *,
+        config: Any,
+        prepared: Any,
+        db: ConsumerRuntimeStatePort,
+        runtime: DaemonRuntime | None = None,
+    ) -> Any: ...
+
+
+class MaybeActivateClaimSuppressionFn(Protocol):
+    """Enable temporary claim suppression after a transient failure."""
+
+    def __call__(
+        self,
+        db: ConsumerRuntimeStatePort,
+        config: Any,
+        *,
+        scope: str,
+        error: Exception,
+        now: datetime | None = None,
+    ) -> bool: ...
+
+
+class SelectCandidateForCycleFn(Protocol):
+    """Select the next launch candidate for the current cycle."""
+
+    def __call__(
+        self,
+        config: Any,
+        db: ConsumerRuntimeStatePort,
+        prepared: Any,
+        *,
+        target_issue: str | None = None,
+        runtime: DaemonRuntime | None = None,
+        excluded_issue_refs: set[str] | None = None,
+    ) -> str | None: ...
+
+
+class ClaimSuppressionStateFn(Protocol):
+    """Read the current claim-suppression state from runtime storage."""
+
+    def __call__(
+        self,
+        db: ConsumerRuntimeStatePort,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, str] | None: ...
+
+
+class RecoverInterruptedSessionsFn(Protocol):
+    """Recover interrupted sessions using the current runtime state."""
+
+    def __call__(
+        self,
+        config: Any,
+        db: ConsumerRuntimeStatePort,
+        *,
+        automation_config: Any | None = None,
+        runtime: DaemonRuntime | None = None,
+    ) -> list[Any]: ...
+
+
+class RunOneCycleFn(Protocol):
+    """Run one single-worker consumer cycle."""
+
+    def __call__(
+        self,
+        config: Any,
+        db: ConsumerRuntimeStatePort,
+        *,
+        dry_run: bool = False,
+        runtime: DaemonRuntime | None = None,
+    ) -> Any: ...
+
+
 @dataclass(frozen=True)
 class PrepareMultiWorkerCycleDeps:
     """Injected seams for one multi-worker preflight attempt."""
@@ -27,8 +126,8 @@ class PrepareMultiWorkerCycleDeps:
     config_error_type: type[Exception]
     workflow_config_error_type: type[Exception]
     gh_query_error_type: type[Exception]
-    prepare_cycle: Callable[..., Any]
-    mark_degraded: Callable[[Any, str], None]
+    prepare_cycle: PrepareCycleFn
+    mark_degraded: MarkDegradedFn
     gh_reason_code: Callable[[Exception], str]
     logger: Any
 
@@ -41,9 +140,9 @@ class PrepareMultiWorkerLaunchContextDeps:
     workflow_config_error_type: type[Exception]
     worktree_prepare_error_type: type[Exception]
     record_metric: Callable[..., None]
-    prepare_launch_candidate: Callable[..., Any]
-    maybe_activate_claim_suppression: Callable[..., bool]
-    mark_degraded: Callable[[Any, str], None]
+    prepare_launch_candidate: PrepareLaunchCandidateFn
+    maybe_activate_claim_suppression: MaybeActivateClaimSuppressionFn
+    mark_degraded: MarkDegradedFn
     gh_reason_code: Callable[[Exception], str]
     block_prelaunch_issue: Callable[..., None]
 
@@ -60,10 +159,10 @@ class DispatchMultiWorkerLaunchesDeps:
     """Injected seams for launching multiple worker candidates."""
 
     gh_query_error_type: type[Exception]
-    select_candidate_for_cycle: Callable[..., str | None]
+    select_candidate_for_cycle: SelectCandidateForCycleFn
     prepare_multi_worker_launch_context: Callable[..., tuple[Any | None, bool]]
     submit_multi_worker_task: Callable[..., None]
-    mark_degraded: Callable[[Any, str], None]
+    mark_degraded: MarkDegradedFn
     gh_reason_code: Callable[[Exception], str]
     logger: Any
 
@@ -90,10 +189,10 @@ class RunDaemonLoopDeps:
     load_automation_config: Callable[[Any], Any]
     apply_automation_runtime: Callable[[Any, Any | None], None]
     current_main_workflows: Callable[..., tuple[Any, dict[str, Any], int]]
-    recover_interrupted_sessions: Callable[..., list[Any]]
+    recover_interrupted_sessions: RecoverInterruptedSessionsFn
     run_multi_worker_daemon_loop: Callable[..., None]
     drain_requested: Callable[[Any], bool]
-    run_one_cycle: Callable[..., Any]
+    run_one_cycle: RunOneCycleFn
     logger: Any
 
 
@@ -188,7 +287,7 @@ def sleep_for_claim_suppression_if_needed(
     config: Any,
     *,
     sleeper: Callable[[float], None],
-    claim_suppression_state: Callable[[Any], dict[str, Any] | None],
+    claim_suppression_state: ClaimSuppressionStateFn,
     parse_iso8601_timestamp: Callable[[str], datetime | None],
 ) -> bool:
     """Sleep until claim suppression clears, if active."""

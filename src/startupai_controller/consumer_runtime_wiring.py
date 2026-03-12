@@ -18,6 +18,7 @@ from startupai_controller.application.consumer.cycle import (
     run_prepared_cycle as _run_prepared_cycle_use_case,
 )
 from startupai_controller.application.consumer.daemon import (
+    ClaimSuppressionStateFn,
     DaemonRuntime,
     DispatchMultiWorkerLaunchesDeps,
     PrepareMultiWorkerCycleDeps,
@@ -137,7 +138,7 @@ class DaemonRuntimeWiringDeps:
     mark_degraded: Callable[..., None]
     gh_reason_code: Callable[..., str]
     logger: Any
-    claim_suppression_state: Callable[[Any], dict[str, Any] | None]
+    claim_suppression_state: ClaimSuppressionStateFn
     parse_iso8601_timestamp: Callable[[str], Any]
     record_metric: Callable[..., None]
     prepare_launch_candidate: Callable[..., Any]
