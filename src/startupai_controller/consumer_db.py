@@ -36,7 +36,6 @@ VALID_SESSION_KINDS = {"new_work", "repair"}
 
 @dataclass(frozen=True)
 class RecoveredLease:
-    """Lease/session state recovered after daemon interruption."""
 
     issue_ref: str
     session_id: str
@@ -50,7 +49,6 @@ class RecoveredLease:
 
 @dataclass(frozen=True)
 class DeferredAction:
-    """Queued control-plane action for replay after GitHub recovery."""
 
     id: int
     scope_key: str
@@ -60,13 +58,11 @@ class DeferredAction:
 
     @property
     def payload(self) -> dict[str, Any]:
-        """Return parsed payload JSON."""
         return json.loads(self.payload_json)
 
 
 @dataclass(frozen=True)
 class IssueContextCacheEntry:
-    """Persisted issue context used to avoid launch-time GitHub reads."""
 
     issue_ref: str
     owner: str
@@ -81,7 +77,6 @@ class IssueContextCacheEntry:
 
     @property
     def labels(self) -> list[str]:
-        """Return parsed issue labels."""
         try:
             payload = json.loads(self.labels_json)
         except json.JSONDecodeError:
@@ -93,7 +88,6 @@ class IssueContextCacheEntry:
 
 @dataclass(frozen=True)
 class MetricEvent:
-    """Read-only consumer metric/event row."""
 
     id: int
     event_type: str
@@ -103,7 +97,6 @@ class MetricEvent:
 
     @property
     def payload(self) -> dict[str, Any]:
-        """Return parsed event payload."""
         if not self.payload_json:
             return {}
         try:
@@ -338,19 +331,16 @@ class ConsumerDB:
             return False
 
     def release_lease(self, issue_ref: str) -> None:
-        """Release the lease for issue_ref."""
         conn = self._get_connection()
         conn.execute("DELETE FROM leases WHERE issue_ref = ?", (issue_ref,))
         conn.commit()
 
     def active_lease_count(self) -> int:
-        """Return the number of active leases."""
         conn = self._get_connection()
         row = conn.execute("SELECT COUNT(*) FROM leases").fetchone()
         return row[0]
 
     def active_lease_issue_refs(self) -> list[str]:
-        """Return active leased issue refs."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT issue_ref FROM leases ORDER BY acquired_at ASC"
@@ -358,7 +348,6 @@ class ConsumerDB:
         return [str(row["issue_ref"]) for row in rows]
 
     def active_slot_ids(self) -> set[int]:
-        """Return slot ids currently occupied by active leases."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT slot_id FROM leases WHERE slot_id IS NOT NULL"
@@ -366,7 +355,6 @@ class ConsumerDB:
         return {int(row["slot_id"]) for row in rows}
 
     def active_workers(self) -> list[SessionInfo]:
-        """Return active workers joined through the lease table."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT s.* FROM leases l "
@@ -376,7 +364,6 @@ class ConsumerDB:
         return [self._row_to_session(row) for row in rows]
 
     def update_heartbeat(self, issue_ref: str, now: datetime | None = None) -> None:
-        """Update the heartbeat timestamp for an active lease."""
         ts = (now or datetime.now(timezone.utc)).isoformat()
         conn = self._get_connection()
         conn.execute(
@@ -487,7 +474,6 @@ class ConsumerDB:
         session_kind: str = "new_work",
         repair_pr_url: str | None = None,
     ) -> str:
-        """Create a new session record. Returns session_id."""
         if session_kind not in VALID_SESSION_KINDS:
             raise ValueError(
                 f"Invalid session kind: {session_kind}. Must be one of {VALID_SESSION_KINDS}"
@@ -575,7 +561,6 @@ class ConsumerDB:
         conn.commit()
 
     def get_session(self, session_id: str) -> SessionInfo | None:
-        """Retrieve a session by ID. Returns None if not found."""
         conn = self._get_connection()
         row = conn.execute(
             "SELECT * FROM sessions WHERE id = ?", (session_id,)
@@ -606,7 +591,6 @@ class ConsumerDB:
         *,
         exclude_session_id: str | None = None,
     ) -> SessionInfo | None:
-        """Return the most recent session for an issue, if present."""
         return self._latest_session_for_issue(
             issue_ref,
             exclude_session_id=exclude_session_id,
@@ -618,7 +602,6 @@ class ConsumerDB:
         *,
         exclude_session_id: str | None = None,
     ) -> SessionInfo | None:
-        """Return the most recent session for an issue, optionally excluding one id."""
         conn = self._get_connection()
         if exclude_session_id is None:
             row = conn.execute(
@@ -636,7 +619,6 @@ class ConsumerDB:
         return self._row_to_session(row)
 
     def latest_session_for_worktree(self, worktree_path: str) -> SessionInfo | None:
-        """Return the most recent session that used a worktree path."""
         conn = self._get_connection()
         row = conn.execute(
             "SELECT * FROM sessions WHERE worktree_path = ? "
@@ -648,7 +630,6 @@ class ConsumerDB:
         return self._row_to_session(row)
 
     def recent_sessions(self, limit: int = 20) -> list[SessionInfo]:
-        """Return most recent sessions, ordered by rowid descending."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT * FROM sessions ORDER BY rowid DESC LIMIT ?", (limit,)
@@ -656,7 +637,6 @@ class ConsumerDB:
         return [self._row_to_session(r) for r in rows]
 
     def latest_review_issue_refs(self) -> list[str]:
-        """Return issue refs whose latest session is currently in review."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT s.issue_ref "
@@ -719,7 +699,6 @@ class ConsumerDB:
         return int(cursor.lastrowid)
 
     def list_deferred_actions(self) -> list[DeferredAction]:
-        """Return queued deferred actions in replay order."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT id, scope_key, action_type, payload_json, created_at "
@@ -737,13 +716,11 @@ class ConsumerDB:
         ]
 
     def delete_deferred_action(self, action_id: int) -> None:
-        """Delete a deferred action by id."""
         conn = self._get_connection()
         conn.execute("DELETE FROM deferred_actions WHERE id = ?", (action_id,))
         conn.commit()
 
     def deferred_action_count(self) -> int:
-        """Return the number of queued deferred actions."""
         conn = self._get_connection()
         row = conn.execute("SELECT COUNT(*) FROM deferred_actions").fetchone()
         return int(row[0])
@@ -753,7 +730,6 @@ class ConsumerDB:
         *,
         now: datetime | None = None,
     ) -> float | None:
-        """Return age of the oldest deferred action in seconds, if any."""
         conn = self._get_connection()
         row = conn.execute(
             "SELECT created_at FROM deferred_actions ORDER BY created_at ASC, id ASC LIMIT 1"
@@ -769,7 +745,6 @@ class ConsumerDB:
     # -- Control state operations -------------------------------------------
 
     def set_control_value(self, key: str, value: str | None) -> None:
-        """Persist a control-plane state value."""
         conn = self._get_connection()
         if value is None:
             conn.execute("DELETE FROM control_state WHERE key = ?", (key,))
@@ -782,7 +757,6 @@ class ConsumerDB:
         conn.commit()
 
     def get_control_value(self, key: str) -> str | None:
-        """Read a control-plane state value."""
         conn = self._get_connection()
         row = conn.execute(
             "SELECT value FROM control_state WHERE key = ?",
@@ -793,7 +767,6 @@ class ConsumerDB:
         return str(row["value"])
 
     def control_state_snapshot(self) -> dict[str, str]:
-        """Return all persisted control-plane state values."""
         conn = self._get_connection()
         rows = conn.execute("SELECT key, value FROM control_state").fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
@@ -801,7 +774,6 @@ class ConsumerDB:
     # -- Requeue cycle tracking --------------------------------------------
 
     def get_requeue_state(self, issue_ref: str) -> tuple[int, str | None]:
-        """Return (count, pr_url) for the current requeue cycle."""
         raw = self.get_control_value(f"requeue:{issue_ref}")
         if raw is None:
             return 0, None
@@ -812,7 +784,6 @@ class ConsumerDB:
             return 0, None
 
     def increment_requeue_count(self, issue_ref: str, pr_url: str) -> int:
-        """Increment and return the requeue count for the current PR cycle."""
         count, _ = self.get_requeue_state(issue_ref)
         new_count = count + 1
         self.set_control_value(
@@ -822,7 +793,6 @@ class ConsumerDB:
         return new_count
 
     def reset_requeue_count(self, issue_ref: str) -> None:
-        """Reset the requeue counter (e.g. when the PR URL changes)."""
         self.set_control_value(
             f"requeue:{issue_ref}",
             json.dumps({"count": 0, "pr_url": None}),
@@ -831,7 +801,6 @@ class ConsumerDB:
     # -- Issue context cache ------------------------------------------------
 
     def get_issue_context(self, issue_ref: str) -> IssueContextCacheEntry | None:
-        """Return cached issue context for an issue ref, if present."""
         conn = self._get_connection()
         row = conn.execute(
             "SELECT * FROM issue_context_cache WHERE issue_ref = ?",
@@ -866,7 +835,6 @@ class ConsumerDB:
         fetched_at: str,
         expires_at: str,
     ) -> None:
-        """Persist or replace cached issue context."""
         conn = self._get_connection()
         conn.execute(
             "INSERT INTO issue_context_cache ("
@@ -899,7 +867,6 @@ class ConsumerDB:
         conn.commit()
 
     def delete_issue_context(self, issue_ref: str) -> None:
-        """Delete cached issue context for one issue."""
         conn = self._get_connection()
         conn.execute(
             "DELETE FROM issue_context_cache WHERE issue_ref = ?",
@@ -920,7 +887,6 @@ class ConsumerDB:
         next_attempt_at: str | None = None,
         now: datetime | None = None,
     ) -> None:
-        """Insert or refresh a persisted review-clearance queue entry."""
         current = now or datetime.now(timezone.utc)
         ts = current.isoformat()
         next_attempt = next_attempt_at or ts
@@ -987,7 +953,6 @@ class ConsumerDB:
         conn.commit()
 
     def get_review_queue_item(self, issue_ref: str) -> ReviewQueueEntry | None:
-        """Return one review-queue entry, if present."""
         conn = self._get_connection()
         row = conn.execute(
             "SELECT * FROM review_queue WHERE issue_ref = ?",
@@ -998,7 +963,6 @@ class ConsumerDB:
         return self._row_to_review_queue_entry(row)
 
     def list_review_queue_items(self) -> list[ReviewQueueEntry]:
-        """Return review-queue entries ordered by due time."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT * FROM review_queue "
@@ -1012,7 +976,6 @@ class ConsumerDB:
         now: datetime | None = None,
         limit: int | None = None,
     ) -> list[ReviewQueueEntry]:
-        """Return review-queue entries whose next attempt is due."""
         current = (now or datetime.now(timezone.utc)).isoformat()
         conn = self._get_connection()
         sql = (
@@ -1028,7 +991,6 @@ class ConsumerDB:
         return [self._row_to_review_queue_entry(row) for row in rows]
 
     def review_queue_count(self) -> int:
-        """Return the number of queued review items."""
         conn = self._get_connection()
         row = conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()
         return int(row[0])
@@ -1038,7 +1000,6 @@ class ConsumerDB:
         *,
         now: datetime | None = None,
     ) -> int:
-        """Return the number of due review items."""
         current = (now or datetime.now(timezone.utc)).isoformat()
         conn = self._get_connection()
         row = conn.execute(
@@ -1059,7 +1020,6 @@ class ConsumerDB:
         blocked_class: str | None = None,
         now: datetime | None = None,
     ) -> None:
-        """Persist the latest review-queue processing result."""
         current = (now or datetime.now(timezone.utc)).isoformat()
         conn = self._get_connection()
         parts = [
@@ -1100,7 +1060,6 @@ class ConsumerDB:
         next_attempt_at: str,
         now: datetime | None = None,
     ) -> None:
-        """Update the next-attempt timestamp without recording a processing attempt."""
         current = (now or datetime.now(timezone.utc)).isoformat()
         conn = self._get_connection()
         conn.execute(
@@ -1116,7 +1075,6 @@ class ConsumerDB:
         conn.commit()
 
     def delete_review_queue_item(self, issue_ref: str) -> None:
-        """Delete one review-queue entry."""
         conn = self._get_connection()
         conn.execute(
             "DELETE FROM review_queue WHERE issue_ref = ?",
@@ -1134,7 +1092,6 @@ class ConsumerDB:
         payload: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> int:
-        """Persist one consumer metric/event row."""
         ts = (now or datetime.now(timezone.utc)).isoformat()
         payload_json = None
         if payload is not None:
@@ -1154,7 +1111,6 @@ class ConsumerDB:
         *,
         event_types: tuple[str, ...] | None = None,
     ) -> dict[str, int]:
-        """Return grouped metric event counts since a timestamp."""
         conn = self._get_connection()
         params: list[Any] = [since.isoformat()]
         sql = (
@@ -1176,7 +1132,6 @@ class ConsumerDB:
         *,
         event_types: tuple[str, ...] | None = None,
     ) -> list[MetricEvent]:
-        """Return metric events since a timestamp ordered oldest-first."""
         conn = self._get_connection()
         params: list[Any] = [since.isoformat()]
         sql = (
@@ -1208,7 +1163,6 @@ class ConsumerDB:
         ]
 
     def recent_metric_events(self, limit: int = 50) -> list[MetricEvent]:
-        """Return most recent metric events for diagnostics."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT id, event_type, issue_ref, payload_json, created_at "
@@ -1238,7 +1192,6 @@ class ConsumerDB:
         *,
         now: datetime | None = None,
     ) -> float:
-        """Return cumulative slot occupancy since a timestamp."""
         current = now or datetime.now(timezone.utc)
         conn = self._get_connection()
         rows = conn.execute(

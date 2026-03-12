@@ -1,11 +1,3 @@
-"""Direct GitHub HTTP transport for board hot-path operations.
-
-This module replaces flaky `gh` subprocess reads with direct HTTPS calls to
-`api.github.com` while preserving the small command surface the board consumer
-already uses. Unsupported commands deliberately fall back to subprocess `gh`
-at the caller.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -60,7 +52,6 @@ SUPPORTED_OUTPUT_FILTERS = frozenset(
 
 
 class GitHubTransportError(RuntimeError):
-    """Structured GitHub transport failure."""
 
     def __init__(
         self,
@@ -110,26 +101,22 @@ class _PullRequestCommand:
 
 @dataclass
 class GitHubRequestStats:
-    """Cycle-local request counters for hot-path diagnostics."""
 
     graphql: int = 0
     rest: int = 0
 
 
 def begin_request_stats() -> Token:
-    """Start tracking GitHub request counts for the current context."""
     return _REQUEST_STATS.set(GitHubRequestStats())
 
 
 def end_request_stats(token: Token) -> GitHubRequestStats:
-    """Stop tracking and return the captured request counts."""
     stats = _REQUEST_STATS.get() or GitHubRequestStats()
     _REQUEST_STATS.reset(token)
     return stats
 
 
 def _record_request(url: str) -> None:
-    """Increment the current request counter for one HTTP request."""
     stats = _REQUEST_STATS.get()
     if stats is None:
         return
@@ -140,7 +127,6 @@ def _record_request(url: str) -> None:
 
 
 def classify_failure_kind(detail: str, *, status_code: int | None = None) -> str:
-    """Normalize GitHub API failure text into a stable reason code."""
     text = detail.strip().lower()
     if status_code == 429 or any(
         marker in text for marker in _RATE_LIMIT_ERROR_MARKERS
@@ -315,7 +301,6 @@ def _transport_error(
 
 
 def _rate_limit_reset_at(headers: Mapping[str, str] | None) -> int | None:
-    """Return GitHub rate-limit reset epoch seconds when present."""
     if not headers:
         return None
     raw = headers.get("x-ratelimit-reset") or headers.get("X-RateLimit-Reset")
