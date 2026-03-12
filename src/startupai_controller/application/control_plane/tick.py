@@ -6,7 +6,21 @@ from dataclasses import dataclass
 import time
 from typing import Any, Callable
 
+from startupai_controller.domain.models import (
+    CycleBoardSnapshot,
+    ReviewQueueDrainSummary,
+)
+from startupai_controller.ports.ready_flow import ReadyFlowPort
+from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.service_control import ServiceControlPort
+
+
+@dataclass(frozen=True)
+class GitHubBundle:
+    """Minimal GitHub bundle surface consumed by the control-plane tick."""
+
+    pull_requests: PullRequestPort
+    github_memo: Any
 
 
 @dataclass(frozen=True)
@@ -17,10 +31,13 @@ class TickDeps:
     load_automation_config: Callable[..., Any]
     apply_automation_runtime: Callable[..., None]
     current_main_workflows: Callable[..., tuple[Any, dict[str, Any], int]]
-    build_github_port_bundle: Callable[..., Any]
-    ready_flow_port: Any
+    build_github_port_bundle: Callable[..., GitHubBundle]
+    ready_flow_port: ReadyFlowPort
     replay_deferred_actions: Callable[..., tuple[int, ...]]
-    drain_review_queue: Callable[..., tuple[Any, Any]]
+    drain_review_queue: Callable[
+        ...,
+        tuple[ReviewQueueDrainSummary, CycleBoardSnapshot],
+    ]
     persist_admission_summary: Callable[..., None]
     record_successful_github_mutation: Callable[..., None]
     record_successful_board_sync: Callable[..., None]

@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
+
+from startupai_controller.domain.models import (
+    AdmissionDecision,
+    ClaimReadyResult,
+    CycleBoardSnapshot,
+    ExecutorRoutingDecision,
+)
 
 
 class ReadyFlowPort(Protocol):
@@ -10,44 +17,49 @@ class ReadyFlowPort(Protocol):
 
     def route_protected_queue_executors(
         self,
-        config,
-        automation_config,
+        config: Any,
+        automation_config: Any,
         project_owner: str,
         project_number: int,
         *,
-        statuses=(),
+        statuses: tuple[str, ...] = (),
         dry_run: bool = False,
-        board_snapshot=None,
-        gh_runner=None,
-    ):
+        board_snapshot: CycleBoardSnapshot | None = None,
+        gh_runner: Any = None,
+    ) -> ExecutorRoutingDecision:
         """Normalize protected queue executor ownership."""
         ...
 
     def admit_backlog_items(
         self,
-        config,
-        automation_config,
+        config: Any,
+        automation_config: Any,
         project_owner: str,
         project_number: int,
         *,
-        dispatchable_repo_prefixes=None,
+        dispatchable_repo_prefixes: tuple[str, ...] | None = None,
         active_lease_issue_refs=(),
         dry_run: bool = False,
-        board_snapshot=None,
-        github_bundle=None,
-        github_memo=None,
-        gh_runner=None,
-    ):
+        board_snapshot: CycleBoardSnapshot | None = None,
+        github_bundle: Any = None,
+        github_memo: Any = None,
+        gh_runner: Any = None,
+    ) -> AdmissionDecision:
         """Admit governed Backlog items into Ready."""
         ...
 
-    def admission_summary_payload(self, decision, *, enabled: bool):
+    def admission_summary_payload(
+        self,
+        decision: AdmissionDecision,
+        *,
+        enabled: bool,
+    ) -> dict[str, object]:
         """Convert admission results into a JSON-friendly payload."""
         ...
 
     def claim_ready_issue(
         self,
-        config,
+        config: Any,
         project_owner: str,
         project_number: int,
         *,
@@ -57,16 +69,16 @@ class ReadyFlowPort(Protocol):
         this_repo_prefix: str | None = None,
         all_prefixes: bool = False,
         per_executor_wip_limit: int = 3,
-        automation_config=None,
+        automation_config: Any = None,
         dry_run: bool = False,
-        review_state_port=None,
-        board_port=None,
-        status_resolver=None,
-        board_info_resolver=None,
-        board_mutator=None,
-        comment_checker=None,
-        comment_poster=None,
-        gh_runner=None,
-    ):
+        review_state_port: Any = None,
+        board_port: Any = None,
+        status_resolver: Any = None,
+        board_info_resolver: Any = None,
+        board_mutator: Any = None,
+        comment_checker: Any = None,
+        comment_poster: Any = None,
+        gh_runner: Any = None,
+    ) -> ClaimReadyResult:
         """Claim one Ready issue for a specific executor."""
         ...
