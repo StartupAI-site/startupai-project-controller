@@ -15,6 +15,7 @@ import startupai_controller.consumer_execution_support_helpers as _execution_sup
 import startupai_controller.consumer_execution_outcome_wiring as _execution_outcome_wiring
 import startupai_controller.consumer_recovery_helpers as _recovery_helpers
 import startupai_controller.consumer_resolution_helpers as _resolution_helpers
+import startupai_controller.consumer_review_handoff_helpers as _review_handoff_helpers
 import startupai_controller.consumer_review_queue_helpers as _review_queue_helpers
 import startupai_controller.consumer_session_completion_helpers as _session_completion_helpers
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
@@ -59,6 +60,7 @@ from startupai_controller.domain.models import (
     ClaimReadyResult,
     CycleResult,
     ReviewQueueDrainSummary,
+    ReviewQueueEntry,
 )
 from startupai_controller.domain.scheduling_policy import (
     snapshot_to_issue_ref as _snapshot_to_issue_ref,
@@ -76,6 +78,7 @@ from startupai_controller.ports.ready_flow import (
     StatusResolverFn,
 )
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.runtime.wiring import (
     GitHubRuntimeMemo as CycleGitHubMemo,
     build_github_port_bundle,
@@ -826,19 +829,19 @@ def create_pr_for_execution_result(
 
 def handoff_execution_to_review(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
     session_id: str,
     pr_url: str,
     session_status: str,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> Any:
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
+) -> ReviewQueueDrainSummary:
     """Transition a claimed session into Review and perform immediate rescue."""
     return _cycle_wiring.handoff_execution_to_review(
         config=config,
@@ -853,7 +856,7 @@ def handoff_execution_to_review(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
-        session_store=build_session_store(db),
+        session_store=build_session_store(cast(Any, db)),
         transition_claimed_session_to_review=transition_claimed_session_to_review,
         post_claimed_session_verdict_marker=post_claimed_session_verdict_marker,
         queue_claimed_session_for_review=queue_claimed_session_for_review,
@@ -864,20 +867,20 @@ def handoff_execution_to_review(
 
 def transition_claimed_session_to_review(
     *,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     issue_ref: str,
     session_id: str,
-    config: Any,
+    config: ConsumerConfig,
     critical_path_config: Any,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
 ) -> None:
     """Move one claimed issue into Review or queue the transition on failure."""
     _execution_outcome_wiring.transition_claimed_session_to_review(
-        db=db,
+        db=cast(_review_handoff_helpers.ReviewHandoffStatePort, db),
         issue_ref=issue_ref,
         session_id=session_id,
         config=config,
@@ -895,10 +898,10 @@ def transition_claimed_session_to_review(
 
 def post_claimed_session_verdict_marker(
     *,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     pr_url: str,
     session_id: str,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: GitHubRunnerFn | None,
 ) -> None:
     """Post the codex verdict marker for a newly handed-off review PR."""
     _execution_outcome_wiring.post_claimed_session_verdict_marker(
@@ -916,11 +919,11 @@ def post_claimed_session_verdict_marker(
 
 def queue_claimed_session_for_review(
     *,
-    store: Any,
+    store: SessionStorePort,
     issue_ref: str,
     pr_url: str,
     session_id: str,
-) -> Any | None:
+) -> ReviewQueueEntry | None:
     """Queue one claimed session for immediate review handling."""
     return _execution_outcome_wiring.queue_claimed_session_for_review(
         store=store,
@@ -933,14 +936,14 @@ def queue_claimed_session_for_review(
 
 def run_immediate_review_handoff(
     *,
-    config: Any,
+    config: ConsumerConfig,
     critical_path_config: Any,
-    automation_config: Any,
-    store: Any,
-    queue_entry: Any,
-    gh_runner: Callable[..., str] | None,
-    db: Any,
-) -> Any:
+    automation_config: BoardAutomationConfig,
+    store: SessionStorePort,
+    queue_entry: ReviewQueueEntry,
+    gh_runner: GitHubRunnerFn | None,
+    db: ConsumerRuntimeStatePort,
+) -> ReviewQueueDrainSummary:
     """Run immediate rescue for the just-opened review PR."""
     return _execution_outcome_wiring.run_immediate_review_handoff(
         config=config,
@@ -950,12 +953,15 @@ def run_immediate_review_handoff(
         queue_entry=queue_entry,
         gh_runner=gh_runner,
         db=db,
-        build_github_port_bundle=build_github_port_bundle,
+        build_github_port_bundle=cast(
+            _review_handoff_helpers.BuildGitHubPortBundleFn,
+            build_github_port_bundle,
+        ),
         github_memo_factory=CycleGitHubMemo,
         build_review_snapshots_for_queue_entries=_review_queue_helpers.build_review_snapshots_for_queue_entries,
         review_rescue=_automation_bridge.review_rescue,
         apply_review_queue_result=cast(
-            Callable[..., None],
+            _review_handoff_helpers.ApplyReviewQueueResultFn,
             _review_queue_helpers.apply_review_queue_result,
         ),
         mark_degraded=_mark_degraded,
