@@ -12,7 +12,10 @@ import pytest
 import startupai_controller.promote_ready as promoter
 from startupai_controller.github_http import GitHubTransportError
 from startupai_controller.promote_ready import BoardInfo, promote_to_ready
-from startupai_controller.validate_critical_path_promotion import CriticalPathConfig, load_config
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    load_config,
+)
 
 
 def _valid_payload() -> dict:
@@ -275,9 +278,12 @@ def test_main_passes_dry_run_flag(
     )
     # Predecessor resolver for the validator
     monkeypatch.setattr(
-        promoter, "evaluate_ready_promotion",
-        lambda issue_ref, config, project_owner, project_number,
-        status_resolver=None, require_in_graph=False: (0, ""),
+        promoter,
+        "evaluate_ready_promotion",
+        lambda issue_ref, config, project_owner, project_number, status_resolver=None, require_in_graph=False: (
+            0,
+            "",
+        ),
     )
 
     code = promoter.main(

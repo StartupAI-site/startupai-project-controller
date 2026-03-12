@@ -22,7 +22,6 @@ from startupai_controller.domain.resolution_policy import (
     resolution_has_meaningful_signal,
 )
 
-
 # ---------------------------------------------------------------------------
 # normalize_resolution_payload
 # ---------------------------------------------------------------------------
@@ -141,15 +140,20 @@ class TestResolutionHasMeaningfulSignal:
         assert resolution_has_meaningful_signal({"pr_urls": ["http://x"]}) is True
 
     def test_with_acceptance_criteria_met(self) -> None:
-        assert resolution_has_meaningful_signal({"acceptance_criteria_met": True}) is True
+        assert (
+            resolution_has_meaningful_signal({"acceptance_criteria_met": True}) is True
+        )
 
     def test_with_kind(self) -> None:
         assert resolution_has_meaningful_signal({"kind": "already_on_main"}) is True
 
     def test_falsy_values(self) -> None:
-        assert resolution_has_meaningful_signal(
-            {"summary": "", "code_refs": [], "kind": ""}
-        ) is False
+        assert (
+            resolution_has_meaningful_signal(
+                {"summary": "", "code_refs": [], "kind": ""}
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -164,39 +168,66 @@ class TestResolutionAllowsAutoclose:
         assert resolution_allows_autoclose(None) is False
 
     def test_already_on_main_exact_match(self) -> None:
-        assert resolution_allows_autoclose(
-            {"kind": "already_on_main", "equivalence_claim": "exact_match"}
-        ) is True
+        assert (
+            resolution_allows_autoclose(
+                {"kind": "already_on_main", "equivalence_claim": "exact_match"}
+            )
+            is True
+        )
 
     def test_already_on_main_strict_superset(self) -> None:
-        assert resolution_allows_autoclose(
-            {"kind": "already_on_main", "equivalence_claim": "strict_superset"}
-        ) is True
+        assert (
+            resolution_allows_autoclose(
+                {"kind": "already_on_main", "equivalence_claim": "strict_superset"}
+            )
+            is True
+        )
 
     def test_already_on_main_unknown(self) -> None:
-        assert resolution_allows_autoclose(
-            {"kind": "already_on_main", "equivalence_claim": "unknown"}
-        ) is False
+        assert (
+            resolution_allows_autoclose(
+                {"kind": "already_on_main", "equivalence_claim": "unknown"}
+            )
+            is False
+        )
 
     def test_superseded_strict_superset(self) -> None:
-        assert resolution_allows_autoclose(
-            {"kind": "superseded_by_existing_solution", "equivalence_claim": "strict_superset"}
-        ) is True
+        assert (
+            resolution_allows_autoclose(
+                {
+                    "kind": "superseded_by_existing_solution",
+                    "equivalence_claim": "strict_superset",
+                }
+            )
+            is True
+        )
 
     def test_superseded_exact_match(self) -> None:
-        assert resolution_allows_autoclose(
-            {"kind": "superseded_by_existing_solution", "equivalence_claim": "exact_match"}
-        ) is False
+        assert (
+            resolution_allows_autoclose(
+                {
+                    "kind": "superseded_by_existing_solution",
+                    "equivalence_claim": "exact_match",
+                }
+            )
+            is False
+        )
 
     def test_duplicate_not_autoclosable(self) -> None:
-        assert resolution_allows_autoclose(
-            {"kind": "duplicate", "equivalence_claim": "exact_match"}
-        ) is False
+        assert (
+            resolution_allows_autoclose(
+                {"kind": "duplicate", "equivalence_claim": "exact_match"}
+            )
+            is False
+        )
 
     def test_no_action_needed_not_autoclosable(self) -> None:
-        assert resolution_allows_autoclose(
-            {"kind": "no_action_needed", "equivalence_claim": "exact_match"}
-        ) is False
+        assert (
+            resolution_allows_autoclose(
+                {"kind": "no_action_needed", "equivalence_claim": "exact_match"}
+            )
+            is False
+        )
 
     def test_auto_close_vs_non_close_kinds(self) -> None:
         """Verify the constant sets are correct."""

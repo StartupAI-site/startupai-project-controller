@@ -27,7 +27,6 @@ from startupai_controller.domain.review_queue_policy import (
 )
 from startupai_controller.domain.models import SessionInfo
 
-
 # ---------------------------------------------------------------------------
 # _extract_acceptance_criteria
 # ---------------------------------------------------------------------------
@@ -302,7 +301,9 @@ class TestSessionRetryDueAt:
         result2 = _session_retry_due_at(session2, base_seconds=30, max_seconds=3000)
         assert result1 is not None
         assert result2 is not None
-        completed = datetime.fromisoformat(session1.completed_at).replace(tzinfo=timezone.utc)
+        completed = datetime.fromisoformat(session1.completed_at).replace(
+            tzinfo=timezone.utc
+        )
         delta1 = result1 - completed
         delta2 = result2 - completed
         assert delta2 > delta1
@@ -329,7 +330,9 @@ class TestParsePrUrl:
     """Characterize parse_pr_url domain function."""
 
     def test_standard_url(self) -> None:
-        result = parse_pr_url("https://github.com/StartupAI-site/startupai-crew/pull/42")
+        result = parse_pr_url(
+            "https://github.com/StartupAI-site/startupai-crew/pull/42"
+        )
         assert result == ("StartupAI-site", "startupai-crew", 42)
 
     def test_empty_string(self) -> None:

@@ -12,10 +12,18 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
-    from startupai_controller.ports.issue_context import IssueContextPort as _IssueContextPort
-    from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
-    from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
+    from startupai_controller.ports.board_mutations import (
+        BoardMutationPort as _BoardMutationPort,
+    )
+    from startupai_controller.ports.issue_context import (
+        IssueContextPort as _IssueContextPort,
+    )
+    from startupai_controller.ports.pull_requests import (
+        PullRequestPort as _PullRequestPort,
+    )
+    from startupai_controller.ports.review_state import (
+        ReviewStatePort as _ReviewStatePort,
+    )
 else:
     _BoardMutationPort = None
     _IssueContextPort = None
@@ -98,7 +106,6 @@ from startupai_controller.automation_port_helpers import (
     _default_review_state_port,
     _ensure_github_bundle,
 )
-
 
 # ---------------------------------------------------------------------------
 # Lazy import to break circular dependency with board_automation
@@ -532,6 +539,7 @@ def route_protected_queue_executors(
 ) -> ExecutorRoutingDecision:
     """Normalize protected Backlog/Ready queue items onto the local executor lane."""
     core = _core()
+
     def _list_status_items(status: str) -> list[_ProjectItemSnapshot]:
         return list(
             core._list_project_items_by_status(

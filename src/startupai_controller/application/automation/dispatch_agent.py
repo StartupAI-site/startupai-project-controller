@@ -31,7 +31,9 @@ def dispatch_agent(
             result.skipped.append((issue_ref, f"status={status or 'unknown'}"))
             continue
 
-        executor = review_state_port.get_issue_fields(issue_ref).executor.strip().lower()
+        executor = (
+            review_state_port.get_issue_fields(issue_ref).executor.strip().lower()
+        )
         if executor not in VALID_EXECUTORS:
             result.skipped.append((issue_ref, f"executor={executor or 'unset'}"))
             continue

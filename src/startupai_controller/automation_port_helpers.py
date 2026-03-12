@@ -18,10 +18,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
-    from startupai_controller.ports.issue_context import IssueContextPort as _IssueContextPort
-    from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
-    from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
+    from startupai_controller.ports.board_mutations import (
+        BoardMutationPort as _BoardMutationPort,
+    )
+    from startupai_controller.ports.issue_context import (
+        IssueContextPort as _IssueContextPort,
+    )
+    from startupai_controller.ports.pull_requests import (
+        PullRequestPort as _PullRequestPort,
+    )
+    from startupai_controller.ports.review_state import (
+        ReviewStatePort as _ReviewStatePort,
+    )
 else:
     _BoardMutationPort = None
     _IssueContextPort = None
@@ -366,13 +374,16 @@ def query_open_pull_requests(
 ) -> list[OpenPullRequest]:
     """List open pull requests for one repo prefix through PullRequestPort."""
     repo_slug = config.issue_prefixes[repo_prefix]
-    pr_port = pr_port or build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
-    ).pull_requests
+    pr_port = (
+        pr_port
+        or build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            github_memo=github_memo,
+            gh_runner=gh_runner,
+        ).pull_requests
+    )
     return pr_port.list_open_prs(repo_slug)
 
 
@@ -578,7 +589,11 @@ def _query_issue_board_info(
         gh_runner=gh_runner,
     )
     snapshot = next(
-        (item for item in port.build_board_snapshot().items if item.issue_ref == issue_ref),
+        (
+            item
+            for item in port.build_board_snapshot().items
+            if item.issue_ref == issue_ref
+        ),
         None,
     )
     if snapshot is None:
@@ -603,12 +618,15 @@ def _comment_exists(
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Compatibility helper that checks marker presence through ReviewStatePort."""
-    port = review_state_port or build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).review_state
+    port = (
+        review_state_port
+        or build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        ).review_state
+    )
     return port.comment_exists(f"{owner}/{repo}", number, marker)
 
 
@@ -624,12 +642,15 @@ def list_issue_comment_bodies(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Compatibility helper that loads issue comment bodies through ReviewStatePort."""
-    port = review_state_port or build_github_port_bundle(
-        project_owner,
-        project_number,
-        config=config,
-        gh_runner=gh_runner,
-    ).review_state
+    port = (
+        review_state_port
+        or build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        ).review_state
+    )
     return port.list_issue_comment_bodies(f"{owner}/{repo}", number)
 
 

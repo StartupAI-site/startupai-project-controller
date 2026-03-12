@@ -195,7 +195,9 @@ def test_main_returns_0_for_warning_path(
 ) -> None:
     config_path = _write_config(tmp_path)
 
-    monkeypatch.setattr(validator, "_query_board_status", lambda *_args, **_kwargs: "Done")
+    monkeypatch.setattr(
+        validator, "_query_board_status", lambda *_args, **_kwargs: "Done"
+    )
     code = validator.main(
         [
             "--issue",
@@ -205,7 +207,10 @@ def test_main_returns_0_for_warning_path(
         ]
     )
     assert code == 0
-    assert "WARN: issue crew#999 is not present in any critical path." in capsys.readouterr().out
+    assert (
+        "WARN: issue crew#999 is not present in any critical path."
+        in capsys.readouterr().out
+    )
 
 
 def test_evaluate_ready_promotion_blocks_when_require_in_graph(tmp_path: Path) -> None:
@@ -227,7 +232,9 @@ def test_main_returns_2_for_require_in_graph_missing_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = _write_config(tmp_path)
-    monkeypatch.setattr(validator, "_query_board_status", lambda *_args, **_kwargs: "Done")
+    monkeypatch.setattr(
+        validator, "_query_board_status", lambda *_args, **_kwargs: "Done"
+    )
     code = validator.main(
         ["--issue", "crew#999", "--file", str(config_path), "--require-in-graph"]
     )
@@ -251,7 +258,9 @@ def test_query_board_status_raises_on_invalid_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = validator.load_config(_write_config(tmp_path))
-    monkeypatch.setattr(validator, "run_github_command", lambda *args, **kwargs: "not-json")
+    monkeypatch.setattr(
+        validator, "run_github_command", lambda *args, **kwargs: "not-json"
+    )
     with pytest.raises(validator.GhQueryError, match="invalid JSON response"):
         validator._query_board_status("crew#88", config, "StartupAI-site", 1)
 
@@ -298,7 +307,9 @@ def test_query_board_status_reads_transport_payload(
             }
         }
     )
-    monkeypatch.setattr(validator, "run_github_command", lambda *args, **kwargs: payload)
+    monkeypatch.setattr(
+        validator, "run_github_command", lambda *args, **kwargs: payload
+    )
 
     status = validator._query_board_status("crew#88", config, "StartupAI-site", 1)
 

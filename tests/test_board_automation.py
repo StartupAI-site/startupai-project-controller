@@ -63,7 +63,6 @@ from startupai_controller.validate_critical_path_promotion import (
     direct_successors,
 )
 
-
 # -- Fixtures -----------------------------------------------------------------
 
 
@@ -168,7 +167,9 @@ def _fake_review_state_port(
     search_results: dict[tuple[str, str], tuple[int, ...]] | None = None,
     comment_bodies_by_issue: dict[tuple[str, int], tuple[str, ...]] | None = None,
     latest_comment_timestamps: dict[tuple[str, int], datetime | None] | None = None,
-    latest_non_automation_timestamps: dict[tuple[str, int], datetime | None] | None = None,
+    latest_non_automation_timestamps: (
+        dict[tuple[str, int], datetime | None] | None
+    ) = None,
     assignees_by_issue: dict[tuple[str, int], tuple[str, ...]] | None = None,
     comment_exists_by_issue: dict[tuple[str, int, str], bool] | None = None,
     updated_at_by_issue: dict[tuple[str, int], datetime | None] | None = None,
@@ -249,7 +250,9 @@ def _fake_board_port(calls: list[tuple[str, str]] | None = None):
         post_issue_comment=lambda repo, issue_number, body: bucket.append(
             (f"{repo}#{issue_number}", body)
         ),
-        close_issue=lambda repo, issue_number: bucket.append((f"{repo}#{issue_number}", "close")),
+        close_issue=lambda repo, issue_number: bucket.append(
+            (f"{repo}#{issue_number}", "close")
+        ),
     )
 
 
@@ -349,7 +352,7 @@ def _write_automation_config(tmp_path: Path) -> Path:
                     "mode": "single_machine",
                     "repos": ["app", "crew", "site"],
                     "executors": ["codex"],
-                    "global_concurrency": 2
+                    "global_concurrency": 2,
                 },
                 "dispatch": {"target": "executor"},
                 "canary_thresholds": {},
@@ -359,7 +362,7 @@ def _write_automation_config(tmp_path: Path) -> Path:
                         "db-test-gate",
                         "e2e",
                         "tag-contract",
-                        "codex-review-gate"
+                        "codex-review-gate",
                     ]
                 },
             }
@@ -813,7 +816,10 @@ def test_reconcile_retries_once(tmp_path: Path) -> None:
     review_state_port = _fake_review_state_port(
         status_by_issue={"crew#84": "Backlog"},
         search_results={
-            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+            (
+                "StartupAI-site/startupai-crew",
+                f"{automation.MARKER_PREFIX}:handoff:job=",
+            ): (84,)
         },
         comment_bodies_by_issue={
             ("StartupAI-site/startupai-crew", 84): (
@@ -845,7 +851,10 @@ def test_reconcile_handoffs_uses_ports_for_retry_comment(tmp_path: Path) -> None
     review_state_port = _fake_review_state_port(
         status_by_issue={"crew#84": "Backlog"},
         search_results={
-            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+            (
+                "StartupAI-site/startupai-crew",
+                f"{automation.MARKER_PREFIX}:handoff:job=",
+            ): (84,)
         },
         comment_bodies_by_issue={
             ("StartupAI-site/startupai-crew", 84): (
@@ -880,7 +889,10 @@ def test_reconcile_escalates_after_retry(tmp_path: Path) -> None:
     review_state_port = _fake_review_state_port(
         status_by_issue={"crew#84": "Backlog"},
         search_results={
-            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+            (
+                "StartupAI-site/startupai-crew",
+                f"{automation.MARKER_PREFIX}:handoff:job=",
+            ): (84,)
         },
         comment_bodies_by_issue={
             ("StartupAI-site/startupai-crew", 84): (
@@ -929,7 +941,10 @@ def test_reconcile_keeps_recent_unacked_handoff_pending(tmp_path: Path) -> None:
     review_state_port = _fake_review_state_port(
         status_by_issue={"crew#84": "Backlog"},
         search_results={
-            ("StartupAI-site/startupai-crew", f"{automation.MARKER_PREFIX}:handoff:job="): (84,)
+            (
+                "StartupAI-site/startupai-crew",
+                f"{automation.MARKER_PREFIX}:handoff:job=",
+            ): (84,)
         },
         comment_bodies_by_issue={
             ("StartupAI-site/startupai-crew", 84): (
@@ -1223,10 +1238,14 @@ def test_admit_backlog_items_closes_prior_resolved_issue(
     board_port = SimpleNamespace(
         set_project_single_select=lambda *args, **kwargs: None,
         set_project_text_field=lambda *args, **kwargs: None,
-        set_issue_status=lambda issue_ref, status: marked.append(issue_ref) if status == "Done" else None,
+        set_issue_status=lambda issue_ref, status: (
+            marked.append(issue_ref) if status == "Done" else None
+        ),
         set_issue_field=lambda issue_ref, field_name, value: None,
         post_issue_comment=lambda repo, issue_number, body: None,
-        close_issue=lambda repo, issue_number: closed.append(tuple(repo.split("/", 1)) + (issue_number,)),
+        close_issue=lambda repo, issue_number: closed.append(
+            tuple(repo.split("/", 1)) + (issue_number,)
+        ),
         set_issue_assignees=lambda repo, issue_number, assignees: None,
     )
     github_bundle = SimpleNamespace(
@@ -1245,7 +1264,9 @@ def test_admit_backlog_items_closes_prior_resolved_issue(
                                     "summary": "Already implemented on main.",
                                     "verification_class": "strong",
                                     "final_action": "closed_as_already_resolved",
-                                    "evidence": {"pr_urls": ["https://github.com/O/R/pull/1"]},
+                                    "evidence": {
+                                        "pr_urls": ["https://github.com/O/R/pull/1"]
+                                    },
                                 }
                             ),
                             "```",
@@ -1312,9 +1333,7 @@ def test_admit_backlog_items_blocks_prior_ambiguous_resolution_issue(
         set_issue_field=lambda issue_ref, field_name, value: (
             blocked.append((issue_ref, value))
             if field_name == "Blocked Reason"
-            else handoffs.append(value)
-            if field_name == "Handoff To"
-            else None
+            else handoffs.append(value) if field_name == "Handoff To" else None
         ),
         post_issue_comment=lambda repo, issue_number, body: None,
         close_issue=lambda repo, issue_number: None,
@@ -1411,7 +1430,9 @@ def test_admit_backlog_items_fast_path_skips_deep_reads_when_ready_floor_met(
     github_bundle = SimpleNamespace(
         review_state=_fake_review_state_port(),
         pull_requests=_fake_pr_port(
-            list_open_prs=lambda repo: pytest.fail("should not list PRs when admission is full")
+            list_open_prs=lambda repo: pytest.fail(
+                "should not list PRs when admission is full"
+            )
         ),
         board_mutations=_fake_board_port([]),
         issue_context=_fake_issue_context_port(),
@@ -1862,13 +1883,13 @@ def test_audit_in_progress_escalates_stale_without_pr(tmp_path: Path) -> None:
             )
         },
         comment_exists_by_issue={
-                (
-                    "StartupAI-site/startupai-crew",
-                    88,
-                    _marker_for("stale-in-progress", "crew#88"),
-                ): False
-            },
-        )
+            (
+                "StartupAI-site/startupai-crew",
+                88,
+                _marker_for("stale-in-progress", "crew#88"),
+            ): False
+        },
+    )
 
     result = audit_in_progress(
         config,
@@ -2250,7 +2271,8 @@ def _branch_protection_response(contexts: list[str] | None = None) -> str:
     return json.dumps(
         {
             "strict": True,
-            "contexts": contexts or ["Unit & Integration Tests", "Planning Surface Guard"],
+            "contexts": contexts
+            or ["Unit & Integration Tests", "Planning Surface Guard"],
             "checks": [],
         }
     )
@@ -2361,7 +2383,9 @@ def test_review_sync_checks_failed_uses_pr_port_required_checks(
                 "Unit & Integration Tests"
             }
         ),
-        review_state_port=_fake_review_state_port(status_by_issue={"crew#88": "Review"}),
+        review_state_port=_fake_review_state_port(
+            status_by_issue={"crew#88": "Review"}
+        ),
         board_port=_fake_board_port(board_calls),
     )
 
@@ -2420,7 +2444,9 @@ def test_review_sync_no_mutation_on_check_api_failure(
     tmp_path: Path,
 ) -> None:
     """Branch protection API error -> no board mutation, exit 4."""
-    from startupai_controller.validate_critical_path_promotion import GhQueryError as _GhQueryError
+    from startupai_controller.validate_critical_path_promotion import (
+        GhQueryError as _GhQueryError,
+    )
 
     config = _load(tmp_path)
     mutator = MagicMock()
@@ -2488,9 +2514,7 @@ def test_resolve_issues_from_check_suite_queries_failed_runs(
             "pull_requests": [
                 {
                     "number": 102,
-                    "base": {
-                        "repo": {"full_name": "StartupAI-site/startupai-crew"}
-                    },
+                    "base": {"repo": {"full_name": "StartupAI-site/startupai-crew"}},
                 }
             ],
         }
@@ -2504,9 +2528,7 @@ def test_resolve_issues_from_check_suite_queries_failed_runs(
             return check_runs_response
         return graphql_closing
 
-    results = resolve_issues_from_event(
-        str(event_path), config, gh_runner=mock_gh
-    )
+    results = resolve_issues_from_event(str(event_path), config, gh_runner=mock_gh)
     assert len(results) >= 1
     issue_ref, event_kind, failed_checks = results[0]
     assert issue_ref == "crew#88"
@@ -2518,17 +2540,21 @@ def test_resolve_issues_from_check_suite_queries_failed_runs(
 
 
 def test_cmd_sync_review_state_propagates_fatal_exit_code(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Handler returns exit 4 when sync_review_state returns 4."""
-    from startupai_controller.validate_critical_path_promotion import GhQueryError as _GhQueryError
+    from startupai_controller.validate_critical_path_promotion import (
+        GhQueryError as _GhQueryError,
+    )
 
     config_path = _write_config(tmp_path)
 
     # Mock sync_review_state to return exit 4 for the issue
-    def mock_sync(event_kind, issue_ref, config, project_owner,
-                  project_number, **kwargs):
+    def mock_sync(
+        event_kind, issue_ref, config, project_owner, project_number, **kwargs
+    ):
         return 4, f"Cannot read branch protection for owner/repo: API error"
 
     monkeypatch.setattr(automation, "sync_review_state", mock_sync)
@@ -2591,9 +2617,7 @@ def test_sync_review_state_resolve_pr_no_linked_issues(
         {
             "data": {
                 "repository": {
-                    "pullRequest": {
-                        "closingIssuesReferences": {"nodes": []}
-                    }
+                    "pullRequest": {"closingIssuesReferences": {"nodes": []}}
                 }
             }
         }
@@ -2614,7 +2638,9 @@ def test_cmd_schedule_ready_returns_zero_on_no_claims(
     """No claimable items is a benign no-op for scheduled runs."""
     config = _load(tmp_path)
     automation_config_path = _write_automation_config(tmp_path)
-    monkeypatch.setattr(automation, "schedule_ready_items", lambda *a, **k: SchedulingDecision())
+    monkeypatch.setattr(
+        automation, "schedule_ready_items", lambda *a, **k: SchedulingDecision()
+    )
 
     code = automation._cmd_schedule_ready(
         argparse.Namespace(
@@ -2639,7 +2665,9 @@ def test_cmd_enforce_ready_deps_returns_zero_on_no_corrections(
 ) -> None:
     """Guard no-op is benign and should not fail workflows."""
     config = _load(tmp_path)
-    monkeypatch.setattr(automation, "enforce_ready_dependency_guard", lambda *a, **k: [])
+    monkeypatch.setattr(
+        automation, "enforce_ready_dependency_guard", lambda *a, **k: []
+    )
 
     code = automation._cmd_enforce_ready_deps(
         argparse.Namespace(
@@ -2855,7 +2883,9 @@ def test_stale_escalation_no_at_mentions(tmp_path: Path) -> None:
 # -- Codex gate + automerge tests -------------------------------------------
 
 
-def test_codex_review_gate_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_review_gate_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Pass verdict in Review returns exit 0."""
     config = _load(tmp_path)
     policy = _automation_config()
@@ -2894,7 +2924,9 @@ def test_codex_review_gate_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert "codex-review=pass" in msg
 
 
-def test_codex_review_gate_fail_routes_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_review_gate_fail_routes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Fail verdict routes issue back via _apply_codex_fail_routing."""
     config = _load(tmp_path)
     policy = _automation_config()
@@ -3094,7 +3126,9 @@ def test_automerge_review_updates_branch_then_merges(
         1,
         dry_run=False,
         pr_port=pr_port,
-        review_state_port=_fake_review_state_port(status_by_issue={"app#110": "Review"}),
+        review_state_port=_fake_review_state_port(
+            status_by_issue={"app#110": "Review"}
+        ),
     )
     assert code == 0
     assert ("update", 158) in calls
@@ -3115,8 +3149,12 @@ def test_automerge_review_noop_when_not_in_review_scope(
         "StartupAI-site",
         1,
         dry_run=True,
-        pr_port=_fake_pr_port(linked_issue_refs=lambda pr_repo, pr_number: ("app#110",)),
-        review_state_port=_fake_review_state_port(status_by_issue={"app#110": "In Progress"}),
+        pr_port=_fake_pr_port(
+            linked_issue_refs=lambda pr_repo, pr_number: ("app#110",)
+        ),
+        review_state_port=_fake_review_state_port(
+            status_by_issue={"app#110": "In Progress"}
+        ),
     )
     assert code == 2
     assert "no-op" in msg
@@ -3157,7 +3195,9 @@ def test_automerge_review_noops_when_auto_merge_already_enabled(
         "StartupAI-site",
         1,
         pr_port=pr_port,
-        review_state_port=_fake_review_state_port(status_by_issue={"app#110": "Review"}),
+        review_state_port=_fake_review_state_port(
+            status_by_issue={"app#110": "Review"}
+        ),
     )
     assert code == 0
     assert "already enabled" in msg
@@ -3303,14 +3343,27 @@ def test_review_rescue_enables_automerge_when_snapshot_is_ready(
         pr_number=184,
         review_refs=("app#110",),
         gate_status=gate_status,
-        rescue_checks=("ci", "db-test-gate", "e2e", "tag-contract", "codex-review-gate"),
-        rescue_passed={"ci", "db-test-gate", "e2e", "tag-contract", "codex-review-gate"},
+        rescue_checks=(
+            "ci",
+            "db-test-gate",
+            "e2e",
+            "tag-contract",
+            "codex-review-gate",
+        ),
+        rescue_passed={
+            "ci",
+            "db-test-gate",
+            "e2e",
+            "tag-contract",
+            "codex-review-gate",
+        },
     )
     calls: list[tuple[str, int]] = []
     monkeypatch.setattr(
         automation,
         "automerge_review",
-        lambda pr_repo, pr_number, *a, **k: calls.append((pr_repo, pr_number)) or (0, "enabled"),
+        lambda pr_repo, pr_number, *a, **k: calls.append((pr_repo, pr_number))
+        or (0, "enabled"),
     )
 
     result = review_rescue(
@@ -3533,7 +3586,9 @@ def test_review_rescue_all_scans_execution_authority_repos(
         lambda pr_repo, pr_number, *a, **k: automation.ReviewRescueResult(
             pr_repo=pr_repo,
             pr_number=pr_number,
-            auto_merge_enabled=(pr_repo == "StartupAI-site/app.startupai-site" and pr_number == 10),
+            auto_merge_enabled=(
+                pr_repo == "StartupAI-site/app.startupai-site" and pr_number == 10
+            ),
         ),
     )
 
@@ -3545,7 +3600,14 @@ def test_review_rescue_all_scans_execution_authority_repos(
         dry_run=True,
         pr_port=_fake_pr_port(
             list_open_prs=lambda repo: (
-                [OpenPullRequest(number=10, url=f"https://example.com/{repo}/10", head_ref_name="head", is_draft=False)]
+                [
+                    OpenPullRequest(
+                        number=10,
+                        url=f"https://example.com/{repo}/10",
+                        head_ref_name="head",
+                        is_draft=False,
+                    )
+                ]
                 if repo == "StartupAI-site/app.startupai-site"
                 else []
             )
@@ -3584,7 +3646,14 @@ def test_review_rescue_all_reports_requeued_refs(
         dry_run=True,
         pr_port=_fake_pr_port(
             list_open_prs=lambda repo: (
-                [OpenPullRequest(number=177, url=f"https://example.com/{repo}/177", head_ref_name="head", is_draft=False)]
+                [
+                    OpenPullRequest(
+                        number=177,
+                        url=f"https://example.com/{repo}/177",
+                        head_ref_name="head",
+                        is_draft=False,
+                    )
+                ]
                 if repo == "StartupAI-site/app.startupai-site"
                 else []
             )
@@ -3738,7 +3807,9 @@ def test_dispatch_agent_comment_failure_fails_open(
     )
     monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
     board_port = SimpleNamespace(
-        post_issue_comment=lambda *a, **k: (_ for _ in ()).throw(automation.GhQueryError("boom"))
+        post_issue_comment=lambda *a, **k: (_ for _ in ()).throw(
+            automation.GhQueryError("boom")
+        )
     )
 
     result = automation.dispatch_agent(
@@ -3828,7 +3899,10 @@ def test_enforce_execution_policy_closes_copilot_pr_and_requeues(
     assert decision.pr_closed is True
     assert decision.requeued == ["crew#18"]
     assert decision.copilot_unassigned == ["crew#18"]
-    assert ("StartupAI-site/startupai-crew#18", "assignees=('chris00walker',)") in board_calls
+    assert (
+        "StartupAI-site/startupai-crew#18",
+        "assignees=('chris00walker',)",
+    ) in board_calls
     assert closed and closed[0][0:2] == ("StartupAI-site/startupai-crew", 119)
     assert any(
         target == "StartupAI-site/startupai-crew#18"
@@ -3897,9 +3971,7 @@ def test_rebalance_wip_marks_stale_then_demotes(
         latest_non_automation_timestamps={
             ("StartupAI-site/startupai-crew", 88): now - timedelta(hours=48)
         },
-        latest_comment_timestamps={
-            ("StartupAI-site/startupai-crew", 88): marker_time
-        },
+        latest_comment_timestamps={("StartupAI-site/startupai-crew", 88): marker_time},
     )
     decision_2 = automation.rebalance_wip(
         config=config,
@@ -3996,9 +4068,7 @@ def test_rebalance_wip_ignores_issue_updated_at_for_freshness(
         latest_non_automation_timestamps={
             ("StartupAI-site/startupai-crew", 88): now - timedelta(hours=48)
         },
-        updated_at_by_issue={
-            ("StartupAI-site/startupai-crew", 88): now
-        },
+        updated_at_by_issue={("StartupAI-site/startupai-crew", 88): now},
     )
     monkeypatch.setattr(automation, "in_any_critical_path", lambda *a, **k: False)
     board_calls: list[tuple[str, str]] = []
@@ -4261,7 +4331,9 @@ def test_load_automation_config_rejects_multi_worker_lane_limits_below_global_co
         encoding="utf-8",
     )
 
-    with pytest.raises(automation.ConfigError, match="wip limit 1 is below global concurrency 2"):
+    with pytest.raises(
+        automation.ConfigError, match="wip limit 1 is below global concurrency 2"
+    ):
         automation.load_automation_config(config_path)
 
 
@@ -4362,7 +4434,11 @@ def test_rescue_checks_uses_only_live_branch_protection(
             is_draft=False,
             state="OPEN",
             auto_merge_enabled=False,
-            checks={"ci": CheckObservation(name="ci", result="pass", conclusion="success", status="completed")},
+            checks={
+                "ci": CheckObservation(
+                    name="ci", result="pass", conclusion="success", status="completed"
+                )
+            },
         ),
         rescue_checks=("ci",),
         rescue_passed={"ci"},
@@ -4908,9 +4984,7 @@ class TestTransitionIssueStatusCharacterization:
         assert old_status == "Ready"
         assert mutator_calls == []
 
-    def test_legacy_path_status_mismatch_returns_false(
-        self, tmp_path: Path
-    ) -> None:
+    def test_legacy_path_status_mismatch_returns_false(self, tmp_path: Path) -> None:
         """Legacy path returns False when resolved status not in from_statuses."""
         config = _load(tmp_path)
 
@@ -4982,7 +5056,9 @@ def test_port_helper_default_review_state_port_builds_from_bundle(monkeypatch) -
     port = automation_port_helpers._default_review_state_port(
         "StartupAI-site",
         1,
-        _load(Path("critical-paths.json")) if False else None,  # unreachable placeholder
+        (
+            _load(Path("critical-paths.json")) if False else None
+        ),  # unreachable placeholder
     )
 
     assert port == "review-port"
@@ -5011,17 +5087,13 @@ class TestLegacyBoardStatusMutatorCharacterization:
             ),
         )
 
-        mutator = automation._legacy_board_status_mutator(
-            "StartupAI-site", 1, config
-        )
+        mutator = automation._legacy_board_status_mutator("StartupAI-site", 1, config)
 
         mutator("PROJ_123", "ITEM_456", "In Progress")
 
         assert set_board_calls == [("PROJ_123", "ITEM_456", "In Progress")]
 
-    def test_default_status_is_blocked(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_default_status_is_blocked(self, tmp_path: Path, monkeypatch) -> None:
         """Calling mutator without explicit status defaults to Blocked."""
         config = _load(tmp_path)
         set_board_calls: list[tuple] = []
@@ -5034,9 +5106,7 @@ class TestLegacyBoardStatusMutatorCharacterization:
             ),
         )
 
-        mutator = automation._legacy_board_status_mutator(
-            "StartupAI-site", 1, config
-        )
+        mutator = automation._legacy_board_status_mutator("StartupAI-site", 1, config)
 
         mutator("PROJ_123", "ITEM_456")
 
@@ -5117,9 +5187,7 @@ class TestMarkIssuesDoneCharacterization:
         assert marked == []
         assert board_calls == []
 
-    def test_transitions_from_all_valid_source_statuses(
-        self, tmp_path: Path
-    ) -> None:
+    def test_transitions_from_all_valid_source_statuses(self, tmp_path: Path) -> None:
         """mark_issues_done accepts transitions from Review, In Progress, Blocked, Ready, and Backlog."""
         for source_status in ("Review", "In Progress", "Blocked", "Ready", "Backlog"):
             config = _load(tmp_path)
@@ -5198,9 +5266,7 @@ class TestSetStatusIfChangedCharacterization:
         assert old_status == "In Progress"
         assert ("crew#84", "Done") in board_calls
 
-    def test_no_transition_when_status_doesnt_match(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_transition_when_status_doesnt_match(self, tmp_path: Path) -> None:
         """Returns (False, old_status) when current status not in from_statuses."""
         config = _load(tmp_path)
 

@@ -10,7 +10,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from startupai_controller.adapters.github_base import GitHubAdapterBase
-from startupai_controller.validate_critical_path_promotion import GhQueryError, parse_issue_ref
+from startupai_controller.validate_critical_path_promotion import (
+    GhQueryError,
+    parse_issue_ref,
+)
 
 
 @dataclass(frozen=True)
@@ -160,7 +163,10 @@ query($owner: String!, $repo: String!, $number: Int!, $fieldName: String!) {
             owner_data = project.get("owner") or {}
             owner_login = owner_data.get("login")
             proj_number = project.get("number")
-            if owner_login == self._project_owner and proj_number == self._project_number:
+            if (
+                owner_login == self._project_owner
+                and proj_number == self._project_number
+            ):
                 field_data = node.get("fieldByName") or {}
                 return field_data.get("name") or field_data.get("text") or ""
         return ""
@@ -231,9 +237,7 @@ query($projectId: ID!, $fieldName: String!) {
         for option in field.get("options") or []:
             if option.get("name") == option_name:
                 return field_id, str(option.get("id") or "")
-        raise GhQueryError(
-            f"Option '{option_name}' not found in field '{field_name}'."
-        )
+        raise GhQueryError(f"Option '{option_name}' not found in field '{field_name}'.")
 
     def _set_project_single_select(
         self,

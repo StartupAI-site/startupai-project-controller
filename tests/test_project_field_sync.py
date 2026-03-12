@@ -101,14 +101,32 @@ def _schema() -> pfs.ProjectSchema:
     return pfs.ProjectSchema(
         project_id="PROJ_1",
         fields={
-            "Priority": pfs.FieldSpec("F1", "Priority", "SINGLE_SELECT", options("P3 Low")),
-            "Sprint": pfs.FieldSpec("F2", "Sprint", "SINGLE_SELECT", options("Backlog", "M2 Core")),
-            "Agent": pfs.FieldSpec("F3", "Agent", "SINGLE_SELECT", options("project-manager")),
-            "Executor": pfs.FieldSpec("F4", "Executor", "SINGLE_SELECT", options("claude", "codex", "human")),
+            "Priority": pfs.FieldSpec(
+                "F1", "Priority", "SINGLE_SELECT", options("P3 Low")
+            ),
+            "Sprint": pfs.FieldSpec(
+                "F2", "Sprint", "SINGLE_SELECT", options("Backlog", "M2 Core")
+            ),
+            "Agent": pfs.FieldSpec(
+                "F3", "Agent", "SINGLE_SELECT", options("project-manager")
+            ),
+            "Executor": pfs.FieldSpec(
+                "F4", "Executor", "SINGLE_SELECT", options("claude", "codex", "human")
+            ),
             "Owner": pfs.FieldSpec("F5", "Owner", "TEXT", {}),
-            "Handoff To": pfs.FieldSpec("F6", "Handoff To", "SINGLE_SELECT", options("none", "claude", "codex", "human")),
+            "Handoff To": pfs.FieldSpec(
+                "F6",
+                "Handoff To",
+                "SINGLE_SELECT",
+                options("none", "claude", "codex", "human"),
+            ),
             "PR": pfs.FieldSpec("F7", "PR", "TEXT", {}),
-            "CI": pfs.FieldSpec("F8", "CI", "SINGLE_SELECT", options("pending", "passing", "failing", "n/a")),
+            "CI": pfs.FieldSpec(
+                "F8",
+                "CI",
+                "SINGLE_SELECT",
+                options("pending", "passing", "failing", "n/a"),
+            ),
             "Source": pfs.FieldSpec("F9", "Source", "TEXT", {}),
             "Blocked Reason": pfs.FieldSpec("F10", "Blocked Reason", "TEXT", {}),
             "Start Date": pfs.FieldSpec("F11", "Start Date", "DATE", {}),
@@ -158,7 +176,9 @@ def test_derive_assignee_none_if_present(tmp_path: Path) -> None:
 def test_derive_pr_and_ci_open_pr(tmp_path: Path) -> None:
     cfg = _load(tmp_path)
     item = _issue(
-        linked_pulls=[pfs.LinkedPull(url="https://github.com/pr/1", state="OPEN", merged_at=None)]
+        linked_pulls=[
+            pfs.LinkedPull(url="https://github.com/pr/1", state="OPEN", merged_at=None)
+        ]
     )
     pr, ci = pfs.derive_pr_and_ci(item, cfg)
     assert pr.endswith("/1")
@@ -195,10 +215,14 @@ def test_derive_pr_and_ci_no_pr_uses_status_default(tmp_path: Path) -> None:
 
 
 def test_build_audit_report_counts_missing_fields() -> None:
-    report = pfs.build_audit_report([
-        _issue(status="Ready"),
-        _issue(status="Done", assignees=["chris00walker"], milestone_title="M2 Core"),
-    ])
+    report = pfs.build_audit_report(
+        [
+            _issue(status="Ready"),
+            _issue(
+                status="Done", assignees=["chris00walker"], milestone_title="M2 Core"
+            ),
+        ]
+    )
     assert report["total_issues"] == 2
     assert report["missing"]["assignees"] == 1
     assert report["active_missing"]["assignees"] == 1

@@ -117,8 +117,7 @@ def _propagate_single_blocker(
             except Exception:
                 # Cross-repo comment failure is non-fatal — log and continue
                 print(
-                    f"WARNING: Failed posting blocker comment on "
-                    f"{successor_ref}",
+                    f"WARNING: Failed posting blocker comment on " f"{successor_ref}",
                     file=sys.stderr,
                 )
                 continue

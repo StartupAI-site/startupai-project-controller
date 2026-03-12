@@ -48,8 +48,14 @@ from startupai_controller.runtime.wiring import (
     build_session_store,
     end_runtime_request_stats,
 )
-from startupai_controller.domain.scheduling_policy import snapshot_to_issue_ref as _snapshot_to_issue_ref
-from startupai_controller.validate_critical_path_promotion import ConfigError, load_config, parse_issue_ref
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _snapshot_to_issue_ref,
+)
+from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
+    load_config,
+    parse_issue_ref,
+)
 from startupai_controller.board_automation_config import load_automation_config
 
 logger = logging.getLogger("board-consumer")
@@ -89,7 +95,11 @@ def initialize_cycle_runtime(
 ) -> Any:
     """Build cycle-scoped runtime wiring and effective config."""
     cp_config = load_config(config.critical_paths_path)
-    gh_port = gh_runner if hasattr(gh_runner, "run_gh") else build_gh_runner_port(gh_runner=gh_runner)
+    gh_port = (
+        gh_runner
+        if hasattr(gh_runner, "run_gh")
+        else build_gh_runner_port(gh_runner=gh_runner)
+    )
     github_memo = CycleGitHubMemo()
     github_bundle = build_github_port_bundle(
         config.project_owner,

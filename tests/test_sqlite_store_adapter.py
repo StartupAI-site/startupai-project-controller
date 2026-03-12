@@ -41,9 +41,7 @@ def test_list_due_review_items_uses_keyword_only_now() -> None:
     result = adapter.list_due_review_items(now)
 
     assert result == ["due"]
-    assert db.calls == [
-        ("list_due_review_queue_items", {"now": now, "limit": None})
-    ]
+    assert db.calls == [("list_due_review_queue_items", {"now": now, "limit": None})]
 
 
 def test_enqueue_review_item_passes_keyword_args() -> None:

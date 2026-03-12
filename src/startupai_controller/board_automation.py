@@ -29,10 +29,18 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
-    from startupai_controller.ports.issue_context import IssueContextPort as _IssueContextPort
-    from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
-    from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
+    from startupai_controller.ports.board_mutations import (
+        BoardMutationPort as _BoardMutationPort,
+    )
+    from startupai_controller.ports.issue_context import (
+        IssueContextPort as _IssueContextPort,
+    )
+    from startupai_controller.ports.pull_requests import (
+        PullRequestPort as _PullRequestPort,
+    )
+    from startupai_controller.ports.review_state import (
+        ReviewStatePort as _ReviewStatePort,
+    )
 else:
     _BoardMutationPort = None  # runtime: structural typing, no import needed
     _IssueContextPort = None  # runtime: structural typing, no import needed
@@ -178,7 +186,6 @@ from startupai_controller.automation_ready_review_wiring import (  # noqa: E402
     automerge_review,
 )
 
-
 # ---------------------------------------------------------------------------
 # State/admission/coordination wiring (implementations in automation_state_admission_wiring.py)
 # ---------------------------------------------------------------------------
@@ -209,7 +216,6 @@ from startupai_controller.automation_state_admission_wiring import (  # noqa: E4
     _post_claim_comment,
 )
 
-
 # ---------------------------------------------------------------------------
 # Execution/advisory wiring (implementations in automation_execution_wiring.py)
 # ---------------------------------------------------------------------------
@@ -222,7 +228,6 @@ from startupai_controller.automation_execution_wiring import (  # noqa: E402
     rebalance_wip,
     enforce_execution_policy,
 )
-
 
 # ---------------------------------------------------------------------------
 # Subcommand handlers (implementations in automation_cli_handlers.py)
@@ -249,14 +254,12 @@ from startupai_controller.automation_cli_handlers import (  # noqa: E402
     _cmd_classify_parallelism,
 )
 
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
 from startupai_controller.board_automation_cli import build_parser, main
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

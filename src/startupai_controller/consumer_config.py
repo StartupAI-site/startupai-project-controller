@@ -10,7 +10,6 @@ from startupai_controller.consumer_workflow import (
     default_repo_roots,
 )
 
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CONFIG_PATH = str(_REPO_ROOT / "config" / "critical-paths.json")
 DEFAULT_AUTOMATION_CONFIG_PATH = str(
@@ -37,7 +36,9 @@ class ConsumerConfig:
     schema_path: Path = field(default_factory=lambda: DEFAULT_SCHEMA_PATH)
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     drain_path: Path = field(default_factory=lambda: DEFAULT_DRAIN_PATH)
-    workflow_state_path: Path = field(default_factory=lambda: DEFAULT_WORKFLOW_STATE_PATH)
+    workflow_state_path: Path = field(
+        default_factory=lambda: DEFAULT_WORKFLOW_STATE_PATH
+    )
     poll_interval_seconds: int = 180
     codex_timeout_seconds: int = 1800
     heartbeat_expiry_seconds: int = 3600

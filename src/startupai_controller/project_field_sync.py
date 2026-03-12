@@ -25,14 +25,15 @@ import sys
 from typing import Any, Callable
 
 
-from startupai_controller.validate_critical_path_promotion import ConfigError, GhQueryError
+from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
+    GhQueryError,
+)
 
 DEFAULT_PROJECT_OWNER = "StartupAI-site"
 DEFAULT_PROJECT_NUMBER = 1
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_SYNC_CONFIG_PATH = str(
-    _REPO_ROOT / "config" / "project-field-sync-config.json"
-)
+DEFAULT_SYNC_CONFIG_PATH = str(_REPO_ROOT / "config" / "project-field-sync-config.json")
 VALID_EXECUTORS = {"claude", "codex", "human"}
 ACTIVE_STATUSES = {"Ready", "In Progress", "Review", "Blocked"}
 
@@ -148,7 +149,9 @@ def _run_gh(
             stderr=subprocess.STDOUT,
         )
     except OSError as error:
-        raise GhQueryError(f"Failed running gh {' '.join(args[:3])}: {error}") from error
+        raise GhQueryError(
+            f"Failed running gh {' '.join(args[:3])}: {error}"
+        ) from error
     except subprocess.CalledProcessError as error:
         raise GhQueryError(
             f"Failed running gh {' '.join(args[:3])}: {error.output.strip()}"
@@ -197,9 +200,7 @@ def load_sync_config(path: Path) -> SyncConfig:
 
     version = payload.get("version")
     if version != 1:
-        raise ConfigError(
-            f"Unsupported sync config version '{version}'. Expected 1."
-        )
+        raise ConfigError(f"Unsupported sync config version '{version}'. Expected 1.")
 
     default_assignee = str(payload.get("default_assignee", "")).strip()
     if not default_assignee:
@@ -331,8 +332,7 @@ query($owner: String!, $number: Int!) {
         options = {
             str(option.get("name", "")).strip(): str(option.get("id", "")).strip()
             for option in node.get("options", []) or []
-            if str(option.get("name", "")).strip()
-            and str(option.get("id", "")).strip()
+            if str(option.get("name", "")).strip() and str(option.get("id", "")).strip()
         }
 
         fields[name] = FieldSpec(
@@ -455,9 +455,7 @@ query($owner: String!, $number: Int!, $cursor: String) {
         data = _must_get_graphql_data(payload, "Failed listing project items")
 
         project_items = (
-            data.get("organization", {})
-            .get("projectV2", {})
-            .get("items", {})
+            data.get("organization", {}).get("projectV2", {}).get("items", {})
         )
         page_info = project_items.get("pageInfo", {})
         has_next = bool(page_info.get("hasNextPage"))
@@ -488,9 +486,9 @@ query($owner: String!, $number: Int!, $cursor: String) {
                     state=str(pr.get("state", "")).strip(),
                     merged_at=pr.get("mergedAt"),
                 )
-                    for pr in (
-                        content.get("closedByPullRequestsReferences") or {}
-                    ).get("nodes", [])
+                for pr in (content.get("closedByPullRequestsReferences") or {}).get(
+                    "nodes", []
+                )
                 if str(pr.get("url", "")).strip()
             ]
 
@@ -503,12 +501,20 @@ query($owner: String!, $number: Int!, $cursor: String) {
                     repo=repo_name,
                     number=int(number),
                     status=str((node.get("statusField") or {}).get("name", "")).strip(),
-                    priority=str((node.get("priorityField") or {}).get("name", "")).strip(),
+                    priority=str(
+                        (node.get("priorityField") or {}).get("name", "")
+                    ).strip(),
                     sprint=str((node.get("sprintField") or {}).get("name", "")).strip(),
                     agent=str((node.get("agentField") or {}).get("name", "")).strip(),
-                    executor=str((node.get("executorField") or {}).get("name", "")).strip(),
-                    owner_field=str((node.get("ownerField") or {}).get("text", "")).strip(),
-                    handoff_to=str((node.get("handoffField") or {}).get("name", "")).strip(),
+                    executor=str(
+                        (node.get("executorField") or {}).get("name", "")
+                    ).strip(),
+                    owner_field=str(
+                        (node.get("ownerField") or {}).get("text", "")
+                    ).strip(),
+                    handoff_to=str(
+                        (node.get("handoffField") or {}).get("name", "")
+                    ).strip(),
                     pr_field=str((node.get("prField") or {}).get("text", "")).strip(),
                     ci=str((node.get("ciField") or {}).get("name", "")).strip(),
                     source=str((node.get("sourceField") or {}).get("text", "")).strip(),
@@ -750,9 +756,7 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $dateValue: Date!) {
         _must_get_graphql_data(payload, f"Failed setting field '{field_name}'")
         return
 
-    raise ConfigError(
-        f"Unsupported field type '{field.data_type}' for '{field_name}'"
-    )
+    raise ConfigError(f"Unsupported field type '{field.data_type}' for '{field_name}'")
 
 
 def _list_repo_milestones(
@@ -1257,9 +1261,7 @@ def _run_single_sync(
         stats = sync_pr_ci(items, schema, sync_config, dry_run=dry_run)
     elif command == "sync-all":
         all_stats = SyncStats(processed_issues=len(items))
-        all_stats.merge(
-            sync_custom_fields(items, schema, sync_config, dry_run=dry_run)
-        )
+        all_stats.merge(sync_custom_fields(items, schema, sync_config, dry_run=dry_run))
         all_stats.merge(sync_milestones(items, sync_config, dry_run=dry_run))
         all_stats.merge(sync_dates(items, schema, sync_config, dry_run=dry_run))
         all_stats.merge(sync_assignees(items, sync_config, dry_run=dry_run))

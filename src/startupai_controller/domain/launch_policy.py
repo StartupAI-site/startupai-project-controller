@@ -11,7 +11,6 @@ from typing import Any
 from startupai_controller.domain.models import OpenPullRequestMatch
 from startupai_controller.domain.repair_policy import deterministic_branch_pattern
 
-
 # ---------------------------------------------------------------------------
 # PR candidate classification
 # ---------------------------------------------------------------------------

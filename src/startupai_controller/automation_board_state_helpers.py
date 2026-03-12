@@ -17,7 +17,10 @@ from startupai_controller.board_automation_config import (
     DEFAULT_PROJECT_OWNER,
 )
 from startupai_controller.domain.models import LinkedIssue
-from startupai_controller.validate_critical_path_promotion import CriticalPathConfig, GhQueryError
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    GhQueryError,
+)
 
 if TYPE_CHECKING:
     from startupai_controller.board_automation import BoardInfo

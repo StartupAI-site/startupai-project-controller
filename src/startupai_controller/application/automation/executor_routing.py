@@ -28,7 +28,9 @@ def protected_queue_executor_target(
         return None
     return _domain_protected_queue_executor_target(
         execution_authority_mode=automation_config.execution_authority_mode,
-        execution_authority_executors=tuple(automation_config.execution_authority_executors),
+        execution_authority_executors=tuple(
+            automation_config.execution_authority_executors
+        ),
     )
 
 
@@ -61,7 +63,9 @@ def route_protected_queue_executors(
         else:
             items = []
         for snapshot in items:
-            issue_ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
+            issue_ref = _snapshot_to_issue_ref(
+                snapshot.issue_ref, config.issue_prefixes
+            )
             if issue_ref is None:
                 decision.skipped.append((snapshot.issue_ref, "unknown-repo-prefix"))
                 continue

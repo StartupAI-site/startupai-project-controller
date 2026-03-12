@@ -118,9 +118,9 @@ def test_orchestrators_use_canonical_runtime_boundaries() -> None:
             for module in imported
             if module in SHIM_MODULES or module.startswith(ADAPTER_PREFIX)
         )
-        assert offending == [], (
-            f"{path.name} imports concrete adapter/shim modules at runtime: {offending}"
-        )
+        assert (
+            offending == []
+        ), f"{path.name} imports concrete adapter/shim modules at runtime: {offending}"
         owns_runtime_boundary = any(
             module.startswith(PORTS_PREFIX)
             or module.startswith(RUNTIME_PREFIX)
@@ -442,9 +442,9 @@ def test_automation_non_wiring_modules_have_no_default_port_or_wire_entrypoints(
 
 def test_board_automation_does_not_construct_github_port_bundles_inline() -> None:
     source = _source_text(SRC_ROOT / "board_automation.py")
-    assert "build_github_port_bundle(" not in source, (
-        "board_automation.py still constructs GitHub port bundles inline"
-    )
+    assert (
+        "build_github_port_bundle(" not in source
+    ), "board_automation.py still constructs GitHub port bundles inline"
     forbidden_defs = [
         "def _ensure_github_bundle(",
         "def _default_pr_port(",
@@ -454,16 +454,15 @@ def test_board_automation_does_not_construct_github_port_bundles_inline() -> Non
     ]
     offending = [token for token in forbidden_defs if token in source]
     assert offending == [], (
-        "board_automation.py still owns default port factory helpers: "
-        f"{offending}"
+        "board_automation.py still owns default port factory helpers: " f"{offending}"
     )
 
 
 def test_board_control_plane_tick_does_not_construct_tickdeps_inline() -> None:
     source = _source_text(SRC_ROOT / "board_control_plane.py")
-    assert "TickDeps(" not in source, (
-        "board_control_plane._tick still constructs TickDeps inline"
-    )
+    assert (
+        "TickDeps(" not in source
+    ), "board_control_plane._tick still constructs TickDeps inline"
 
 
 def test_ready_and_review_wiring_do_not_define_inline_compat_wrappers() -> None:
@@ -473,7 +472,11 @@ def test_ready_and_review_wiring_do_not_define_inline_compat_wrappers() -> None:
         APPLICATION_ROOT / "automation" / "review_wiring.py",
     ):
         source = _source_text(path)
-        hits = [token for token in ("def _wrap_", "class _DelegatingPort") if token in source]
+        hits = [
+            token
+            for token in ("def _wrap_", "class _DelegatingPort")
+            if token in source
+        ]
         if hits:
             offending[path.name] = hits
     assert offending == {}, (
@@ -484,7 +487,10 @@ def test_ready_and_review_wiring_do_not_define_inline_compat_wrappers() -> None:
 
 def test_outer_wiring_hotspots_stay_under_refined_size_ceiling() -> None:
     limits = {
-        (APPLICATION_ROOT / "automation" / "ready_wiring.py", "auto_promote_successors"): 70,
+        (
+            APPLICATION_ROOT / "automation" / "ready_wiring.py",
+            "auto_promote_successors",
+        ): 70,
         (APPLICATION_ROOT / "automation" / "review_wiring.py", "sync_review_state"): 60,
         (SRC_ROOT / "board_control_plane.py", "_tick"): 20,
     }
@@ -494,8 +500,7 @@ def test_outer_wiring_hotspots_stay_under_refined_size_ceiling() -> None:
         if length > limit:
             offending[f"{path.name}:{function_name}"] = length
     assert offending == {}, (
-        "outer wiring hotspots regressed in size/complexity: "
-        f"{offending}"
+        "outer wiring hotspots regressed in size/complexity: " f"{offending}"
     )
 
 
@@ -539,9 +544,9 @@ KNOWN_SHIM_IMPORTERS = {
 # Baselines: current line counts for each shim file.
 # When a PR shrinks a shim, update the baseline downward in the same PR.
 SHIM_SIZE_BASELINES = {
-    "board_io.py": 1463,
-    "consumer_db.py": 1309,
-    "github_http.py": 1659,
+    "board_io.py": 1532,
+    "consumer_db.py": 1335,
+    "github_http.py": 1673,
 }
 
 SHIM_FILENAMES = {m.rsplit(".", 1)[-1] + ".py" for m in SHIM_MODULES}

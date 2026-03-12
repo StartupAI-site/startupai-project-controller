@@ -180,7 +180,9 @@ def load_config(path: Path) -> CriticalPathConfig:
         edges_raw = path_payload.get("edges")
 
         if not isinstance(goal, str) or not goal.strip():
-            raise ConfigError(f"critical_paths.{path_name}.goal must be a non-empty string.")
+            raise ConfigError(
+                f"critical_paths.{path_name}.goal must be a non-empty string."
+            )
         if not isinstance(first_value_at, str):
             raise ConfigError(
                 f"critical_paths.{path_name}.first_value_at must be a string issue ref."
@@ -240,7 +242,9 @@ def load_config(path: Path) -> CriticalPathConfig:
                 f"issue_prefixes.{prefix} must be '<owner>/<repo>', got '{repo_slug}'."
             )
 
-    return CriticalPathConfig(issue_prefixes=issue_prefixes, critical_paths=critical_paths)
+    return CriticalPathConfig(
+        issue_prefixes=issue_prefixes, critical_paths=critical_paths
+    )
 
 
 def direct_predecessors(config: CriticalPathConfig, issue_ref: str) -> set[str]:

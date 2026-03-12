@@ -32,7 +32,10 @@ from startupai_controller.consumer_config import (
     DEFAULT_WORKFLOW_STATE_PATH,
 )
 from startupai_controller.consumer_workflow import default_repo_roots
-from startupai_controller.validate_critical_path_promotion import ConfigError, parse_issue_ref
+from startupai_controller.validate_critical_path_promotion import (
+    ConfigError,
+    parse_issue_ref,
+)
 
 
 def _consumer_config_from_args(args: argparse.Namespace) -> ConsumerConfig:

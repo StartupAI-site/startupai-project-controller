@@ -159,10 +159,13 @@ def run_codex_session(
         result = subprocess_runner(args, capture_output=True, text=True)
     else:
         proc_args = args[2:]
-        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout_log, tempfile.TemporaryFile(
-            mode="w+t",
-            encoding="utf-8",
-        ) as stderr_log:
+        with (
+            tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout_log,
+            tempfile.TemporaryFile(
+                mode="w+t",
+                encoding="utf-8",
+            ) as stderr_log,
+        ):
             process = popen_factory(
                 proc_args,
                 stdout=stdout_log,
@@ -206,7 +209,9 @@ def run_codex_session(
         if detail:
             logger.error("codex exec failed (exit %s): %s", result.returncode, detail)
         else:
-            logger.error("codex exec failed (exit %s) with no output", result.returncode)
+            logger.error(
+                "codex exec failed (exit %s) with no output", result.returncode
+            )
     elif not output_path.exists():
         logger.error("codex exec exited 0 but produced no output file: %s", output_path)
     return result.returncode

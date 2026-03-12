@@ -62,6 +62,7 @@ from startupai_controller.domain.scheduling_policy import (  # noqa: E402
     VALID_EXECUTORS,
     priority_rank as _priority_rank,  # re-export (compat)
 )
+
 _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS = 900
 _required_status_checks_ttl_cache: dict[
     tuple[str, str],
@@ -113,7 +114,9 @@ def enable_pull_request_automerge(
 ) -> str:
     """Compatibility wrapper for adapter-owned auto-merge enablement."""
     del confirm_retries, confirm_delay_seconds
-    from startupai_controller.adapters.github_cli import enable_pull_request_automerge as _adapter_enable_pull_request_automerge
+    from startupai_controller.adapters.github_cli import (
+        enable_pull_request_automerge as _adapter_enable_pull_request_automerge,
+    )
 
     return _adapter_enable_pull_request_automerge(
         pr_repo,
@@ -316,7 +319,9 @@ def _query_issue_comments(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[dict]:
     """Compatibility wrapper for adapter-owned issue comment queries."""
-    from startupai_controller.adapters.review_state import _query_issue_comments as _adapter_query_issue_comments
+    from startupai_controller.adapters.review_state import (
+        _query_issue_comments as _adapter_query_issue_comments,
+    )
 
     return _adapter_query_issue_comments(
         owner,
@@ -328,7 +333,9 @@ def _query_issue_comments(
 
 def _comment_activity_timestamp(comment: dict) -> datetime | None:
     """Compatibility wrapper for adapter-owned comment activity timestamps."""
-    from startupai_controller.adapters.review_state import _comment_activity_timestamp as _adapter_comment_activity_timestamp
+    from startupai_controller.adapters.review_state import (
+        _comment_activity_timestamp as _adapter_comment_activity_timestamp,
+    )
 
     return _adapter_comment_activity_timestamp(comment)
 
@@ -421,9 +428,7 @@ def _issue_ref_to_repo_parts(
     parsed = parse_issue_ref(issue_ref)
     repo_slug = config.issue_prefixes.get(parsed.prefix)
     if not repo_slug:
-        raise ConfigError(
-            f"Missing repo mapping for prefix '{parsed.prefix}'."
-        )
+        raise ConfigError(f"Missing repo mapping for prefix '{parsed.prefix}'.")
     owner, repo = repo_slug.split("/", maxsplit=1)
     return owner, repo, parsed.number
 
@@ -449,7 +454,9 @@ def _query_failed_check_runs(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str] | None:
     """Compatibility wrapper for adapter-owned failed-check queries."""
-    from startupai_controller.adapters.github_cli import _query_failed_check_runs as _adapter_query_failed_check_runs
+    from startupai_controller.adapters.github_cli import (
+        _query_failed_check_runs as _adapter_query_failed_check_runs,
+    )
 
     return _adapter_query_failed_check_runs(
         owner,
@@ -467,7 +474,9 @@ def _query_pr_head_sha(
     gh_runner: Callable[..., str] | None = None,
 ) -> str | None:
     """Compatibility wrapper for adapter-owned PR head SHA queries."""
-    from startupai_controller.adapters.github_cli import _query_pr_head_sha as _adapter_query_pr_head_sha
+    from startupai_controller.adapters.github_cli import (
+        _query_pr_head_sha as _adapter_query_pr_head_sha,
+    )
 
     return _adapter_query_pr_head_sha(
         owner,
@@ -675,7 +684,9 @@ def _query_issue_updated_at(
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime:
     """Compatibility wrapper for adapter-owned issue timestamp queries."""
-    from startupai_controller.adapters.github_cli import _query_issue_updated_at as _adapter_query_issue_updated_at
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_updated_at as _adapter_query_issue_updated_at,
+    )
 
     return _adapter_query_issue_updated_at(
         owner,
@@ -700,7 +711,9 @@ def _is_pr_open(
     gh_runner: Callable[..., str] | None = None,
 ) -> bool:
     """Compatibility wrapper for adapter-owned PR-open queries."""
-    from startupai_controller.adapters.github_cli import _is_pr_open as _adapter_is_pr_open
+    from startupai_controller.adapters.github_cli import (
+        _is_pr_open as _adapter_is_pr_open,
+    )
 
     return _adapter_is_pr_open(
         owner,
@@ -718,7 +731,9 @@ def _query_open_pr_updated_at(
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
     """Compatibility wrapper for adapter-owned PR timestamp queries."""
-    from startupai_controller.adapters.github_cli import _query_open_pr_updated_at as _adapter_query_open_pr_updated_at
+    from startupai_controller.adapters.github_cli import (
+        _query_open_pr_updated_at as _adapter_query_open_pr_updated_at,
+    )
 
     return _adapter_query_open_pr_updated_at(
         owner,
@@ -745,7 +760,9 @@ def query_open_pull_requests(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[OpenPullRequest]:
     """Compatibility wrapper for adapter-owned open-PR listing."""
-    from startupai_controller.adapters.github_cli import query_open_pull_requests as _adapter_query_open_pull_requests
+    from startupai_controller.adapters.github_cli import (
+        query_open_pull_requests as _adapter_query_open_pull_requests,
+    )
 
     return _adapter_query_open_pull_requests(
         pr_repo,
@@ -783,7 +800,9 @@ def query_pull_request_view_payload(
     gh_runner: Callable[..., str] | None = None,
 ) -> PullRequestViewPayload:
     """Compatibility wrapper for adapter-owned PR payload reads."""
-    from startupai_controller.adapters.github_cli import query_pull_request_view_payload as _adapter_query_pull_request_view_payload
+    from startupai_controller.adapters.github_cli import (
+        query_pull_request_view_payload as _adapter_query_pull_request_view_payload,
+    )
 
     return _adapter_query_pull_request_view_payload(
         pr_repo,
@@ -874,7 +893,9 @@ def _pull_request_view_payload_from_graphql_node(
     status_nodes: list[dict[str, Any]] = []
     if commit_nodes:
         latest_commit = commit_nodes[-1]
-        rollup = (((latest_commit.get("commit") or {}).get("statusCheckRollup") or {}).get("contexts") or {})
+        rollup = (
+            (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
+        ).get("contexts") or {}
         for item in rollup.get("nodes", []) or []:
             if not isinstance(item, dict):
                 continue
@@ -937,8 +958,8 @@ def _pull_request_state_probe_from_graphql_node(
     if commit_nodes:
         latest_commit = commit_nodes[-1]
         rollup = (
-            (((latest_commit.get("commit") or {}).get("statusCheckRollup") or {}).get("contexts") or {})
-        )
+            (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
+        ).get("contexts") or {}
         for item in rollup.get("nodes", []) or []:
             if not isinstance(item, dict):
                 continue
@@ -1005,7 +1026,9 @@ def query_pull_request_state_probes(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestStateProbe]:
     """Compatibility wrapper for adapter-owned PR state probes."""
-    from startupai_controller.adapters.github_cli import query_pull_request_state_probes as _adapter_query_pull_request_state_probes
+    from startupai_controller.adapters.github_cli import (
+        query_pull_request_state_probes as _adapter_query_pull_request_state_probes,
+    )
 
     return _adapter_query_pull_request_state_probes(
         pr_repo,
@@ -1021,7 +1044,9 @@ def query_pull_request_view_payloads(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestViewPayload]:
     """Compatibility wrapper for adapter-owned batched PR payload reads."""
-    from startupai_controller.adapters.github_cli import query_pull_request_view_payloads as _adapter_query_pull_request_view_payloads
+    from startupai_controller.adapters.github_cli import (
+        query_pull_request_view_payloads as _adapter_query_pull_request_view_payloads,
+    )
 
     return _adapter_query_pull_request_view_payloads(
         pr_repo,
@@ -1046,7 +1071,9 @@ def memoized_query_pull_request_view_payload(
     )
     payload = payloads.get(pr_number)
     if payload is None:
-        raise GhQueryError(f"Failed querying PR {pr_repo}#{pr_number}: pull request not found.")
+        raise GhQueryError(
+            f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
+        )
     return payload
 
 
@@ -1058,7 +1085,9 @@ def memoized_query_pull_request_view_payloads(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestViewPayload]:
     """Compatibility wrapper for adapter-owned memoized PR payload reads."""
-    from startupai_controller.adapters.github_cli import memoized_query_pull_request_view_payloads as _adapter_memoized_query_pull_request_view_payloads
+    from startupai_controller.adapters.github_cli import (
+        memoized_query_pull_request_view_payloads as _adapter_memoized_query_pull_request_view_payloads,
+    )
 
     return _adapter_memoized_query_pull_request_view_payloads(
         memo,
@@ -1076,7 +1105,9 @@ def memoized_query_pull_request_state_probes(
     gh_runner: Callable[..., str] | None = None,
 ) -> dict[int, PullRequestStateProbe]:
     """Compatibility wrapper for adapter-owned memoized PR state probes."""
-    from startupai_controller.adapters.github_cli import memoized_query_pull_request_state_probes as _adapter_memoized_query_pull_request_state_probes
+    from startupai_controller.adapters.github_cli import (
+        memoized_query_pull_request_state_probes as _adapter_memoized_query_pull_request_state_probes,
+    )
 
     return _adapter_memoized_query_pull_request_state_probes(
         memo,
@@ -1093,7 +1124,9 @@ def query_required_status_checks(
     gh_runner: Callable[..., str] | None = None,
 ) -> set[str]:
     """Compatibility wrapper for adapter-owned required-check policy reads."""
-    from startupai_controller.adapters.github_cli import query_required_status_checks as _adapter_query_required_status_checks
+    from startupai_controller.adapters.github_cli import (
+        query_required_status_checks as _adapter_query_required_status_checks,
+    )
 
     return _adapter_query_required_status_checks(
         pr_repo,
@@ -1129,7 +1162,9 @@ def memoized_query_required_status_checks(
 
 def clear_required_status_checks_cache() -> None:
     """Compatibility wrapper for adapter-owned required-check TTL cache clearing."""
-    from startupai_controller.adapters.github_cli import clear_required_status_checks_cache as _adapter_clear_required_status_checks_cache
+    from startupai_controller.adapters.github_cli import (
+        clear_required_status_checks_cache as _adapter_clear_required_status_checks_cache,
+    )
 
     _adapter_clear_required_status_checks_cache()
 
@@ -1142,7 +1177,9 @@ def query_issue_body(
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Compatibility wrapper for adapter-owned issue-body queries."""
-    from startupai_controller.adapters.github_cli import query_issue_body as _adapter_query_issue_body
+    from startupai_controller.adapters.github_cli import (
+        query_issue_body as _adapter_query_issue_body,
+    )
 
     return _adapter_query_issue_body(
         owner,
@@ -1161,7 +1198,9 @@ def memoized_query_issue_body(
     gh_runner: Callable[..., str] | None = None,
 ) -> str:
     """Compatibility wrapper for adapter-owned memoized issue-body queries."""
-    from startupai_controller.adapters.github_cli import memoized_query_issue_body as _adapter_memoized_query_issue_body
+    from startupai_controller.adapters.github_cli import (
+        memoized_query_issue_body as _adapter_memoized_query_issue_body,
+    )
 
     return _adapter_memoized_query_issue_body(
         memo,
@@ -1182,7 +1221,9 @@ def _query_latest_wip_activity_timestamp(
     gh_runner: Callable[..., str] | None = None,
 ) -> datetime | None:
     """Compatibility wrapper for adapter-owned WIP activity queries."""
-    from startupai_controller.adapters.github_cli import _query_latest_wip_activity_timestamp as _adapter_query_latest_wip_activity_timestamp
+    from startupai_controller.adapters.github_cli import (
+        _query_latest_wip_activity_timestamp as _adapter_query_latest_wip_activity_timestamp,
+    )
 
     return _adapter_query_latest_wip_activity_timestamp(
         issue_ref,
@@ -1207,7 +1248,9 @@ def _query_issue_assignees(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
     """Compatibility wrapper for adapter-owned assignee reads."""
-    from startupai_controller.adapters.github_cli import _query_issue_assignees as _adapter_query_issue_assignees
+    from startupai_controller.adapters.github_cli import (
+        _query_issue_assignees as _adapter_query_issue_assignees,
+    )
 
     return _adapter_query_issue_assignees(
         owner,
@@ -1226,7 +1269,9 @@ def _set_issue_assignees(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Compatibility wrapper for adapter-owned assignee writes."""
-    from startupai_controller.adapters.github_cli import _set_issue_assignees as _adapter_set_issue_assignees
+    from startupai_controller.adapters.github_cli import (
+        _set_issue_assignees as _adapter_set_issue_assignees,
+    )
 
     _adapter_set_issue_assignees(
         owner,
@@ -1248,7 +1293,9 @@ def _list_project_items_by_status(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
     """Compatibility wrapper for adapter-owned project status queries."""
-    from startupai_controller.adapters.review_state import _list_project_items_by_status as _adapter_list_project_items_by_status
+    from startupai_controller.adapters.review_state import (
+        _list_project_items_by_status as _adapter_list_project_items_by_status,
+    )
 
     return _adapter_list_project_items_by_status(
         status,
@@ -1265,7 +1312,9 @@ def build_cycle_board_snapshot(
     gh_runner: Callable[..., str] | None = None,
 ) -> CycleBoardSnapshot:
     """Compatibility wrapper for adapter-owned cycle board snapshots."""
-    from startupai_controller.adapters.review_state import build_cycle_board_snapshot as _adapter_build_cycle_board_snapshot
+    from startupai_controller.adapters.review_state import (
+        build_cycle_board_snapshot as _adapter_build_cycle_board_snapshot,
+    )
 
     return _adapter_build_cycle_board_snapshot(
         project_owner,
@@ -1276,7 +1325,9 @@ def build_cycle_board_snapshot(
 
 def clear_cycle_board_snapshot_cache() -> None:
     """Compatibility wrapper for adapter-owned snapshot cache clearing."""
-    from startupai_controller.adapters.review_state import clear_cycle_board_snapshot_cache as _adapter_clear_cycle_board_snapshot_cache
+    from startupai_controller.adapters.review_state import (
+        clear_cycle_board_snapshot_cache as _adapter_clear_cycle_board_snapshot_cache,
+    )
 
     _adapter_clear_cycle_board_snapshot_cache()
 
@@ -1289,7 +1340,9 @@ def _list_project_items(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[_ProjectItemSnapshot]:
     """Compatibility wrapper for adapter-owned rich project item reads."""
-    from startupai_controller.adapters.github_cli import _list_project_items as _adapter_list_project_items
+    from startupai_controller.adapters.github_cli import (
+        _list_project_items as _adapter_list_project_items,
+    )
 
     return _adapter_list_project_items(
         project_owner,
@@ -1308,7 +1361,9 @@ def query_closing_issues(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[LinkedIssue]:
     """Compatibility wrapper for adapter-owned closing-issue resolution."""
-    from startupai_controller.adapters.github_cli import query_closing_issues as _adapter_query_closing_issues
+    from startupai_controller.adapters.github_cli import (
+        query_closing_issues as _adapter_query_closing_issues,
+    )
 
     return _adapter_query_closing_issues(
         pr_owner,
@@ -1343,7 +1398,9 @@ def query_latest_codex_verdict(
     gh_runner: Callable[..., str] | None = None,
 ) -> CodexReviewVerdict | None:
     """Compatibility wrapper for adapter-owned codex verdict lookup."""
-    from startupai_controller.adapters.github_cli import query_latest_codex_verdict as _adapter_query_latest_codex_verdict
+    from startupai_controller.adapters.github_cli import (
+        query_latest_codex_verdict as _adapter_query_latest_codex_verdict,
+    )
 
     return _adapter_query_latest_codex_verdict(
         pr_repo,
@@ -1359,7 +1416,9 @@ def latest_codex_verdict_from_payload(
     trusted_actors: set[str] | None = None,
 ) -> CodexReviewVerdict | None:
     """Compatibility wrapper for adapter-owned verdict parsing."""
-    from startupai_controller.adapters.github_cli import latest_codex_verdict_from_payload as _adapter_latest_codex_verdict_from_payload
+    from startupai_controller.adapters.github_cli import (
+        latest_codex_verdict_from_payload as _adapter_latest_codex_verdict_from_payload,
+    )
 
     return _adapter_latest_codex_verdict_from_payload(
         payload,
@@ -1384,7 +1443,9 @@ def build_pr_gate_status_from_payload(
     required: set[str],
 ) -> PrGateStatus:
     """Compatibility wrapper for adapter-owned PR gate evaluation."""
-    from startupai_controller.adapters.github_cli import build_pr_gate_status_from_payload as _adapter_build_pr_gate_status_from_payload
+    from startupai_controller.adapters.github_cli import (
+        build_pr_gate_status_from_payload as _adapter_build_pr_gate_status_from_payload,
+    )
 
     return _adapter_build_pr_gate_status_from_payload(
         payload,
@@ -1419,7 +1480,11 @@ def review_state_digest_from_probe(probe: PullRequestStateProbe) -> str:
             name = str(check.get("context") or "")
             timestamp = str(check.get("startedAt") or "")
             state = str(check.get("state") or "").lower()
-            result = "pass" if state == "success" else ("fail" if state in {"error", "failure"} else "pending")
+            result = (
+                "pass"
+                if state == "success"
+                else ("fail" if state in {"error", "failure"} else "pending")
+            )
         else:
             continue
         if not name:
@@ -1439,7 +1504,9 @@ def review_state_digest_from_probe(probe: PullRequestStateProbe) -> str:
         "updated_at": probe.updated_at,
         "latest_comment_at": probe.latest_comment_at,
         "latest_review_at": probe.latest_review_at,
-        "checks": sorted((name, result) for name, (_ts, result) in latest_checks.items()),
+        "checks": sorted(
+            (name, result) for name, (_ts, result) in latest_checks.items()
+        ),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -1459,5 +1526,7 @@ def _query_pr_gate_status(
     """Compatibility wrapper for adapter-owned PR gate-status reads."""
     from startupai_controller.adapters.github_cli import GitHubCliAdapter
 
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner or _run_gh)
+    adapter = GitHubCliAdapter(
+        project_owner="", project_number=0, gh_runner=gh_runner or _run_gh
+    )
     return adapter.get_gate_status(pr_repo, pr_number)

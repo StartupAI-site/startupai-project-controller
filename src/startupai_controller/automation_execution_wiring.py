@@ -11,9 +11,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
-    from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
-    from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
+    from startupai_controller.ports.board_mutations import (
+        BoardMutationPort as _BoardMutationPort,
+    )
+    from startupai_controller.ports.pull_requests import (
+        PullRequestPort as _PullRequestPort,
+    )
+    from startupai_controller.ports.review_state import (
+        ReviewStatePort as _ReviewStatePort,
+    )
 else:
     _BoardMutationPort = None
     _PullRequestPort = None
@@ -62,7 +68,6 @@ from startupai_controller.automation_port_helpers import (
     _default_pr_port,
     _default_review_state_port,
 )
-
 
 # ---------------------------------------------------------------------------
 # Lazy import to break circular dependency with board_automation

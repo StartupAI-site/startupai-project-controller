@@ -19,7 +19,6 @@ from startupai_controller.application.consumer.preflight import (
 )
 from startupai_controller.domain.models import IssueSnapshot
 
-
 # ---------------------------------------------------------------------------
 # Wiring deps
 # ---------------------------------------------------------------------------

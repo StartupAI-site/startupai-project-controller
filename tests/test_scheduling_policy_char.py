@@ -20,7 +20,6 @@ from startupai_controller.domain.scheduling_policy import (
     has_structured_acceptance_criteria,
 )
 
-
 # ---------------------------------------------------------------------------
 # _wip_limit_for_lane
 # ---------------------------------------------------------------------------
@@ -63,7 +62,10 @@ class TestProtectedQueueExecutorTarget:
         assert _protected_queue_executor_target("single_machine", ("codex",)) == "codex"
 
     def test_single_machine_multiple_executors(self) -> None:
-        assert _protected_queue_executor_target("single_machine", ("codex", "claude")) is None
+        assert (
+            _protected_queue_executor_target("single_machine", ("codex", "claude"))
+            is None
+        )
 
     def test_single_machine_invalid_executor(self) -> None:
         assert _protected_queue_executor_target("single_machine", ("bogus",)) is None
@@ -72,7 +74,10 @@ class TestProtectedQueueExecutorTarget:
         assert _protected_queue_executor_target("single_machine", ()) is None
 
     def test_executor_whitespace_stripped(self) -> None:
-        assert _protected_queue_executor_target("single_machine", ("  codex  ",)) == "codex"
+        assert (
+            _protected_queue_executor_target("single_machine", ("  codex  ",))
+            == "codex"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -208,18 +213,30 @@ class TestAdmissionCandidateRank:
     """Characterize _admission_candidate_rank."""
 
     def test_graph_member_higher_priority(self) -> None:
-        graph = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=True, issue_number=1)
-        non_graph = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=False, issue_number=1)
+        graph = _admission_candidate_rank(
+            "crew#1", priority="P0", is_graph_member=True, issue_number=1
+        )
+        non_graph = _admission_candidate_rank(
+            "crew#1", priority="P0", is_graph_member=False, issue_number=1
+        )
         assert graph < non_graph
 
     def test_higher_priority_ranks_first(self) -> None:
-        p0 = _admission_candidate_rank("crew#1", priority="P0", is_graph_member=True, issue_number=1)
-        p2 = _admission_candidate_rank("crew#1", priority="P2", is_graph_member=True, issue_number=1)
+        p0 = _admission_candidate_rank(
+            "crew#1", priority="P0", is_graph_member=True, issue_number=1
+        )
+        p2 = _admission_candidate_rank(
+            "crew#1", priority="P2", is_graph_member=True, issue_number=1
+        )
         assert p0 < p2
 
     def test_lower_issue_number_first(self) -> None:
-        low = _admission_candidate_rank("crew#1", priority="P1", is_graph_member=True, issue_number=1)
-        high = _admission_candidate_rank("crew#99", priority="P1", is_graph_member=True, issue_number=99)
+        low = _admission_candidate_rank(
+            "crew#1", priority="P1", is_graph_member=True, issue_number=1
+        )
+        high = _admission_candidate_rank(
+            "crew#99", priority="P1", is_graph_member=True, issue_number=99
+        )
         assert low < high
 
 

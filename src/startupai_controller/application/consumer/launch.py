@@ -19,8 +19,12 @@ from startupai_controller.ports.worktrees import WorktreePort
 class ResolveLaunchDeps:
     """Injected seams for launch-context resolution."""
 
-    select_launch_candidate_for_cycle: Callable[..., tuple[Any | None, CycleResult | None]]
-    prepare_selected_launch_candidate: Callable[..., tuple[Any | None, CycleResult | None]]
+    select_launch_candidate_for_cycle: Callable[
+        ..., tuple[Any | None, CycleResult | None]
+    ]
+    prepare_selected_launch_candidate: Callable[
+        ..., tuple[Any | None, CycleResult | None]
+    ]
 
 
 @dataclass(frozen=True)

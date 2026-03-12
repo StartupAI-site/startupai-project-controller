@@ -14,7 +14,9 @@ import startupai_controller.github_http as github_http
 
 
 class _FakeResponse:
-    def __init__(self, payload: object, *, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, payload: object, *, headers: dict[str, str] | None = None
+    ) -> None:
         if isinstance(payload, str):
             raw = payload
         else:
@@ -226,11 +228,24 @@ def test_pr_view_returns_normalized_comments_and_reviews(
             return _FakeResponse({"number": 42, "html_url": "https://example/pr/42"})
         if "/issues/42/comments" in request.full_url:
             return _FakeResponse(
-                [{"body": "comment body", "created_at": "2026-03-08T20:00:00Z", "user": {"login": "codex"}}]
+                [
+                    {
+                        "body": "comment body",
+                        "created_at": "2026-03-08T20:00:00Z",
+                        "user": {"login": "codex"},
+                    }
+                ]
             )
         if "/pulls/42/reviews" in request.full_url:
             return _FakeResponse(
-                [{"body": "review body", "submitted_at": "2026-03-08T20:05:00Z", "state": "COMMENTED", "user": {"login": "reviewer"}}]
+                [
+                    {
+                        "body": "review body",
+                        "submitted_at": "2026-03-08T20:05:00Z",
+                        "state": "COMMENTED",
+                        "user": {"login": "reviewer"},
+                    }
+                ]
             )
         raise AssertionError(f"unexpected url: {request.full_url}")
 

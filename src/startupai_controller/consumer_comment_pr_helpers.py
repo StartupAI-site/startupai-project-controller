@@ -57,11 +57,14 @@ def list_open_pr_candidates(
     gh_runner: Callable[..., str] | None = None,
 ) -> list[Any]:
     """Return open PRs that reference an issue number in the repository."""
-    port = pr_port or build_github_port_bundle(
-        "",
-        0,
-        gh_runner=gh_runner,
-    ).pull_requests
+    port = (
+        pr_port
+        or build_github_port_bundle(
+            "",
+            0,
+            gh_runner=gh_runner,
+        ).pull_requests
+    )
     payload = port.list_open_prs_for_issue(f"{owner}/{repo}", issue_number)
     matches: list[Any] = []
     for item in payload:
@@ -152,8 +155,7 @@ def post_result_comment(
         lines.append(f"\nPR: {pr_url}")
     if resolution is not None:
         lines.append(
-            "\nResolution: "
-            f"{resolution['kind']} ({resolution['equivalence_claim']})"
+            "\nResolution: " f"{resolution['kind']} ({resolution['equivalence_claim']})"
         )
     if duration is not None:
         lines.append(f"\nDuration: {duration:.0f}s")

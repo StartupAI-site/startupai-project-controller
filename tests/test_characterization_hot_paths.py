@@ -49,7 +49,6 @@ from startupai_controller.validate_critical_path_promotion import (
     load_config,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
@@ -237,7 +236,11 @@ class TestDeferredActionReplayLoop:
         db.queue_deferred_action(
             "crew#84",
             "set_status",
-            {"issue_ref": "crew#84", "to_status": "Ready", "from_statuses": ["In Progress"]},
+            {
+                "issue_ref": "crew#84",
+                "to_status": "Ready",
+                "from_statuses": ["In Progress"],
+            },
         )
         db.queue_deferred_action(
             "crew#84",
@@ -257,7 +260,11 @@ class TestDeferredActionReplayLoop:
         db.queue_deferred_action(
             "crew#84",
             "rerun_check",
-            {"pr_repo": "StartupAI-site/startupai-crew", "check_name": "ci", "run_id": 42},
+            {
+                "pr_repo": "StartupAI-site/startupai-crew",
+                "check_name": "ci",
+                "run_id": 42,
+            },
         )
         db.queue_deferred_action(
             "crew#84",
@@ -273,7 +280,9 @@ class TestDeferredActionReplayLoop:
             dispatched["set_status"].append(issue_ref)
 
         board_port = SimpleNamespace(
-            post_issue_comment=lambda repo, number, body: dispatched["post_issue_comment"].append(repo),
+            post_issue_comment=lambda repo, number, body: dispatched[
+                "post_issue_comment"
+            ].append(repo),
             close_issue=lambda repo, number: dispatched["close_issue"].append(repo),
             set_issue_status=track_status,
         )
@@ -281,7 +290,9 @@ class TestDeferredActionReplayLoop:
             rerun_failed_check=lambda repo, check_name, run_id: (
                 dispatched["rerun_check"].append(repo) or True
             ),
-            enable_automerge=lambda repo, pr_number: dispatched["enable_automerge"].append(repo),
+            enable_automerge=lambda repo, pr_number: dispatched[
+                "enable_automerge"
+            ].append(repo),
         )
 
         def fake_comment_checker(*args, **kwargs):
@@ -305,9 +316,7 @@ class TestDeferredActionReplayLoop:
         for action_type, calls in dispatched.items():
             assert len(calls) >= 1, f"{action_type} was not dispatched"
 
-    def test_stop_on_first_failure_raises_gh_query_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_stop_on_first_failure_raises_gh_query_error(self, tmp_path: Path) -> None:
         """First handler failure stops replay and raises GhQueryError."""
         config = _make_consumer_config(tmp_path)
         db = _make_db(tmp_path)
@@ -517,33 +526,44 @@ class TestDeferredActionQueueContract:
         t0 = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
 
         db.queue_deferred_action(
-            "crew#84", "close_issue", {"issue_ref": "crew#84"}, now=t0,
+            "crew#84",
+            "close_issue",
+            {"issue_ref": "crew#84"},
+            now=t0,
         )
         db.queue_deferred_action(
-            "app#149", "close_issue", {"issue_ref": "app#149"},
+            "app#149",
+            "close_issue",
+            {"issue_ref": "app#149"},
             now=t0 + timedelta(seconds=1),
         )
         db.queue_deferred_action(
-            "crew#85", "close_issue", {"issue_ref": "crew#85"},
+            "crew#85",
+            "close_issue",
+            {"issue_ref": "crew#85"},
             now=t0 + timedelta(seconds=2),
         )
 
         actions = db.list_deferred_actions()
         assert [a.payload["issue_ref"] for a in actions] == [
-            "crew#84", "app#149", "crew#85",
+            "crew#84",
+            "app#149",
+            "crew#85",
         ]
 
-    def test_delete_deferred_action_removes_single_row(
-        self, tmp_path: Path
-    ) -> None:
+    def test_delete_deferred_action_removes_single_row(self, tmp_path: Path) -> None:
         """delete_deferred_action removes only the target row."""
         db = _make_db(tmp_path)
 
         id1 = db.queue_deferred_action(
-            "crew#84", "close_issue", {"issue_ref": "crew#84"},
+            "crew#84",
+            "close_issue",
+            {"issue_ref": "crew#84"},
         )
         id2 = db.queue_deferred_action(
-            "app#149", "close_issue", {"issue_ref": "app#149"},
+            "app#149",
+            "close_issue",
+            {"issue_ref": "app#149"},
         )
 
         db.delete_deferred_action(id1)
@@ -675,9 +695,7 @@ class TestInterruptedSessionRecovery:
         assert requeued == ["crew#84"]
         assert transitioned == []
 
-    def test_new_work_with_conflict_classification_blocks(
-        self, tmp_path: Path
-    ) -> None:
+    def test_new_work_with_conflict_classification_blocks(self, tmp_path: Path) -> None:
         """new_work with conflict classification → Blocked."""
         config = _make_consumer_config(tmp_path)
         db = _make_db(tmp_path)
@@ -726,18 +744,23 @@ class TestInterruptedSessionRecovery:
 
         from unittest.mock import patch
 
-        with patch(
-            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
-            side_effect=fake_return_ready,
-        ), patch(
-            "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
-            side_effect=fake_transition_review,
-        ), patch(
-            "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
-            side_effect=fake_set_blocked,
-        ), patch(
-            "startupai_controller.consumer_codex_comment_wiring.classify_open_pr_candidates",
-            return_value=("conflict", None, "branch mismatch"),
+        with (
+            patch(
+                "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
+                side_effect=fake_return_ready,
+            ),
+            patch(
+                "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
+                side_effect=fake_transition_review,
+            ),
+            patch(
+                "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
+                side_effect=fake_set_blocked,
+            ),
+            patch(
+                "startupai_controller.consumer_codex_comment_wiring.classify_open_pr_candidates",
+                return_value=("conflict", None, "branch mismatch"),
+            ),
         ):
             recovered = _recover_interrupted_sessions(
                 config,
@@ -753,9 +776,7 @@ class TestInterruptedSessionRecovery:
         assert requeued == []
         assert transitioned == []
 
-    def test_db_contract_leases_cleared_sessions_aborted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_db_contract_leases_cleared_sessions_aborted(self, tmp_path: Path) -> None:
         """recover_interrupted_leases clears leases and aborts active sessions."""
         db = _make_db(tmp_path)
         t0 = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
@@ -859,9 +880,7 @@ class TestMultiWorkerDispatch:
         result = _next_available_slots(db, 3)
         assert result == [1, 3]
 
-    def test_next_available_slots_respects_reserved_set(
-        self, tmp_path: Path
-    ) -> None:
+    def test_next_available_slots_respects_reserved_set(self, tmp_path: Path) -> None:
         """Reserved slots (from in-flight futures) are also excluded."""
         db = _make_db(tmp_path)
         result = _next_available_slots(db, 3, reserved_slots={1, 3})
@@ -888,7 +907,9 @@ class TestMultiWorkerDispatch:
             global_limit=3,
             effective_interval=1,
             dispatchable_repo_prefixes=("crew",),
-            board_snapshot=SimpleNamespace(items=(), items_with_status=lambda *a, **k: ()),
+            board_snapshot=SimpleNamespace(
+                items=(), items_with_status=lambda *a, **k: ()
+            ),
             github_memo=SimpleNamespace(),
             admission_summary={},
             timings_ms={},
@@ -915,8 +936,16 @@ class TestMultiWorkerDispatch:
                 f.set_result(result)
                 return f
 
-        def fake_worker(config, *, target_issue, slot_id, prepared,
-                        launch_context=None, dry_run=False, di_kwargs=None):
+        def fake_worker(
+            config,
+            *,
+            target_issue,
+            slot_id,
+            prepared,
+            launch_context=None,
+            dry_run=False,
+            di_kwargs=None,
+        ):
             launched.append((target_issue, slot_id))
             return CycleResult(action="claimed", issue_ref=target_issue)
 
@@ -963,7 +992,9 @@ class TestMultiWorkerDispatch:
             global_limit=3,
             effective_interval=1,
             dispatchable_repo_prefixes=("crew",),
-            board_snapshot=SimpleNamespace(items=(), items_with_status=lambda *a, **k: ()),
+            board_snapshot=SimpleNamespace(
+                items=(), items_with_status=lambda *a, **k: ()
+            ),
             github_memo=SimpleNamespace(),
             admission_summary={},
             timings_ms={},
@@ -990,8 +1021,16 @@ class TestMultiWorkerDispatch:
                 f.set_result(result)
                 return f
 
-        def fake_worker(config, *, target_issue, slot_id, prepared,
-                        launch_context=None, dry_run=False, di_kwargs=None):
+        def fake_worker(
+            config,
+            *,
+            target_issue,
+            slot_id,
+            prepared,
+            launch_context=None,
+            dry_run=False,
+            di_kwargs=None,
+        ):
             launched.append(target_issue)
             return CycleResult(action="claimed", issue_ref=target_issue)
 
@@ -1034,7 +1073,9 @@ class TestMultiWorkerDispatch:
             global_limit=3,
             effective_interval=1,
             dispatchable_repo_prefixes=("crew",),
-            board_snapshot=SimpleNamespace(items=(), items_with_status=lambda *a, **k: ()),
+            board_snapshot=SimpleNamespace(
+                items=(), items_with_status=lambda *a, **k: ()
+            ),
             github_memo=SimpleNamespace(),
             admission_summary={},
             timings_ms={},
@@ -1086,11 +1127,13 @@ class TestMultiWorkerDispatch:
 
         active_tasks = {
             done_future: ActiveWorkerTask(
-                issue_ref="crew#84", slot_id=1,
+                issue_ref="crew#84",
+                slot_id=1,
                 launched_at=datetime.now(timezone.utc).isoformat(),
             ),
             pending_future: ActiveWorkerTask(
-                issue_ref="crew#85", slot_id=2,
+                issue_ref="crew#85",
+                slot_id=2,
                 launched_at=datetime.now(timezone.utc).isoformat(),
             ),
         }
@@ -1110,7 +1153,8 @@ class TestMultiWorkerDispatch:
 
         active_tasks = {
             failed_future: ActiveWorkerTask(
-                issue_ref="crew#84", slot_id=1,
+                issue_ref="crew#84",
+                slot_id=1,
                 launched_at=datetime.now(timezone.utc).isoformat(),
             ),
         }
@@ -1157,7 +1201,8 @@ class TestMultiWorkerDispatch:
                 return _ImmediateFuture(fn(*args, **kwargs))
 
         monkeypatch.setattr(
-            "startupai_controller.consumer_runtime_wiring.ThreadPoolExecutor", _FakeExecutor
+            "startupai_controller.consumer_runtime_wiring.ThreadPoolExecutor",
+            _FakeExecutor,
         )
 
         # First cycle: return one candidate (active → sleep 1s)
@@ -1166,7 +1211,9 @@ class TestMultiWorkerDispatch:
 
         def select_candidate(*args, **kwargs):
             nonlocal cycle_count
-            return next(candidate_sequences[min(cycle_count, len(candidate_sequences) - 1)])
+            return next(
+                candidate_sequences[min(cycle_count, len(candidate_sequences) - 1)]
+            )
 
         monkeypatch.setattr(
             "startupai_controller.consumer_selection_retry_wiring.select_candidate_for_cycle_from_shell",
@@ -1189,7 +1236,9 @@ class TestMultiWorkerDispatch:
             global_limit=2,
             effective_interval=1,
             dispatchable_repo_prefixes=("crew",),
-            board_snapshot=SimpleNamespace(items=(), items_with_status=lambda *a, **k: ()),
+            board_snapshot=SimpleNamespace(
+                items=(), items_with_status=lambda *a, **k: ()
+            ),
             github_memo=SimpleNamespace(),
             admission_summary={},
             timings_ms={},
@@ -1212,8 +1261,16 @@ class TestMultiWorkerDispatch:
             lambda *args, **kwargs: False,
         )
 
-        def fake_worker(config, *, target_issue, slot_id, prepared,
-                        launch_context=None, dry_run=False, di_kwargs=None):
+        def fake_worker(
+            config,
+            *,
+            target_issue,
+            slot_id,
+            prepared,
+            launch_context=None,
+            dry_run=False,
+            di_kwargs=None,
+        ):
             return CycleResult(action="claimed", issue_ref=target_issue)
 
         monkeypatch.setattr(

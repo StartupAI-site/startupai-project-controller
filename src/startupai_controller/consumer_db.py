@@ -23,7 +23,14 @@ DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "startupai" / "consumer.db"
 
 # Valid session statuses (state machine: pending -> running -> success|failed|timeout|aborted)
 # "aborted" = lease conflict or pre-execution cancellation; never counts as a retry.
-VALID_SESSION_STATUSES = {"pending", "running", "success", "failed", "timeout", "aborted"}
+VALID_SESSION_STATUSES = {
+    "pending",
+    "running",
+    "success",
+    "failed",
+    "timeout",
+    "aborted",
+}
 VALID_SESSION_KINDS = {"new_work", "repair"}
 
 
@@ -258,7 +265,9 @@ class ConsumerDB:
         ConsumerDB._ensure_column(conn, "sessions", "phase", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "provenance_id", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "failure_reason", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "session_kind", "TEXT NOT NULL DEFAULT 'new_work'")
+        ConsumerDB._ensure_column(
+            conn, "sessions", "session_kind", "TEXT NOT NULL DEFAULT 'new_work'"
+        )
         ConsumerDB._ensure_column(conn, "sessions", "repair_pr_url", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "branch_reconcile_state", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "branch_reconcile_error", "TEXT")
@@ -268,7 +277,9 @@ class ConsumerDB:
         ConsumerDB._ensure_column(conn, "sessions", "resolution_action", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "done_reason", "TEXT")
         ConsumerDB._ensure_column(conn, "review_queue", "last_state_digest", "TEXT")
-        ConsumerDB._ensure_column(conn, "review_queue", "blocked_streak", "INTEGER NOT NULL DEFAULT 0")
+        ConsumerDB._ensure_column(
+            conn, "review_queue", "blocked_streak", "INTEGER NOT NULL DEFAULT 0"
+        )
         ConsumerDB._ensure_column(conn, "review_queue", "blocked_class", "TEXT")
 
     @staticmethod
@@ -280,7 +291,9 @@ class ConsumerDB:
     ) -> None:
         columns = {
             row["name"]
-            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()  # noqa: S608
+            for row in conn.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()  # noqa: S608
         }
         if column in columns:
             return
@@ -541,7 +554,10 @@ class ConsumerDB:
                 f"Invalid session status: {fields['status']}. "
                 f"Must be one of {VALID_SESSION_STATUSES}"
             )
-        if "session_kind" in fields and fields["session_kind"] not in VALID_SESSION_KINDS:
+        if (
+            "session_kind" in fields
+            and fields["session_kind"] not in VALID_SESSION_KINDS
+        ):
             raise ValueError(
                 f"Invalid session kind: {fields['session_kind']}. "
                 f"Must be one of {VALID_SESSION_KINDS}"
@@ -1178,9 +1194,13 @@ class ConsumerDB:
             MetricEvent(
                 id=int(row["id"]),
                 event_type=str(row["event_type"]),
-                issue_ref=str(row["issue_ref"]) if row["issue_ref"] is not None else None,
+                issue_ref=(
+                    str(row["issue_ref"]) if row["issue_ref"] is not None else None
+                ),
                 payload_json=(
-                    str(row["payload_json"]) if row["payload_json"] is not None else None
+                    str(row["payload_json"])
+                    if row["payload_json"] is not None
+                    else None
                 ),
                 created_at=str(row["created_at"]),
             )
@@ -1199,9 +1219,13 @@ class ConsumerDB:
             MetricEvent(
                 id=int(row["id"]),
                 event_type=str(row["event_type"]),
-                issue_ref=str(row["issue_ref"]) if row["issue_ref"] is not None else None,
+                issue_ref=(
+                    str(row["issue_ref"]) if row["issue_ref"] is not None else None
+                ),
                 payload_json=(
-                    str(row["payload_json"]) if row["payload_json"] is not None else None
+                    str(row["payload_json"])
+                    if row["payload_json"] is not None
+                    else None
                 ),
                 created_at=str(row["created_at"]),
             )
@@ -1302,7 +1326,9 @@ class ConsumerDB:
                 if row["last_state_digest"] is not None
                 else None
             ),
-            blocked_streak=int(row["blocked_streak"]) if row["blocked_streak"] is not None else 0,
+            blocked_streak=(
+                int(row["blocked_streak"]) if row["blocked_streak"] is not None else 0
+            ),
             blocked_class=(
                 str(row["blocked_class"]) if row["blocked_class"] is not None else None
             ),

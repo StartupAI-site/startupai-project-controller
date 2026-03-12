@@ -31,13 +31,16 @@ def select_best_candidate(
         repo_prefixes = (this_repo_prefix,)
     effective_review_state_port = review_state_port
     if ready_items is None or effective_review_state_port is None:
-        effective_review_state_port = effective_review_state_port or build_github_port_bundle(
-            project_owner,
-            project_number,
-            config=config,
-            github_memo=github_memo,
-            gh_runner=gh_runner,
-        ).review_state
+        effective_review_state_port = (
+            effective_review_state_port
+            or build_github_port_bundle(
+                project_owner,
+                project_number,
+                config=config,
+                github_memo=github_memo,
+                gh_runner=gh_runner,
+            ).review_state
+        )
     ready_items = ready_items or tuple(
         effective_review_state_port.list_issues_by_status("Ready")
     )
@@ -102,5 +105,7 @@ def list_project_items_by_status(
             project_number,
             config=config,
             gh_runner=gh_runner,
-        ).review_state.build_board_snapshot().items_with_status(status)
+        )
+        .review_state.build_board_snapshot()
+        .items_with_status(status)
     )

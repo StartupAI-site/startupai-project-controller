@@ -200,6 +200,7 @@ def _daemon_runtime_wiring_deps(
     comment_poster: Callable[..., None] | None = None,
 ) -> DaemonRuntimeWiringDeps:
     """Build daemon-loop wiring deps without reaching back into compat."""
+
     def _run_worker_cycle(*args: Any, **kwargs: Any) -> Any:
         run_worker_cycle_fn = _support_wiring.run_worker_cycle
         try:
@@ -207,7 +208,8 @@ def _daemon_runtime_wiring_deps(
         except (TypeError, ValueError):
             parameters = ()
         supports_runtime = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "runtime"
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            or parameter.name == "runtime"
             for parameter in parameters
         )
         if not supports_runtime and "runtime" in kwargs:
@@ -224,7 +226,9 @@ def _daemon_runtime_wiring_deps(
         runtime: DaemonRuntime | None = None,
     ) -> Any:
         gh_runner_fn = (
-            runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None
+            runtime.gh_runner.run_gh
+            if runtime and runtime.gh_runner is not None
+            else None
         )
         github_bundle = build_github_port_bundle(
             config.project_owner,
@@ -256,7 +260,9 @@ def _daemon_runtime_wiring_deps(
         excluded_issue_refs: set[str] | None = None,
     ) -> str | None:
         gh_runner_fn = (
-            runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None
+            runtime.gh_runner.run_gh
+            if runtime and runtime.gh_runner is not None
+            else None
         )
         review_state_port = build_github_port_bundle(
             config.project_owner,
@@ -292,7 +298,11 @@ def _daemon_runtime_wiring_deps(
             db=db,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
-            gh_runner=runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None,
+            gh_runner=(
+                runtime.gh_runner.run_gh
+                if runtime and runtime.gh_runner is not None
+                else None
+            ),
         )
 
     def _recover_interrupted_sessions(
@@ -306,7 +316,11 @@ def _daemon_runtime_wiring_deps(
             config,
             db,
             automation_config=automation_config,
-            gh_runner=runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None,
+            gh_runner=(
+                runtime.gh_runner.run_gh
+                if runtime and runtime.gh_runner is not None
+                else None
+            ),
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
         )
@@ -323,8 +337,16 @@ def _daemon_runtime_wiring_deps(
             config,
             db,
             dry_run=dry_run,
-            gh_runner=runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None,
-            subprocess_runner=runtime.process_runner.run if runtime and runtime.process_runner is not None else None,
+            gh_runner=(
+                runtime.gh_runner.run_gh
+                if runtime and runtime.gh_runner is not None
+                else None
+            ),
+            subprocess_runner=(
+                runtime.process_runner.run
+                if runtime and runtime.process_runner is not None
+                else None
+            ),
             file_reader=runtime.file_reader if runtime is not None else None,
             status_resolver=status_resolver,
             board_info_resolver=board_info_resolver,
@@ -433,7 +455,9 @@ def run_one_cycle(
     try:
         if skip_control_plane:
             if prepared is None:
-                raise ValueError("prepared cycle context is required when skip_control_plane=True")
+                raise ValueError(
+                    "prepared cycle context is required when skip_control_plane=True"
+                )
         else:
             prepared = prepare_cycle(
                 config,

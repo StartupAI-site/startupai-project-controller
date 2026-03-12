@@ -7,7 +7,9 @@ class BoardAutomationReadyFlowAdapter:
     """Expose the existing ready-flow behavior behind a typed port."""
 
     def route_protected_queue_executors(self, *args, **kwargs):
-        from startupai_controller.board_automation import route_protected_queue_executors
+        from startupai_controller.board_automation import (
+            route_protected_queue_executors,
+        )
 
         return route_protected_queue_executors(*args, **kwargs)
 

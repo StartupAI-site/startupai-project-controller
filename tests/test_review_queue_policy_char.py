@@ -40,7 +40,6 @@ from startupai_controller.domain.review_queue_policy import (
     review_queue_retry_seconds_for_skipped_reason as _review_queue_retry_seconds_for_skipped_reason,
 )
 
-
 # ---------------------------------------------------------------------------
 # _blocker_class
 # ---------------------------------------------------------------------------
@@ -108,22 +107,39 @@ class TestEscalationCeiling:
     """Characterize _escalation_ceiling_for_blocker_class."""
 
     def test_transient(self) -> None:
-        assert _escalation_ceiling_for_blocker_class("transient") == ESCALATION_CEILING_TRANSIENT
+        assert (
+            _escalation_ceiling_for_blocker_class("transient")
+            == ESCALATION_CEILING_TRANSIENT
+        )
 
     def test_failed_checks(self) -> None:
-        assert _escalation_ceiling_for_blocker_class("failed_checks") == ESCALATION_CEILING_FAILED
+        assert (
+            _escalation_ceiling_for_blocker_class("failed_checks")
+            == ESCALATION_CEILING_FAILED
+        )
 
     def test_stable(self) -> None:
-        assert _escalation_ceiling_for_blocker_class("stable") == ESCALATION_CEILING_STABLE
+        assert (
+            _escalation_ceiling_for_blocker_class("stable") == ESCALATION_CEILING_STABLE
+        )
 
     def test_automerge(self) -> None:
-        assert _escalation_ceiling_for_blocker_class("automerge") == ESCALATION_CEILING_AUTOMERGE
+        assert (
+            _escalation_ceiling_for_blocker_class("automerge")
+            == ESCALATION_CEILING_AUTOMERGE
+        )
 
     def test_default(self) -> None:
-        assert _escalation_ceiling_for_blocker_class("default") == ESCALATION_CEILING_DEFAULT
+        assert (
+            _escalation_ceiling_for_blocker_class("default")
+            == ESCALATION_CEILING_DEFAULT
+        )
 
     def test_unknown_fallback(self) -> None:
-        assert _escalation_ceiling_for_blocker_class("unknown_class") == ESCALATION_CEILING_DEFAULT
+        assert (
+            _escalation_ceiling_for_blocker_class("unknown_class")
+            == ESCALATION_CEILING_DEFAULT
+        )
 
     def test_empty_string_fallback(self) -> None:
         assert _escalation_ceiling_for_blocker_class("") == ESCALATION_CEILING_DEFAULT
@@ -139,7 +155,9 @@ class TestRetrySecondsForBlockedReason:
 
     def test_automerge_pending_verification(self) -> None:
         assert (
-            _review_queue_retry_seconds_for_blocked_reason("Auto-merge pending verification")
+            _review_queue_retry_seconds_for_blocked_reason(
+                "Auto-merge pending verification"
+            )
             == REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
         )
 
@@ -181,7 +199,9 @@ class TestRetrySecondsForBlockedReason:
 
     def test_missing_codex_verdict_marker(self) -> None:
         assert (
-            _review_queue_retry_seconds_for_blocked_reason("Missing codex verdict marker")
+            _review_queue_retry_seconds_for_blocked_reason(
+                "Missing codex verdict marker"
+            )
             == REVIEW_QUEUE_STABLE_BLOCKED_RETRY_SECONDS
         )
 
@@ -252,7 +272,10 @@ class TestRetrySecondsForResult:
             blocked_reason=None,
             skipped_reason=None,
         )
-        assert _review_queue_retry_seconds_for_result(result) == REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
+        assert (
+            _review_queue_retry_seconds_for_result(result)
+            == REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
+        )
 
     def test_rerun_checks(self) -> None:
         result = SimpleNamespace(
@@ -261,7 +284,10 @@ class TestRetrySecondsForResult:
             blocked_reason=None,
             skipped_reason=None,
         )
-        assert _review_queue_retry_seconds_for_result(result) == REVIEW_QUEUE_PENDING_RETRY_SECONDS
+        assert (
+            _review_queue_retry_seconds_for_result(result)
+            == REVIEW_QUEUE_PENDING_RETRY_SECONDS
+        )
 
     def test_blocked_reason(self) -> None:
         result = SimpleNamespace(
@@ -270,7 +296,10 @@ class TestRetrySecondsForResult:
             blocked_reason="required checks failed",
             skipped_reason=None,
         )
-        assert _review_queue_retry_seconds_for_result(result) == REVIEW_QUEUE_FAILED_RETRY_SECONDS
+        assert (
+            _review_queue_retry_seconds_for_result(result)
+            == REVIEW_QUEUE_FAILED_RETRY_SECONDS
+        )
 
     def test_skipped_reason(self) -> None:
         result = SimpleNamespace(
@@ -279,7 +308,10 @@ class TestRetrySecondsForResult:
             blocked_reason=None,
             skipped_reason="auto-merge-already-enabled",
         )
-        assert _review_queue_retry_seconds_for_result(result) == REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
+        assert (
+            _review_queue_retry_seconds_for_result(result)
+            == REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
+        )
 
     def test_no_flags_returns_default(self) -> None:
         result = SimpleNamespace(
@@ -288,7 +320,10 @@ class TestRetrySecondsForResult:
             blocked_reason=None,
             skipped_reason=None,
         )
-        assert _review_queue_retry_seconds_for_result(result) == DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
+        assert (
+            _review_queue_retry_seconds_for_result(result)
+            == DEFAULT_REVIEW_QUEUE_RETRY_SECONDS
+        )
 
     def test_auto_merge_takes_precedence_over_rerun(self) -> None:
         result = SimpleNamespace(
@@ -297,7 +332,10 @@ class TestRetrySecondsForResult:
             blocked_reason="something",
             skipped_reason=None,
         )
-        assert _review_queue_retry_seconds_for_result(result) == REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
+        assert (
+            _review_queue_retry_seconds_for_result(result)
+            == REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +406,9 @@ class TestEffectiveRetryBackoff:
     """
 
     def test_config_defaults(self) -> None:
-        base, max_s = _effective_retry_backoff(None, None, config_base=30, config_max=300)
+        base, max_s = _effective_retry_backoff(
+            None, None, config_base=30, config_max=300
+        )
         assert base == 30
         assert max_s == 300
 
@@ -378,7 +418,9 @@ class TestEffectiveRetryBackoff:
         assert max_s == 120
 
     def test_workflow_none_fields_fallback_to_config(self) -> None:
-        base, max_s = _effective_retry_backoff(None, None, config_base=30, config_max=300)
+        base, max_s = _effective_retry_backoff(
+            None, None, config_base=30, config_max=300
+        )
         assert base == 30
         assert max_s == 300
 
@@ -388,7 +430,9 @@ class TestEffectiveRetryBackoff:
         assert max_s == 10
 
     def test_max_at_least_base(self) -> None:
-        base, max_s = _effective_retry_backoff(None, None, config_base=100, config_max=10)
+        base, max_s = _effective_retry_backoff(
+            None, None, config_base=100, config_max=10
+        )
         assert base == 100
         assert max_s >= base
 
@@ -496,7 +540,9 @@ class TestBlockedStreakNeedsEscalation:
 
     def test_first_block_no_escalation(self) -> None:
         new_class, new_streak, needs = _blocked_streak_needs_escalation(
-            "required checks pending", 0, None,
+            "required checks pending",
+            0,
+            None,
         )
         assert new_class == "transient"
         assert new_streak == 1
@@ -504,13 +550,17 @@ class TestBlockedStreakNeedsEscalation:
 
     def test_same_class_increments_streak(self) -> None:
         _, streak, _ = _blocked_streak_needs_escalation(
-            "required checks pending", 5, "transient",
+            "required checks pending",
+            5,
+            "transient",
         )
         assert streak == 6
 
     def test_different_class_resets_streak(self) -> None:
         new_class, streak, _ = _blocked_streak_needs_escalation(
-            "required checks failed", 5, "transient",
+            "required checks failed",
+            5,
+            "transient",
         )
         assert new_class == "failed_checks"
         assert streak == 1
@@ -533,6 +583,8 @@ class TestBlockedStreakNeedsEscalation:
 
     def test_below_ceiling_no_escalation(self) -> None:
         _, _, needs = _blocked_streak_needs_escalation(
-            "required checks failed", 1, "failed_checks",
+            "required checks failed",
+            1,
+            "failed_checks",
         )
         assert needs is False

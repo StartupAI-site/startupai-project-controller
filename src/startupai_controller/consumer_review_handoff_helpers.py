@@ -162,8 +162,12 @@ def run_immediate_review_handoff(
             ),
             auto_merge_enabled=((pr_ref,) if result.auto_merge_enabled else ()),
             requeued=result.requeued_refs,
-            blocked=((f"{pr_ref}:{result.blocked_reason}",) if result.blocked_reason else ()),
-            skipped=((f"{pr_ref}:{result.skipped_reason}",) if result.skipped_reason else ()),
+            blocked=(
+                (f"{pr_ref}:{result.blocked_reason}",) if result.blocked_reason else ()
+            ),
+            skipped=(
+                (f"{pr_ref}:{result.skipped_reason}",) if result.skipped_reason else ()
+            ),
         )
     except Exception as err:
         log_warning(queue_entry.issue_ref, str(err), err)

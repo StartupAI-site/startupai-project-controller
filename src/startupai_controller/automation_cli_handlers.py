@@ -25,7 +25,6 @@ from startupai_controller.runtime.wiring import build_github_port_bundle
 from startupai_controller.automation_port_helpers import _default_review_state_port
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
-
 # ---------------------------------------------------------------------------
 # Lazy import to break circular dependency with board_automation
 # ---------------------------------------------------------------------------
@@ -57,9 +56,7 @@ def _workflow_mutations_enabled(
 # ---------------------------------------------------------------------------
 
 
-def _cmd_mark_done(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_mark_done(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for mark-done subcommand."""
     core = _core()
     if "/" not in args.pr_repo:
@@ -71,9 +68,7 @@ def _cmd_mark_done(
 
     pr_owner, pr_repo = args.pr_repo.split("/", maxsplit=1)
 
-    issues = core.query_closing_issues(
-        pr_owner, pr_repo, args.pr_number, config
-    )
+    issues = core.query_closing_issues(pr_owner, pr_repo, args.pr_number, config)
 
     if not issues:
         print("No linked issues found for this PR.")
@@ -88,7 +83,7 @@ def _cmd_mark_done(
         issues, config, args.project_owner, args.project_number
     )
 
-    print(f'DONE_ISSUES={json.dumps(marked)}')
+    print(f"DONE_ISSUES={json.dumps(marked)}")
 
     if not marked:
         print("No issues needed status change.")
@@ -97,9 +92,7 @@ def _cmd_mark_done(
     return 0
 
 
-def _cmd_auto_promote(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_auto_promote(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for auto-promote subcommand."""
     core = _core()
     automation_config = load_automation_config(Path(args.automation_config))
@@ -129,9 +122,7 @@ def _cmd_auto_promote(
     return 0
 
 
-def _cmd_admit_backlog(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_admit_backlog(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for autonomous backlog admission."""
     core = _core()
     automation_config = load_automation_config(Path(args.automation_config))
@@ -159,9 +150,7 @@ def _cmd_admit_backlog(
             if item["issue_ref"] == args.issue
         ]
         payload["top_skipped"] = [
-            item
-            for item in payload["top_skipped"]
-            if item["issue_ref"] == args.issue
+            item for item in payload["top_skipped"] if item["issue_ref"] == args.issue
         ]
     if args.limit is not None:
         payload["top_candidates"] = payload["top_candidates"][: args.limit]
@@ -186,9 +175,7 @@ def _cmd_admit_backlog(
     return 0 if not decision.partial_failure else 4
 
 
-def _cmd_propagate_blocker(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_propagate_blocker(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for propagate-blocker subcommand."""
     core = _core()
     commented = core.propagate_blocker(
@@ -237,9 +224,7 @@ def _cmd_reconcile_handoffs(
     return 0
 
 
-def _cmd_schedule_ready(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_schedule_ready(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for schedule-ready subcommand."""
     core = _core()
     try:
@@ -300,9 +285,7 @@ def _cmd_schedule_ready(
     return 0
 
 
-def _cmd_claim_ready(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_claim_ready(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for claim-ready subcommand."""
     core = _core()
     try:
@@ -336,9 +319,7 @@ def _cmd_claim_ready(
     return 2
 
 
-def _cmd_dispatch_agent(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_dispatch_agent(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for dispatch-agent subcommand."""
     core = _core()
     try:
@@ -348,7 +329,9 @@ def _cmd_dispatch_agent(
         return 3
 
     if not _workflow_mutations_enabled(automation_config, "ready-scheduler"):
-        print("Dispatch skipped: local consumer owns execution claims in single_machine mode.")
+        print(
+            "Dispatch skipped: local consumer owns execution claims in single_machine mode."
+        )
         return 0
 
     result = core.dispatch_agent(
@@ -371,9 +354,7 @@ def _cmd_dispatch_agent(
     return 0
 
 
-def _cmd_rebalance_wip(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_rebalance_wip(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for rebalance-wip subcommand."""
     core = _core()
     try:
@@ -432,9 +413,7 @@ def _cmd_enforce_ready_deps(
     return 0
 
 
-def _cmd_audit_in_progress(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_audit_in_progress(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for audit-in-progress subcommand."""
     core = _core()
     try:
@@ -465,9 +444,7 @@ def _cmd_audit_in_progress(
     return 0
 
 
-def _cmd_sync_review_state(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_sync_review_state(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for sync-review-state subcommand."""
     core = _core()
     try:
@@ -599,9 +576,7 @@ def _cmd_sync_review_state(
     return fatal_code
 
 
-def _cmd_codex_review_gate(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_codex_review_gate(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for codex-review-gate subcommand."""
     core = _core()
     try:
@@ -640,9 +615,7 @@ def _cmd_codex_review_gate(
     return code
 
 
-def _cmd_automerge_review(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_automerge_review(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for automerge-review subcommand."""
     core = _core()
     try:
@@ -673,9 +646,7 @@ def _cmd_automerge_review(
     return code
 
 
-def _cmd_review_rescue(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_review_rescue(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for review-rescue subcommand."""
     core = _core()
     try:
@@ -717,9 +688,7 @@ def _cmd_review_rescue(
     return 0
 
 
-def _cmd_review_rescue_all(
-    args: argparse.Namespace, config: CriticalPathConfig
-) -> int:
+def _cmd_review_rescue_all(args: argparse.Namespace, config: CriticalPathConfig) -> int:
     """Handler for review-rescue-all subcommand."""
     core = _core()
     try:
@@ -804,10 +773,7 @@ def _cmd_enforce_execution_policy(
     if decision.blocked:
         print(f"Blocked: {sorted(decision.blocked)}")
     if decision.copilot_unassigned:
-        print(
-            "Removed Copilot assignee: "
-            f"{sorted(decision.copilot_unassigned)}"
-        )
+        print("Removed Copilot assignee: " f"{sorted(decision.copilot_unassigned)}")
     if decision.pr_closed:
         print(f"Closed PR: {args.pr_repo}#{args.pr_number}")
     else:
@@ -837,8 +803,7 @@ def _cmd_classify_parallelism(
 
     print(f'PARALLEL_READY={json.dumps(sorted(snapshot["parallel"]))}')
     print(
-        "WAITING_DEPENDENCY="
-        f'{json.dumps(sorted(snapshot["waiting_on_dependency"]))}'
+        "WAITING_DEPENDENCY=" f'{json.dumps(sorted(snapshot["waiting_on_dependency"]))}'
     )
     print(f'BLOCKED_POLICY={json.dumps(sorted(snapshot["blocked_policy"]))}')
 

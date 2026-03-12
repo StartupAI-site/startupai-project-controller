@@ -12,16 +12,27 @@ import startupai_controller.consumer_comment_pr_wiring as _comment_pr_wiring
 import startupai_controller.consumer_review_queue_helpers as _review_queue_helpers
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.consumer_workflow import render_workflow_prompt
-from startupai_controller.domain.launch_policy import classify_pr_candidates as _classify_pr_candidates_pure
+from startupai_controller.domain.launch_policy import (
+    classify_pr_candidates as _classify_pr_candidates_pure,
+)
 from startupai_controller.domain.models import OpenPullRequestMatch
-from startupai_controller.domain.repair_policy import marker_for as _marker_for, parse_pr_url as _parse_pr_url
+from startupai_controller.domain.repair_policy import (
+    marker_for as _marker_for,
+    parse_pr_url as _parse_pr_url,
+)
 from startupai_controller.domain.resolution_policy import normalize_resolution_payload
 from startupai_controller.domain.verdict_policy import (
     verdict_comment_body as _verdict_comment_body,
     verdict_marker_text as _verdict_marker_text,
 )
-from startupai_controller.runtime.wiring import build_github_port_bundle, run_runtime_gh as _run_gh
-from startupai_controller.validate_critical_path_promotion import GhQueryError, parse_issue_ref
+from startupai_controller.runtime.wiring import (
+    build_github_port_bundle,
+    run_runtime_gh as _run_gh,
+)
+from startupai_controller.validate_critical_path_promotion import (
+    GhQueryError,
+    parse_issue_ref,
+)
 
 logger = logging.getLogger("board-consumer")
 

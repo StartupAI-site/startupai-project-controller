@@ -9,7 +9,9 @@ from typing import Any, Callable
 import startupai_controller.consumer_automation_bridge as _automation_bridge
 from startupai_controller import consumer_board_state_helpers as _board_state_helpers
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
-from startupai_controller import consumer_deferred_action_helpers as _deferred_action_helpers
+from startupai_controller import (
+    consumer_deferred_action_helpers as _deferred_action_helpers,
+)
 from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.board_graph import _resolve_issue_coordinates
@@ -73,13 +75,16 @@ def _drain_review_queue(
             ).review_state.build_board_snapshot()
         )
 
-    effective_board_snapshot = board_snapshot or build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=critical_path_config,
-        github_memo=memo,
-        gh_runner=gh_runner,
-    ).review_state.build_board_snapshot()
+    effective_board_snapshot = (
+        board_snapshot
+        or build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=critical_path_config,
+            github_memo=memo,
+            gh_runner=gh_runner,
+        ).review_state.build_board_snapshot()
+    )
 
     store = session_store or build_session_store(db)
     return _review_queue_helpers.drain_review_queue(

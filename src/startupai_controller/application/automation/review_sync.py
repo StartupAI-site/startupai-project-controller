@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
-from startupai_controller.application.automation.ready_claim import _transition_issue_status
+from startupai_controller.application.automation.ready_claim import (
+    _transition_issue_status,
+)
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
@@ -135,13 +137,13 @@ def sync_review_state(
     governed_single_machine_issue = (
         automation_config is not None
         and automation_config.execution_authority_mode == "single_machine"
-        and parse_issue_ref(issue_ref).prefix in automation_config.execution_authority_repos
+        and parse_issue_ref(issue_ref).prefix
+        in automation_config.execution_authority_repos
     )
 
     if event_kind == "pr_open":
         return 2, (
-            f"{issue_ref}: no board change on PR open — "
-            "waiting for review signal"
+            f"{issue_ref}: no board change on PR open — " "waiting for review signal"
         )
 
     if event_kind in {"pr_ready_for_review", "review_submitted"}:
@@ -149,7 +151,11 @@ def sync_review_state(
             issue_ref,
             {"In Progress"},
             "Review",
-            "PR ready for review" if event_kind == "pr_ready_for_review" else "review submitted",
+            (
+                "PR ready for review"
+                if event_kind == "pr_ready_for_review"
+                else "review submitted"
+            ),
             config,
             project_owner,
             project_number,
@@ -160,7 +166,10 @@ def sync_review_state(
 
     if event_kind == "changes_requested":
         if governed_single_machine_issue:
-            return 2, f"{issue_ref}: governed local repair transition deferred to consumer"
+            return (
+                2,
+                f"{issue_ref}: governed local repair transition deferred to consumer",
+            )
         return _sync_review_transition(
             issue_ref,
             {"Review"},

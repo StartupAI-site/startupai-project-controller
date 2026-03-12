@@ -16,7 +16,6 @@ from startupai_controller.consumer_workflow import (
 )
 from startupai_controller.runtime.wiring import clear_github_runtime_caches
 
-
 CONTROL_KEY_DEGRADED = "degraded"
 CONTROL_KEY_DEGRADED_REASON = "degraded_reason"
 CONTROL_KEY_LAST_SUCCESSFUL_BOARD_SYNC_AT = "last_successful_board_sync_at"
@@ -102,13 +101,9 @@ def _apply_automation_runtime(
     config.issue_context_cache_ttl_seconds = (
         automation_config.issue_context_cache_ttl_seconds
     )
-    config.launch_hydration_concurrency = (
-        automation_config.launch_hydration_concurrency
-    )
+    config.launch_hydration_concurrency = automation_config.launch_hydration_concurrency
     config.rate_limit_pause_enabled = automation_config.rate_limit_pause_enabled
-    config.rate_limit_cooldown_seconds = (
-        automation_config.rate_limit_cooldown_seconds
-    )
+    config.rate_limit_cooldown_seconds = automation_config.rate_limit_cooldown_seconds
     config.worktree_reuse_enabled = automation_config.worktree_reuse_enabled
     config.slo_metrics_enabled = automation_config.slo_metrics_enabled
 

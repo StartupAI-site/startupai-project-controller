@@ -142,7 +142,9 @@ def _record_request(url: str) -> None:
 def classify_failure_kind(detail: str, *, status_code: int | None = None) -> str:
     """Normalize GitHub API failure text into a stable reason code."""
     text = detail.strip().lower()
-    if status_code == 429 or any(marker in text for marker in _RATE_LIMIT_ERROR_MARKERS):
+    if status_code == 429 or any(
+        marker in text for marker in _RATE_LIMIT_ERROR_MARKERS
+    ):
         return "rate_limit"
     if any(marker in text for marker in _NETWORK_ERROR_MARKERS):
         return "network"
@@ -566,7 +568,9 @@ def _run_api_command(
     if parsed is None:
         return None
 
-    command_excerpt = "api graphql" if parsed.endpoint == "graphql" else f"api {parsed.endpoint}"
+    command_excerpt = (
+        "api graphql" if parsed.endpoint == "graphql" else f"api {parsed.endpoint}"
+    )
 
     if parsed.endpoint == "graphql":
         variables = dict(parsed.fields)
@@ -654,9 +658,7 @@ def _apply_output_filter(payload: Any, expr: str) -> str:
         if not isinstance(payload, list):
             return ""
         return "\n".join(
-            str(item.get("body") or "")
-            for item in payload
-            if isinstance(item, dict)
+            str(item.get("body") or "") for item in payload if isinstance(item, dict)
         )
 
     if expr == ".body":
@@ -710,11 +712,12 @@ def _apply_output_filter(payload: Any, expr: str) -> str:
             }
         )
 
-    if expr == "{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}":
+    if (
+        expr
+        == "{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}"
+    ):
         if not isinstance(payload, dict):
-            return json.dumps(
-                {"title": "", "body": "", "labels": [], "updated_at": ""}
-            )
+            return json.dumps({"title": "", "body": "", "labels": [], "updated_at": ""})
         labels = payload.get("labels") or []
         return json.dumps(
             {
@@ -953,7 +956,12 @@ def _run_pr_create_command(
     retry_delays: Sequence[float],
 ) -> str | None:
     command = _parse_pr_create_or_edit_command(args, expect_selector=False)
-    if command is None or command.head is None or command.title is None or command.body is None:
+    if (
+        command is None
+        or command.head is None
+        or command.title is None
+        or command.body is None
+    ):
         return None
 
     owner, repo = _split_repo(command.repo)
@@ -1261,7 +1269,9 @@ def _status_check_rollup(
     )
 
     rollup: list[dict[str, Any]] = []
-    for run in checks_payload.get("check_runs", []) if isinstance(checks_payload, dict) else []:
+    for run in (
+        checks_payload.get("check_runs", []) if isinstance(checks_payload, dict) else []
+    ):
         if not isinstance(run, dict):
             continue
         rollup.append(
@@ -1277,7 +1287,11 @@ def _status_check_rollup(
             }
         )
 
-    for status in statuses_payload.get("statuses", []) if isinstance(statuses_payload, dict) else []:
+    for status in (
+        statuses_payload.get("statuses", [])
+        if isinstance(statuses_payload, dict)
+        else []
+    ):
         if not isinstance(status, dict):
             continue
         rollup.append(

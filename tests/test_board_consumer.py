@@ -131,7 +131,11 @@ from startupai_controller.domain.review_queue_policy import (
 from startupai_controller.consumer_comment_pr_wiring import (
     extract_acceptance_criteria as _extract_acceptance_criteria,
 )
-from startupai_controller.board_io import CycleBoardSnapshot, GhCommandError, _ProjectItemSnapshot
+from startupai_controller.board_io import (
+    CycleBoardSnapshot,
+    GhCommandError,
+    _ProjectItemSnapshot,
+)
 from startupai_controller.consumer_db import ConsumerDB
 from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import (
@@ -139,7 +143,6 @@ from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
     load_config,
 )
-
 
 # -- Fixtures -----------------------------------------------------------------
 
@@ -238,7 +241,9 @@ def _make_consumer_config(tmp_path: Path) -> ConsumerConfig:
     }
     for root in repo_roots.values():
         root.mkdir(parents=True, exist_ok=True)
-    _write_repo_workflow(repo_roots["crew"], validation_cmd="uv run pytest tests/contracts -q")
+    _write_repo_workflow(
+        repo_roots["crew"], validation_cmd="uv run pytest tests/contracts -q"
+    )
     _write_repo_workflow(repo_roots["app"], validation_cmd="pnpm type-check")
     _write_repo_workflow(repo_roots["site"], validation_cmd="pnpm build")
     return ConsumerConfig(
@@ -306,19 +311,15 @@ def _project_field_response(
 ) -> str:
     field: dict[str, object] = {"id": f"{(field_name or 'status').upper()}_FIELD"}
     if single_select_options is not None:
-        field["options"] = [{"id": option_id, "name": name} for option_id, name in single_select_options]
+        field["options"] = [
+            {"id": option_id, "name": name} for option_id, name in single_select_options
+        ]
     return json.dumps({"data": {"node": {"field": field}}})
 
 
 def _project_field_mutation_response() -> str:
     return json.dumps(
-        {
-            "data": {
-                "updateProjectV2ItemFieldValue": {
-                    "projectV2Item": {"id": "ITEM"}
-                }
-            }
-        }
+        {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM"}}}}
     )
 
 
@@ -357,7 +358,9 @@ def _make_prepared_cycle_context(
         dispatchable_repo_prefixes=("crew",),
         effective_interval=effective_interval,
         global_limit=global_limit,
-        board_snapshot=SimpleNamespace(items=(), items_with_status=lambda *_a, **_k: ()),
+        board_snapshot=SimpleNamespace(
+            items=(), items_with_status=lambda *_a, **_k: ()
+        ),
         github_memo=SimpleNamespace(),
         ready_flow_port=SimpleNamespace(),
         admission_summary={},
@@ -413,6 +416,7 @@ class TestSelectBestCandidate:
             _make_node(number=85, executor="codex", priority="P2"),
             _make_node(number=84, executor="codex", priority="P0"),
         ]
+
         # All predecessors done
         def status_resolver(ref, *a, **kw):
             return "Done"
@@ -439,7 +443,11 @@ class TestSelectBestCandidate:
             return _project_items_response(nodes)
 
         result = _select_best_candidate(
-            config, "StartupAI-site", 1, executor="codex", gh_runner=gh_runner,
+            config,
+            "StartupAI-site",
+            1,
+            executor="codex",
+            gh_runner=gh_runner,
         )
         assert result is None
 
@@ -473,7 +481,10 @@ class TestSelectBestCandidate:
             return _empty_response()
 
         result = _select_best_candidate(
-            config, "StartupAI-site", 1, gh_runner=gh_runner,
+            config,
+            "StartupAI-site",
+            1,
+            gh_runner=gh_runner,
         )
         assert result is None
 
@@ -505,7 +516,9 @@ class TestFetchIssueContext:
             captured.append(list(args))
             return json.dumps({"title": "T", "body": "", "labels": []})
 
-        _fetch_issue_context("StartupAI-site", "startupai-crew", 84, gh_runner=gh_runner)
+        _fetch_issue_context(
+            "StartupAI-site", "startupai-crew", 84, gh_runner=gh_runner
+        )
         assert "repos/StartupAI-site/startupai-crew/issues/84" in captured[0][1]
 
 
@@ -676,7 +689,9 @@ class TestCreateWorktree:
                     stdout="Updating 123..456\n",
                     stderr="",
                 )
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr=""
+            )
 
         monkeypatch.setattr(
             "startupai_controller.adapters.local_process.os.path.isdir",
@@ -788,11 +803,17 @@ class TestPrepareWorktree:
                     stderr="",
                 )
             if args_tuple[:4] == ("git", "-C", str(worktree_path), "status"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if args_tuple[:4] == ("git", "-C", str(worktree_path), "fetch"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if args_tuple[:4] == ("git", "-C", str(worktree_path), "rev-list"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="0 0\n", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="0 0\n", stderr=""
+                )
             raise AssertionError(f"unexpected command: {args}")
 
         path, branch = _prepare_worktree(
@@ -818,17 +839,37 @@ class TestRepairBranchReconcile:
             calls.append(list(args))
             args_tuple = tuple(args[3:])
             if args_tuple == ("checkout", "feat/84-test"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if args_tuple == ("status", "--porcelain"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if args_tuple == ("fetch", "origin", "main", "feat/84-test"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
-            if args_tuple == ("rev-list", "--left-right", "--count", "HEAD...origin/feat/84-test"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="0 2\n", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
+            if args_tuple == (
+                "rev-list",
+                "--left-right",
+                "--count",
+                "HEAD...origin/feat/84-test",
+            ):
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="0 2\n", stderr=""
+                )
             if args_tuple == ("merge", "--ff-only", "origin/feat/84-test"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="Updating\n", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="Updating\n", stderr=""
+                )
             if args_tuple == ("merge", "--no-edit", "origin/main"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="Merge made by the 'ort' strategy.\n", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="Merge made by the 'ort' strategy.\n",
+                    stderr="",
+                )
             raise AssertionError(f"unexpected git call: {args}")
 
         result = _reconcile_repair_branch(
@@ -847,20 +888,35 @@ class TestRepairBranchReconcile:
             "origin/feat/84-test",
         ] in calls
 
-    def test_conflicted_main_merge_returns_conflicted_state(self, tmp_path: Path) -> None:
+    def test_conflicted_main_merge_returns_conflicted_state(
+        self, tmp_path: Path
+    ) -> None:
         worktree = tmp_path / "wt"
         worktree.mkdir()
 
         def subprocess_runner(args, **kw):
             args_tuple = tuple(args[3:])
             if args_tuple == ("checkout", "feat/84-test"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if args_tuple == ("status", "--porcelain"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
             if args_tuple == ("fetch", "origin", "main", "feat/84-test"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
-            if args_tuple == ("rev-list", "--left-right", "--count", "HEAD...origin/feat/84-test"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="0 0\n", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="", stderr=""
+                )
+            if args_tuple == (
+                "rev-list",
+                "--left-right",
+                "--count",
+                "HEAD...origin/feat/84-test",
+            ):
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="0 0\n", stderr=""
+                )
             if args_tuple == ("merge", "--no-edit", "origin/main"):
                 return subprocess.CompletedProcess(
                     args=args,
@@ -869,7 +925,9 @@ class TestRepairBranchReconcile:
                     stderr="CONFLICT (content): Merge conflict in file.py\n",
                 )
             if args_tuple == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
-                return subprocess.CompletedProcess(args=args, returncode=0, stdout="abc123\n", stderr="")
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="abc123\n", stderr=""
+                )
             raise AssertionError(f"unexpected git call: {args}")
 
         result = _reconcile_repair_branch(
@@ -1058,7 +1116,11 @@ class TestRunCodexSession:
             )
 
         code = _run_codex_session(
-            "/tmp/wt", "p", Path("s.json"), Path("o.json"), 30,
+            "/tmp/wt",
+            "p",
+            Path("s.json"),
+            Path("o.json"),
+            30,
             subprocess_runner=subprocess_runner,
         )
         assert code == 1
@@ -1180,7 +1242,13 @@ class TestCreateOrUpdatePr:
             return "https://github.com/O/R/pull/1"
 
         url = _create_or_update_pr(
-            "/tmp/wt", "feat/84-test", 84, "O", "R", "Title", config,
+            "/tmp/wt",
+            "feat/84-test",
+            84,
+            "O",
+            "R",
+            "Title",
+            config,
             gh_runner=gh_runner,
         )
         assert "pull/1" in url
@@ -1189,13 +1257,21 @@ class TestCreateOrUpdatePr:
         config = _make_consumer_config(tmp_path)
 
         def gh_runner(args, **kw):
-            return json.dumps({
-                "url": "https://github.com/O/R/pull/5",
-                "body": "Closes #84\nLead Agent: codex\nHandoff: none",
-            })
+            return json.dumps(
+                {
+                    "url": "https://github.com/O/R/pull/5",
+                    "body": "Closes #84\nLead Agent: codex\nHandoff: none",
+                }
+            )
 
         url = _create_or_update_pr(
-            "/tmp/wt", "feat/84-test", 84, "O", "R", "Title", config,
+            "/tmp/wt",
+            "feat/84-test",
+            84,
+            "O",
+            "R",
+            "Title",
+            config,
             gh_runner=gh_runner,
         )
         assert "pull/5" in url
@@ -1208,15 +1284,23 @@ class TestCreateOrUpdatePr:
             calls.append(list(args))
             if len(calls) == 1:
                 # pr view
-                return json.dumps({
-                    "url": "https://github.com/O/R/pull/5",
-                    "body": "Some text without required fields",
-                })
+                return json.dumps(
+                    {
+                        "url": "https://github.com/O/R/pull/5",
+                        "body": "Some text without required fields",
+                    }
+                )
             # pr edit
             return ""
 
         url = _create_or_update_pr(
-            "/tmp/wt", "feat/84-test", 84, "O", "R", "Title", config,
+            "/tmp/wt",
+            "feat/84-test",
+            84,
+            "O",
+            "R",
+            "Title",
+            config,
             gh_runner=gh_runner,
         )
         assert "pull/5" in url
@@ -1241,7 +1325,7 @@ class TestEscalateToClaude:
 
         def gh_runner(args, **kw):
             args_str = " ".join(str(part) for part in args)
-            if "field(name: \"Status\")" in args_str:
+            if 'field(name: "Status")' in args_str:
                 return _project_field_response(
                     field_name="Status",
                     single_select_options=[("O_BLOCKED", "Blocked")],
@@ -1283,7 +1367,7 @@ class TestEscalateToClaude:
         def gh_runner(args, **kw):
             gh_calls.append(list(args))
             args_str = " ".join(str(part) for part in args)
-            if "field(name: \"Status\")" in args_str:
+            if 'field(name: "Status")' in args_str:
                 return _project_field_response(
                     field_name="Status",
                     single_select_options=[("O_BLOCKED", "Blocked")],
@@ -1335,15 +1419,21 @@ class TestEscalateToClaude:
                     field_name="Status",
                     single_select_options=[("O_BLOCKED", "Blocked")],
                 )
-                if "field(name: \"Status\")" in " ".join(str(part) for part in args)
-                else _project_field_response(field_name="Blocked Reason")
-                if "fieldName=Blocked Reason" in " ".join(str(part) for part in args)
-                else _project_field_response(
-                    field_name="Handoff To",
-                    single_select_options=[("O_CLAUDE", "claude")],
+                if 'field(name: "Status")' in " ".join(str(part) for part in args)
+                else (
+                    _project_field_response(field_name="Blocked Reason")
+                    if "fieldName=Blocked Reason"
+                    in " ".join(str(part) for part in args)
+                    else (
+                        _project_field_response(
+                            field_name="Handoff To",
+                            single_select_options=[("O_CLAUDE", "claude")],
+                        )
+                        if "fieldName=Handoff To"
+                        in " ".join(str(part) for part in args)
+                        else _project_field_mutation_response()
+                    )
                 )
-                if "fieldName=Handoff To" in " ".join(str(part) for part in args)
-                else _project_field_mutation_response()
             ),
         )
 
@@ -1370,7 +1460,9 @@ class TestTransitionIssueToReview:
                                     "items": {
                                         "nodes": [
                                             {
-                                                "fieldValueByName": {"name": "In Progress"},
+                                                "fieldValueByName": {
+                                                    "name": "In Progress"
+                                                },
                                                 "id": "ITEM1",
                                                 "content": {
                                                     "number": 84,
@@ -1402,7 +1494,15 @@ class TestTransitionIssueToReview:
                     }
                 )
             if "updateProjectV2ItemFieldValue" in args_str:
-                return json.dumps({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM1"}}}})
+                return json.dumps(
+                    {
+                        "data": {
+                            "updateProjectV2ItemFieldValue": {
+                                "projectV2Item": {"id": "ITEM1"}
+                            }
+                        }
+                    }
+                )
             return json.dumps({})
 
         _transition_issue_to_review(
@@ -1418,7 +1518,9 @@ class TestTransitionIssueToReview:
             gh_runner=gh_runner,
         )
 
-        assert any("updateProjectV2ItemFieldValue" in " ".join(call) for call in gh_calls)
+        assert any(
+            "updateProjectV2ItemFieldValue" in " ".join(call) for call in gh_calls
+        )
 
 
 # -- _post_pr_codex_verdict tests ---------------------------------------------
@@ -1501,7 +1603,9 @@ class TestBackfillReviewVerdicts:
         assert posted[0][2] == 148
         assert "codex-review: pass" in posted[0][3]
 
-    def test_skips_existing_marker_and_non_review_sessions(self, tmp_path: Path) -> None:
+    def test_skips_existing_marker_and_non_review_sessions(
+        self, tmp_path: Path
+    ) -> None:
         db = _make_db(tmp_path)
         existing_marker = db.create_session("crew#84", "codex")
         db.update_session(
@@ -1597,7 +1701,11 @@ class TestRunOneCycle:
         """Build common DI callables for run_one_cycle tests."""
         config = _make_consumer_config(tmp_path)
         db = _make_db(tmp_path)
-        nodes = ready_nodes if ready_nodes is not None else [_make_node(number=84, executor="codex")]
+        nodes = (
+            ready_nodes
+            if ready_nodes is not None
+            else [_make_node(number=84, executor="codex")]
+        )
         if codex_result is None:
             codex_result = _codex_result_json()
 
@@ -1620,10 +1728,13 @@ class TestRunOneCycle:
             call_log["gh"].append(list(args))
             args_str = " ".join(str(a) for a in args)
 
-            if "field(name: \"Status\")" in args_str:
+            if 'field(name: "Status")' in args_str:
                 return _project_field_response(
                     field_name="Status",
-                    single_select_options=[("O_BLOCKED", "Blocked"), ("O_IN_PROGRESS", "In Progress")],
+                    single_select_options=[
+                        ("O_BLOCKED", "Blocked"),
+                        ("O_IN_PROGRESS", "In Progress"),
+                    ],
                 )
             if "fieldName=Blocked Reason" in args_str:
                 return _project_field_response(field_name="Blocked Reason")
@@ -1641,19 +1752,23 @@ class TestRunOneCycle:
 
             # fetch issue context
             if "api" in args and "issues/" in args_str:
-                return json.dumps({
-                    "title": "Test Issue",
-                    "body": "## Acceptance Criteria\n- Item works",
-                    "labels": [],
-                })
+                return json.dumps(
+                    {
+                        "title": "Test Issue",
+                        "body": "## Acceptance Criteria\n- Item works",
+                        "labels": [],
+                    }
+                )
 
             # pr view
             if "pr" in args and "view" in args:
                 if claim_succeeds:
-                    return json.dumps({
-                        "url": "https://github.com/O/R/pull/10",
-                        "body": "Closes #84\nLead Agent: codex\nHandoff: none",
-                    })
+                    return json.dumps(
+                        {
+                            "url": "https://github.com/O/R/pull/10",
+                            "body": "Closes #84\nLead Agent: codex\nHandoff: none",
+                        }
+                    )
                 raise Exception("no PR")
 
             if "pr" in args and "list" in args:
@@ -1664,16 +1779,21 @@ class TestRunOneCycle:
                 return "https://github.com/O/R/pull/10"
 
             # Board info query (for claim)
-            return json.dumps({
-                "data": {
-                    "organization": {
-                        "projectV2": {
-                            "items": {"nodes": []},
-                            "field": {"id": "F1", "options": [{"id": "O1", "name": "In Progress"}]},
+            return json.dumps(
+                {
+                    "data": {
+                        "organization": {
+                            "projectV2": {
+                                "items": {"nodes": []},
+                                "field": {
+                                    "id": "F1",
+                                    "options": [{"id": "O1", "name": "In Progress"}],
+                                },
+                            }
                         }
                     }
                 }
-            })
+            )
 
         def subprocess_runner(args, **kw):
             call_log["subprocess"].append(list(args))
@@ -1715,9 +1835,7 @@ class TestRunOneCycle:
             return "Done"
 
         def board_info_resolver(*a, **kw):
-            return MagicMock(
-                status="Ready", item_id="ITEM", project_id="PROJ"
-            )
+            return MagicMock(status="Ready", item_id="ITEM", project_id="PROJ")
 
         def board_mutator(*a, **kw):
             pass
@@ -1743,10 +1861,11 @@ class TestRunOneCycle:
 
     def test_idle_no_ready_items(self, tmp_path: Path) -> None:
         setup = self._setup_cycle(tmp_path, ready_nodes=[])
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "idle"
         assert "no-ready" in result.reason
 
@@ -1757,10 +1876,11 @@ class TestRunOneCycle:
         sess = db.create_session("crew#99", "codex")
         db.acquire_lease("crew#99", sess)
 
-        result = run_one_cycle(setup["config"], db, **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            db,
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "idle"
         assert result.reason == "lease-cap"
 
@@ -1799,10 +1919,11 @@ class TestRunOneCycle:
 
         db.acquire_lease = failing_acquire  # type: ignore[assignment]
 
-        result = run_one_cycle(setup["config"], db, **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            db,
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         db.acquire_lease = original_acquire  # type: ignore[assignment]
 
         assert result.action == "idle"
@@ -1819,10 +1940,7 @@ class TestRunOneCycle:
             setup["config"],
             setup["db"],
             dry_run=True,
-            **{
-                k: v for k, v in setup.items()
-                if k not in ("config", "db", "call_log")
-            },
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
         )
         assert result.action == "claimed"
         assert result.reason == "dry-run"
@@ -1855,10 +1973,7 @@ class TestRunOneCycle:
         result = run_one_cycle(
             setup["config"],
             setup["db"],
-            **{
-                k: v for k, v in setup.items()
-                if k not in ("config", "db", "call_log")
-            },
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
         )
 
         assert result.action == "idle"
@@ -1898,10 +2013,11 @@ class TestRunOneCycle:
             "startupai_controller.adapters.pull_requests.GitHubPullRequestAdapter.review_state_digests",
             lambda self, pr_refs: {pr_ref: "digest-1" for pr_ref in pr_refs},
         )
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "claimed"
         assert result.issue_ref == "crew#84"
         assert result.reason == "success"
@@ -1995,7 +2111,10 @@ class TestRunOneCycle:
 
         assert summary.requeued == ("crew#84",)
         assert db.get_review_queue_item("crew#84") is None
-        assert updated_snapshot.items_with_status("Ready")[0].issue_ref == "StartupAI-site/startupai-crew#84"
+        assert (
+            updated_snapshot.items_with_status("Ready")[0].issue_ref
+            == "StartupAI-site/startupai-crew#84"
+        )
 
     def test_review_queue_drain_processes_each_pr_once_for_multiple_issue_rows(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2187,9 +2306,12 @@ class TestRunOneCycle:
         updated = db.get_review_queue_item("crew#84")
         assert updated is not None
         assert updated.last_result == "auto_merge_enabled"
-        assert updated.next_attempt_at == (
-            now + timedelta(seconds=REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS)
-        ).isoformat()
+        assert (
+            updated.next_attempt_at
+            == (
+                now + timedelta(seconds=REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS)
+            ).isoformat()
+        )
 
     def test_apply_review_queue_partial_failure_backs_off_due_entries(
         self, tmp_path: Path
@@ -2226,9 +2348,7 @@ class TestRunOneCycle:
             for entry in updated
         )
 
-    def test_partial_failure_clears_blocked_streak(
-        self, tmp_path: Path
-    ) -> None:
+    def test_partial_failure_clears_blocked_streak(self, tmp_path: Path) -> None:
         """Partial-failure must not preserve stale blocked_streak/blocked_class."""
         db = _make_db(tmp_path)
         config = _make_consumer_config(tmp_path)
@@ -2405,7 +2525,10 @@ class TestRunOneCycle:
         updated = db.get_review_queue_item("crew#84")
         assert updated is not None
         assert updated.last_result == "blocked"
-        assert updated.last_reason == "StartupAI-site/startupai-crew#210: missing codex verdict marker (codex-review: pass|fail from trusted actor)"
+        assert (
+            updated.last_reason
+            == "StartupAI-site/startupai-crew#210: missing codex verdict marker (codex-review: pass|fail from trusted actor)"
+        )
         assert updated.next_attempt_datetime() > now + timedelta(minutes=20)
 
     def test_review_queue_drain_wakes_changed_parked_digest_for_immediate_processing(
@@ -2683,7 +2806,9 @@ class TestRunOneCycle:
         )
         monkeypatch.setattr(
             "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
-            lambda issue_ref, reason, *args, **kwargs: blocked.append((issue_ref, reason)),
+            lambda issue_ref, reason, *args, **kwargs: blocked.append(
+                (issue_ref, reason)
+            ),
         )
 
         result = run_one_cycle(
@@ -2693,7 +2818,10 @@ class TestRunOneCycle:
         )
 
         assert result.action == "error"
-        assert result.reason == "repair-branch-reconcile:repair-branch-diverged-from-origin"
+        assert (
+            result.reason
+            == "repair-branch-reconcile:repair-branch-diverged-from-origin"
+        )
         assert blocked == [
             ("crew#84", "repair-branch-reconcile:repair-branch-diverged-from-origin")
         ]
@@ -2751,10 +2879,11 @@ class TestRunOneCycle:
 
     def test_codex_timeout(self, tmp_path: Path) -> None:
         setup = self._setup_cycle(tmp_path, codex_exit=124)
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "claimed"
         assert result.reason == "timeout"
 
@@ -2764,10 +2893,11 @@ class TestRunOneCycle:
             codex_exit=0,
             codex_result=_codex_result_json(outcome="failed", summary="Tests fail"),
         )
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "claimed"
         assert result.reason == "failed"
 
@@ -2779,10 +2909,11 @@ class TestRunOneCycle:
                 outcome="blocked", summary="Missing dep", blocker_reason="Need API"
             ),
         )
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "claimed"
         assert result.reason == "failed"
 
@@ -2798,10 +2929,11 @@ class TestRunOneCycle:
                 started_at="2026-03-06T12:00:00+00:00",
             )
 
-        result = run_one_cycle(setup["config"], db, **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            db,
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "error"
         assert result.reason == "max-retries-exceeded"
         assert len(setup["call_log"]["comments"]) == 1
@@ -2819,10 +2951,11 @@ class TestRunOneCycle:
                 outcome="success", tests_run=10, tests_passed=8
             ),
         )
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.reason == "success"
 
     def test_target_issue_override(self, tmp_path: Path) -> None:
@@ -2837,14 +2970,13 @@ class TestRunOneCycle:
             setup["config"],
             setup["db"],
             target_issue="crew#85",
-            **{
-                k: v for k, v in setup.items()
-                if k not in ("config", "db", "call_log")
-            },
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
         )
         assert result.issue_ref == "crew#85"
 
-    def test_retry_backoff_skips_recently_failed_candidate(self, tmp_path: Path) -> None:
+    def test_retry_backoff_skips_recently_failed_candidate(
+        self, tmp_path: Path
+    ) -> None:
         setup = self._setup_cycle(
             tmp_path,
             ready_nodes=[
@@ -2869,7 +3001,9 @@ class TestRunOneCycle:
 
         assert result.issue_ref == "crew#85"
 
-    def test_nonretryable_failure_does_not_trigger_backoff(self, tmp_path: Path) -> None:
+    def test_nonretryable_failure_does_not_trigger_backoff(
+        self, tmp_path: Path
+    ) -> None:
         setup = self._setup_cycle(
             tmp_path,
             ready_nodes=[
@@ -2900,10 +3034,11 @@ class TestRunOneCycle:
             status="In Progress", item_id="I", project_id="P"
         )
 
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.action == "idle"
         assert "claim-rejected" in result.reason
 
@@ -2911,7 +3046,11 @@ class TestRunOneCycle:
         setup = self._setup_cycle(
             tmp_path,
             ready_nodes=[
-                _make_node(number=150, repo="StartupAI-site/app.startupai-site", executor="codex")
+                _make_node(
+                    number=150,
+                    repo="StartupAI-site/app.startupai-site",
+                    executor="codex",
+                )
             ],
         )
         app_workflow = setup["config"].repo_roots["app"] / "WORKFLOW.md"
@@ -2927,7 +3066,9 @@ class TestRunOneCycle:
         assert result.action == "idle"
         assert result.reason.startswith("repo-dispatch-disabled:")
 
-    def test_wip_limit_claim_rejection_is_aborted(self, tmp_path: Path, monkeypatch) -> None:
+    def test_wip_limit_claim_rejection_is_aborted(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         setup = self._setup_cycle(tmp_path)
 
         monkeypatch.setattr(
@@ -2935,10 +3076,11 @@ class TestRunOneCycle:
             lambda *args, **kwargs: ClaimReadyResult(reason="wip-limit"),
         )
 
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
 
         assert result.reason == "claim-rejected:wip-limit"
         sessions = setup["db"].recent_sessions(limit=1)
@@ -2955,10 +3097,11 @@ class TestRunOneCycle:
             raising_select,
         )
 
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
 
         assert result.action == "error"
         assert "selection-error:selection fetch failed" in result.reason
@@ -2976,10 +3119,11 @@ class TestRunOneCycle:
             raising_claim,
         )
 
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
 
         assert result.action == "error"
         assert "claim-error:temporary github failure" in result.reason
@@ -3007,7 +3151,10 @@ class TestRunOneCycle:
                 rate_limit_reset_at=None,
             )
 
-        monkeypatch.setattr("startupai_controller.consumer_automation_bridge.claim_ready_issue", raising_claim)
+        monkeypatch.setattr(
+            "startupai_controller.consumer_automation_bridge.claim_ready_issue",
+            raising_claim,
+        )
 
         first = run_one_cycle(
             setup["config"],
@@ -3040,12 +3187,19 @@ class TestRunOneCycle:
         setup["subprocess_runner"] = failing_subprocess
         with patch(
             "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
-            side_effect=lambda issue_ref, reason, *args, **kwargs: requeued.append(reason),
+            side_effect=lambda issue_ref, reason, *args, **kwargs: requeued.append(
+                reason
+            ),
         ):
-            result = run_one_cycle(setup["config"], setup["db"], **{
-                k: v for k, v in setup.items()
-                if k not in ("config", "db", "call_log")
-            })
+            result = run_one_cycle(
+                setup["config"],
+                setup["db"],
+                **{
+                    k: v
+                    for k, v in setup.items()
+                    if k not in ("config", "db", "call_log")
+                },
+            )
         assert result.action == "error"
         assert "workspace_error:" in result.reason
         assert requeued == ["workspace_prepare:wt-create.sh failed (exit 1): wt error"]
@@ -3066,13 +3220,16 @@ class TestRunOneCycle:
             codex_exit=1,
             has_commits=True,
         )
-        result = run_one_cycle(setup["config"], setup["db"], **{
-            k: v for k, v in setup.items()
-            if k not in ("config", "db", "call_log")
-        })
+        result = run_one_cycle(
+            setup["config"],
+            setup["db"],
+            **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+        )
         assert result.pr_url is not None
 
-    def test_nonzero_no_output_no_commits_requeues_and_aborts(self, tmp_path: Path) -> None:
+    def test_nonzero_no_output_no_commits_requeues_and_aborts(
+        self, tmp_path: Path
+    ) -> None:
         setup = self._setup_cycle(
             tmp_path,
             codex_exit=1,
@@ -3080,17 +3237,27 @@ class TestRunOneCycle:
         )
         requeued: list[str] = []
 
-        with patch(
-            "startupai_controller.consumer_codex_comment_wiring.parse_codex_result",
-            return_value=None,
-        ), patch(
-            "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
-            side_effect=lambda issue_ref, *args, **kwargs: requeued.append(issue_ref),
+        with (
+            patch(
+                "startupai_controller.consumer_codex_comment_wiring.parse_codex_result",
+                return_value=None,
+            ),
+            patch(
+                "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
+                side_effect=lambda issue_ref, *args, **kwargs: requeued.append(
+                    issue_ref
+                ),
+            ),
         ):
-            result = run_one_cycle(setup["config"], setup["db"], **{
-                k: v for k, v in setup.items()
-                if k not in ("config", "db", "call_log")
-            })
+            result = run_one_cycle(
+                setup["config"],
+                setup["db"],
+                **{
+                    k: v
+                    for k, v in setup.items()
+                    if k not in ("config", "db", "call_log")
+                },
+            )
 
         assert result.action == "claimed"
         assert result.reason == "aborted"
@@ -3117,7 +3284,11 @@ class TestRunOneCycle:
             result = run_one_cycle(
                 setup["config"],
                 setup["db"],
-                **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+                **{
+                    k: v
+                    for k, v in setup.items()
+                    if k not in ("config", "db", "call_log")
+                },
             )
 
         assert result.action == "claimed"
@@ -3166,14 +3337,14 @@ class TestRunOneCycle:
         def gh_runner(args, **kwargs):
             call_log["gh"].append(list(args))
             args_str = " ".join(str(part) for part in args)
-            if (
-                args[:3] == ["pr", "view", "77"]
-                and "mergedAt" in args_str
-            ):
+            if args[:3] == ["pr", "view", "77"] and "mergedAt" in args_str:
                 return json.dumps(
                     {"state": "MERGED", "mergedAt": "2026-03-08T00:00:00Z"}
                 )
-            if "repos/StartupAI-site/startupai-crew/issues/84" in args_str and "PATCH" in args_str:
+            if (
+                "repos/StartupAI-site/startupai-crew/issues/84" in args_str
+                and "PATCH" in args_str
+            ):
                 return "{}"
             return base_runner(args, **kwargs)
 
@@ -3187,7 +3358,11 @@ class TestRunOneCycle:
             result = run_one_cycle(
                 setup["config"],
                 setup["db"],
-                **{k: v for k, v in setup.items() if k not in ("config", "db", "call_log")},
+                **{
+                    k: v
+                    for k, v in setup.items()
+                    if k not in ("config", "db", "call_log")
+                },
             )
 
         assert result.action == "claimed"
@@ -3330,7 +3505,9 @@ class TestConsumerShellSeams:
             db=db,
             prepared=prepared,
             launch_context=launch_context,
-            pending_claim=PendingClaimContext(session_id=session_id, effective_max_retries=3),
+            pending_claim=PendingClaimContext(
+                session_id=session_id, effective_max_retries=3
+            ),
             slot_id=2,
             status_resolver=None,
             board_info_resolver=None,
@@ -3375,23 +3552,27 @@ class TestConsumerShellSeams:
 
         monkeypatch.setattr(
             "startupai_controller.consumer_board_state_helpers.return_issue_to_ready_from_shell",
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("board unavailable")),
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("board unavailable")
+            ),
         )
 
-        session_status, resolution_evaluation, done_reason = _handle_non_review_execution_outcome(
-            config=config,
-            db=db,
-            prepared=prepared,
-            launch_context=launch_context,
-            session_id="sess-001",
-            session_status="failed",
-            codex_result=None,
-            has_commits=False,
-            board_info_resolver=None,
-            board_mutator=None,
-            comment_poster=None,
-            subprocess_runner=None,
-            gh_runner=None,
+        session_status, resolution_evaluation, done_reason = (
+            _handle_non_review_execution_outcome(
+                config=config,
+                db=db,
+                prepared=prepared,
+                launch_context=launch_context,
+                session_id="sess-001",
+                session_status="failed",
+                codex_result=None,
+                has_commits=False,
+                board_info_resolver=None,
+                board_mutator=None,
+                comment_poster=None,
+                subprocess_runner=None,
+                gh_runner=None,
+            )
         )
 
         assert session_status == "aborted"
@@ -3406,7 +3587,9 @@ class TestConsumerShellSeams:
             "from_statuses": ["In Progress", "Review"],
         }
         assert db.get_control_value("degraded") == "true"
-        assert db.get_control_value("degraded_reason") == "ready-reset:board unavailable"
+        assert (
+            db.get_control_value("degraded_reason") == "ready-reset:board unavailable"
+        )
 
     def test_execute_claimed_session_keeps_failed_repair_pr_out_of_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3561,7 +3744,9 @@ class TestConsumerShellSeams:
 
         monkeypatch.setattr(
             "startupai_controller.consumer_automation_bridge.set_blocked_with_reason",
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("mutation offline")),
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("mutation offline")
+            ),
         )
 
         _block_prelaunch_issue(
@@ -3582,7 +3767,10 @@ class TestConsumerShellSeams:
             "blocked_reason": "workflow-invalid",
         }
         assert db.get_control_value("degraded") == "true"
-        assert db.get_control_value("degraded_reason") == "prelaunch-block:mutation offline"
+        assert (
+            db.get_control_value("degraded_reason")
+            == "prelaunch-block:mutation offline"
+        )
 
 
 # -- CLI parser tests ----------------------------------------------------------
@@ -3618,7 +3806,9 @@ class TestCliParser:
 
     def test_serve_status_subcommand(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["serve-status", "--host", "127.0.0.1", "--port", "9999"])
+        args = parser.parse_args(
+            ["serve-status", "--host", "127.0.0.1", "--port", "9999"]
+        )
         assert args.command == "serve-status"
         assert args.host == "127.0.0.1"
         assert args.port == 9999
@@ -3643,7 +3833,9 @@ class TestDrainControls:
         assert _clear_drain(config.drain_path) is True
         assert _drain_requested(config.drain_path) is False
 
-    def test_status_json_reports_drain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_status_json_reports_drain(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         config = _make_consumer_config(tmp_path)
         db = _make_db(tmp_path)
         session_id = db.create_session(
@@ -3653,7 +3845,9 @@ class TestDrainControls:
             session_kind="repair",
             repair_pr_url="https://github.com/O/R/pull/10",
         )
-        db.acquire_lease("crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc))
+        db.acquire_lease(
+            "crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc)
+        )
         db.update_session(session_id, status="running", slot_id=1, phase="running")
         failed_session_id = db.create_session("crew#85", "codex")
         db.update_session(
@@ -3667,7 +3861,11 @@ class TestDrainControls:
         db.queue_deferred_action(
             "crew#84",
             "set_status",
-            {"issue_ref": "crew#84", "to_status": "Ready", "from_statuses": ["In Progress"]},
+            {
+                "issue_ref": "crew#84",
+                "to_status": "Ready",
+                "from_statuses": ["In Progress"],
+            },
         )
         db.set_control_value("degraded", "true")
         db.set_control_value("degraded_reason", "selection-error:test")
@@ -3688,7 +3886,10 @@ class TestDrainControls:
             assert payload["control_plane_health"]["health"] == "degraded_recovering"
             assert payload["control_plane_health"]["reason_code"] == "selection-error"
             assert payload["workers"][0]["session_kind"] == "repair"
-            assert payload["workers"][0]["repair_pr_url"] == "https://github.com/O/R/pull/10"
+            assert (
+                payload["workers"][0]["repair_pr_url"]
+                == "https://github.com/O/R/pull/10"
+            )
             assert payload["workers"][0]["branch_reconcile_state"] is None
             assert payload["review_summary"]["source"] == "local"
             assert payload["lane_wip_limits"]["codex"]["crew"] == 1
@@ -3771,7 +3972,11 @@ class TestDrainControls:
             ) as response:
                 health = json.loads(response.read().decode("utf-8"))
             assert health["ok"] is True
-            assert health["health"] in {"healthy", "degraded_recovering", "degraded_stale"}
+            assert health["health"] in {
+                "healthy",
+                "degraded_recovering",
+                "degraded_stale",
+            }
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -3813,9 +4018,7 @@ class TestDrainControls:
 
 
 class TestRunDaemonLoop:
-    def test_transition_issue_to_in_progress_uses_ports(
-        self, tmp_path: Path
-    ) -> None:
+    def test_transition_issue_to_in_progress_uses_ports(self, tmp_path: Path) -> None:
         cp_config = _load(tmp_path)
         statuses = {"crew#84": "Review"}
         transitions: list[tuple[str, str]] = []
@@ -3965,9 +4168,7 @@ class TestRunDaemonLoop:
         )
 
         assert len(replayed) == 6
-        assert comments == [
-            ("StartupAI-site/startupai-crew", 84, "controller comment")
-        ]
+        assert comments == [("StartupAI-site/startupai-crew", 84, "controller comment")]
         assert closed == [("StartupAI-site/startupai-crew", 84)]
         assert reruns == [("StartupAI-site/startupai-crew", "ci", 42)]
         assert automerge == [("StartupAI-site/startupai-crew", 77)]
@@ -4097,7 +4298,9 @@ class TestRunDaemonLoop:
             session_kind="repair",
             repair_pr_url="https://github.com/O/R/pull/10",
         )
-        db.acquire_lease("crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc))
+        db.acquire_lease(
+            "crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc)
+        )
         db.update_session(session_id, status="running", slot_id=1, phase="running")
         cp_config = load_config(config.critical_paths_path)
         auto_config = load_automation_config(config.automation_config_path)
@@ -4142,7 +4345,9 @@ class TestRunDaemonLoop:
             session_kind="repair",
             repair_pr_url="https://github.com/O/R/pull/10",
         )
-        db.acquire_lease("crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc))
+        db.acquire_lease(
+            "crew#84", session_id, slot_id=1, now=datetime.now(timezone.utc)
+        )
         db.update_session(session_id, status="running", slot_id=1, phase="running")
         cp_config = load_config(config.critical_paths_path)
         auto_config = load_automation_config(config.automation_config_path)
@@ -4241,7 +4446,10 @@ class TestRunDaemonLoop:
             called["sleep"] = True
             raise AssertionError("sleep should not be called while draining")
 
-        monkeypatch.setattr("startupai_controller.consumer_runtime_wiring.run_one_cycle_live", fail_run_one_cycle)
+        monkeypatch.setattr(
+            "startupai_controller.consumer_runtime_wiring.run_one_cycle_live",
+            fail_run_one_cycle,
+        )
         try:
             run_daemon_loop(config, db, sleep_fn=fail_sleep)
         finally:
@@ -4284,7 +4492,10 @@ class TestRunDaemonLoop:
             def submit(self, fn, *args, **kwargs):
                 return _ImmediateFuture(fn(*args, **kwargs))
 
-        monkeypatch.setattr("startupai_controller.consumer_runtime_wiring.ThreadPoolExecutor", _FakeExecutor)
+        monkeypatch.setattr(
+            "startupai_controller.consumer_runtime_wiring.ThreadPoolExecutor",
+            _FakeExecutor,
+        )
         monkeypatch.setattr(
             "startupai_controller.consumer_runtime_wiring.load_automation_config",
             lambda *args, **kwargs: None,
@@ -4305,7 +4516,9 @@ class TestRunDaemonLoop:
             global_limit=2,
             effective_interval=1,
             dispatchable_repo_prefixes=("crew",),
-            board_snapshot=SimpleNamespace(items=(), items_with_status=lambda *_args, **_kwargs: ()),
+            board_snapshot=SimpleNamespace(
+                items=(), items_with_status=lambda *_args, **_kwargs: ()
+            ),
             github_memo=SimpleNamespace(),
             admission_summary={},
             timings_ms={},
@@ -4562,13 +4775,17 @@ class TestBlockedStreakEscalation:
         assert _blocker_class("some unknown reason") == "default"
 
     def test_escalation_ceiling_for_blocker_class(self) -> None:
-        assert _escalation_ceiling_for_blocker_class("transient") == ESCALATION_CEILING_TRANSIENT
-        assert _escalation_ceiling_for_blocker_class("failed_checks") == ESCALATION_CEILING_FAILED
+        assert (
+            _escalation_ceiling_for_blocker_class("transient")
+            == ESCALATION_CEILING_TRANSIENT
+        )
+        assert (
+            _escalation_ceiling_for_blocker_class("failed_checks")
+            == ESCALATION_CEILING_FAILED
+        )
         assert _escalation_ceiling_for_blocker_class("unknown") == 8  # default
 
-    def test_blocked_streak_increments_within_same_class(
-        self, tmp_path: Path
-    ) -> None:
+    def test_blocked_streak_increments_within_same_class(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
         db.enqueue_review_item(
@@ -4665,9 +4882,7 @@ class TestBlockedStreakEscalation:
         assert final.blocked_streak == 1
         assert final.blocked_class == "failed_checks"
 
-    def test_blocked_streak_resets_on_non_blocked_result(
-        self, tmp_path: Path
-    ) -> None:
+    def test_blocked_streak_resets_on_non_blocked_result(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
         db.enqueue_review_item(
@@ -4710,9 +4925,7 @@ class TestBlockedStreakEscalation:
         assert cleared.blocked_streak == 0
         assert cleared.blocked_class is None
 
-    def test_apply_result_signals_escalation_at_ceiling(
-        self, tmp_path: Path
-    ) -> None:
+    def test_apply_result_signals_escalation_at_ceiling(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
         db.enqueue_review_item(
@@ -4757,9 +4970,7 @@ class TestBlockedStreakEscalation:
         )
         assert needs_escalation is True
 
-    def test_apply_result_no_escalation_below_ceiling(
-        self, tmp_path: Path
-    ) -> None:
+    def test_apply_result_no_escalation_below_ceiling(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
         db.enqueue_review_item(

@@ -19,8 +19,7 @@ def codex_review_gate(
     """Evaluate the codex gate after transport data has been loaded."""
     if not linked_refs:
         return 0, (
-            f"{pr_repo}#{pr_number}: codex gate not applicable "
-            "(no linked issues)"
+            f"{pr_repo}#{pr_number}: codex gate not applicable " "(no linked issues)"
         )
 
     if not review_refs:

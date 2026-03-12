@@ -58,7 +58,9 @@ from startupai_controller.domain.models import IssueContext, ReviewSnapshot
 from startupai_controller.domain.repair_policy import MARKER_PREFIX
 
 
-def _query_project_item_field(issue_ref, field_name, config, project_owner, project_number, *, gh_runner=None):
+def _query_project_item_field(
+    issue_ref, field_name, config, project_owner, project_number, *, gh_runner=None
+):
     return _impl_query_project_item_field(
         issue_ref,
         field_name,
@@ -69,7 +71,9 @@ def _query_project_item_field(issue_ref, field_name, config, project_owner, proj
     )
 
 
-def _query_single_select_field_option(project_id, field_name, option_name, *, gh_runner=None):
+def _query_single_select_field_option(
+    project_id, field_name, option_name, *, gh_runner=None
+):
     return _impl_query_single_select_field_option(
         project_id,
         field_name,
@@ -97,7 +101,9 @@ def _set_text_field(project_id, item_id, field_name, value, *, gh_runner=None):
     )
 
 
-def _set_single_select_field(project_id, item_id, field_name, option_name, *, gh_runner=None):
+def _set_single_select_field(
+    project_id, item_id, field_name, option_name, *, gh_runner=None
+):
     return _impl_set_single_select_field(
         project_id,
         item_id,
@@ -117,7 +123,18 @@ def _set_board_status(project_id, item_id, field_id, option_id, *, gh_runner=Non
     )
 
 
-def _set_status_if_changed(issue_ref, from_statuses, to_status, config, project_owner, project_number, *, board_info_resolver=None, board_mutator=None, gh_runner=None):
+def _set_status_if_changed(
+    issue_ref,
+    from_statuses,
+    to_status,
+    config,
+    project_owner,
+    project_number,
+    *,
+    board_info_resolver=None,
+    board_mutator=None,
+    gh_runner=None,
+):
     return _impl_set_status_if_changed(
         issue_ref,
         from_statuses,
@@ -159,27 +176,39 @@ def _is_pr_open(owner, repo, pr_number, *, gh_runner=None):
 
 
 def _query_failed_check_runs(owner, repo, head_sha, *, gh_runner=None):
-    return _impl_query_failed_check_runs(owner, repo, head_sha, gh_runner=gh_runner or _run_gh)
+    return _impl_query_failed_check_runs(
+        owner, repo, head_sha, gh_runner=gh_runner or _run_gh
+    )
 
 
 def _query_pr_head_sha(owner, repo, pr_number, *, gh_runner=None):
-    return _impl_query_pr_head_sha(owner, repo, pr_number, gh_runner=gh_runner or _run_gh)
+    return _impl_query_pr_head_sha(
+        owner, repo, pr_number, gh_runner=gh_runner or _run_gh
+    )
 
 
 def _query_issue_updated_at(owner, repo, number, *, gh_runner=None):
-    return _impl_query_issue_updated_at(owner, repo, number, gh_runner=gh_runner or _run_gh)
+    return _impl_query_issue_updated_at(
+        owner, repo, number, gh_runner=gh_runner or _run_gh
+    )
 
 
 def _query_open_pr_updated_at(owner, repo, pr_number, *, gh_runner=None):
-    return _impl_query_open_pr_updated_at(owner, repo, pr_number, gh_runner=gh_runner or _run_gh)
+    return _impl_query_open_pr_updated_at(
+        owner, repo, pr_number, gh_runner=gh_runner or _run_gh
+    )
 
 
-def _query_latest_wip_activity_timestamp(issue_ref, owner, repo, number, pr_field, *, gh_runner=None):
+def _query_latest_wip_activity_timestamp(
+    issue_ref, owner, repo, number, pr_field, *, gh_runner=None
+):
     candidates: list[datetime] = []
     pr_ts = _query_open_pr_updated_at(owner, repo, number, gh_runner=gh_runner)
     if pr_ts is not None:
         candidates.append(pr_ts)
-    comment_ts = _query_latest_non_automation_comment_timestamp(owner, repo, number, gh_runner=gh_runner or _run_gh)
+    comment_ts = _query_latest_non_automation_comment_timestamp(
+        owner, repo, number, gh_runner=gh_runner or _run_gh
+    )
     if comment_ts is not None:
         candidates.append(comment_ts)
     baseline_ts = _query_latest_matching_comment_timestamp(
@@ -198,14 +227,20 @@ def _query_latest_wip_activity_timestamp(issue_ref, owner, repo, number, pr_fiel
 
 
 def _query_issue_assignees(owner, repo, number, *, gh_runner=None):
-    return _impl_query_issue_assignees(owner, repo, number, gh_runner=gh_runner or _run_gh)
+    return _impl_query_issue_assignees(
+        owner, repo, number, gh_runner=gh_runner or _run_gh
+    )
 
 
 def _set_issue_assignees(owner, repo, number, assignees, *, gh_runner=None):
-    return _impl_set_issue_assignees(owner, repo, number, assignees, gh_runner=gh_runner or _run_gh)
+    return _impl_set_issue_assignees(
+        owner, repo, number, assignees, gh_runner=gh_runner or _run_gh
+    )
 
 
-def _query_issue_board_info(issue_ref, config, project_owner, project_number, *, gh_runner=None):
+def _query_issue_board_info(
+    issue_ref, config, project_owner, project_number, *, gh_runner=None
+):
     return _impl_query_issue_board_info(
         issue_ref,
         config,
@@ -215,7 +250,9 @@ def _query_issue_board_info(issue_ref, config, project_owner, project_number, *,
     )
 
 
-def _list_project_items(project_owner, project_number, *, statuses=None, gh_runner=None):
+def _list_project_items(
+    project_owner, project_number, *, statuses=None, gh_runner=None
+):
     return _impl_list_project_items(
         project_owner,
         project_number,
@@ -271,7 +308,9 @@ class GitHubCliAdapter(
             for pr_number in sorted(set(pr_numbers)):
                 payload = payloads.get(pr_number)
                 if payload is None:
-                    from startupai_controller.validate_critical_path_promotion import GhQueryError
+                    from startupai_controller.validate_critical_path_promotion import (
+                        GhQueryError,
+                    )
 
                     raise GhQueryError(
                         f"Failed querying PR {pr_repo}#{pr_number}: pull request not found."
@@ -346,7 +385,7 @@ class GitHubCliAdapter(
                 "api",
                 f"repos/{owner}/{repo}/issues/{number}",
                 "--jq",
-                '{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}',
+                "{title: .title, body: .body, labels: [.labels[].name], updated_at: .updated_at}",
             ],
             gh_runner=self._gh_runner,
         )

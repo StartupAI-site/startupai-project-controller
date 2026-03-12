@@ -17,7 +17,6 @@ from startupai_controller.consumer_db import (
     VALID_SESSION_STATUSES,
 )
 
-
 # -- Fixtures -----------------------------------------------------------------
 
 
@@ -590,9 +589,7 @@ class TestReviewQueue:
         assert db.count_retries("crew#84") == 1
 
         s3 = db.create_session("crew#84", "codex")
-        db.update_session(
-            s3, status="failed", started_at="2026-03-06T12:00:00+00:00"
-        )
+        db.update_session(s3, status="failed", started_at="2026-03-06T12:00:00+00:00")
         assert db.count_retries("crew#84") == 2
 
         # Success doesn't count
@@ -611,14 +608,14 @@ class TestReviewQueue:
         assert db.count_retries("crew#85") == 1
         db.close()
 
-    def test_count_retries_ignores_failed_sessions_without_start(self, tmp_path: Path) -> None:
+    def test_count_retries_ignores_failed_sessions_without_start(
+        self, tmp_path: Path
+    ) -> None:
         db = _make_db(tmp_path)
         s1 = db.create_session("crew#84", "codex")
         db.update_session(s1, status="failed")
         s2 = db.create_session("crew#84", "codex")
-        db.update_session(
-            s2, status="failed", started_at="2026-03-06T12:00:00+00:00"
-        )
+        db.update_session(s2, status="failed", started_at="2026-03-06T12:00:00+00:00")
         assert db.count_retries("crew#84") == 1
         db.close()
 
@@ -645,7 +642,9 @@ class TestRecentSessions:
         assert len(sessions) == 2
         db.close()
 
-    def test_latest_review_issue_refs_returns_latest_review_only(self, tmp_path: Path) -> None:
+    def test_latest_review_issue_refs_returns_latest_review_only(
+        self, tmp_path: Path
+    ) -> None:
         db = _make_db(tmp_path)
         s1 = db.create_session("crew#84", "codex")
         db.update_session(s1, status="success", phase="review")
@@ -684,7 +683,9 @@ class TestRecentSessions:
 
 
 class TestDeferredActions:
-    def test_queue_deferred_action_dedupes_exact_duplicates(self, tmp_path: Path) -> None:
+    def test_queue_deferred_action_dedupes_exact_duplicates(
+        self, tmp_path: Path
+    ) -> None:
         db = _make_db(tmp_path)
         first = db.queue_deferred_action(
             "crew#84",
@@ -702,18 +703,28 @@ class TestDeferredActions:
         assert db.deferred_action_count() == 1
         db.close()
 
-    def test_queue_deferred_action_supersedes_older_status_action(self, tmp_path: Path) -> None:
+    def test_queue_deferred_action_supersedes_older_status_action(
+        self, tmp_path: Path
+    ) -> None:
         db = _make_db(tmp_path)
         db.queue_deferred_action(
             "crew#84",
             "set_status",
-            {"issue_ref": "crew#84", "to_status": "In Progress", "from_statuses": ["Ready"]},
+            {
+                "issue_ref": "crew#84",
+                "to_status": "In Progress",
+                "from_statuses": ["Ready"],
+            },
             now=_now(),
         )
         db.queue_deferred_action(
             "crew#84",
             "set_status",
-            {"issue_ref": "crew#84", "to_status": "Ready", "from_statuses": ["In Progress"]},
+            {
+                "issue_ref": "crew#84",
+                "to_status": "Ready",
+                "from_statuses": ["In Progress"],
+            },
             now=_now() + timedelta(seconds=1),
         )
         actions = db.list_deferred_actions()
@@ -772,7 +783,9 @@ class TestMetrics:
     def test_metric_events_since_filters_and_orders(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         now = _now()
-        db.record_metric_event("cycle_observation", payload={"ready_for_executor": 2}, now=now)
+        db.record_metric_event(
+            "cycle_observation", payload={"ready_for_executor": 2}, now=now
+        )
         db.record_metric_event(
             "worker_durable_start",
             issue_ref="crew#84",
@@ -863,12 +876,16 @@ class TestRequeueCycleTracking:
 
     def test_increment_requeue_count_stores_pr_url(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
-        new_count = db.increment_requeue_count("crew#88", "https://github.com/o/r/pull/42")
+        new_count = db.increment_requeue_count(
+            "crew#88", "https://github.com/o/r/pull/42"
+        )
         assert new_count == 1
         count, pr_url = db.get_requeue_state("crew#88")
         assert count == 1
         assert pr_url == "https://github.com/o/r/pull/42"
-        new_count2 = db.increment_requeue_count("crew#88", "https://github.com/o/r/pull/42")
+        new_count2 = db.increment_requeue_count(
+            "crew#88", "https://github.com/o/r/pull/42"
+        )
         assert new_count2 == 2
         db.close()
 
@@ -903,7 +920,9 @@ class TestReviewQueueBlockedStreakColumns:
         assert entry.blocked_class is None
         db.close()
 
-    def test_update_review_queue_item_writes_streak_and_class(self, tmp_path: Path) -> None:
+    def test_update_review_queue_item_writes_streak_and_class(
+        self, tmp_path: Path
+    ) -> None:
         db = _make_db(tmp_path)
         now = _now()
         db.enqueue_review_item(

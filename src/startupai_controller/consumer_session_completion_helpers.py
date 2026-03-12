@@ -82,14 +82,20 @@ def final_phase_for_claimed_session(
     """Determine the final persisted phase for a claimed session."""
     review_requeued = (
         execution_outcome.should_transition_to_review
-        and launch_context.issue_ref in execution_outcome.immediate_review_summary.requeued
+        and launch_context.issue_ref
+        in execution_outcome.immediate_review_summary.requeued
     )
     final_phase = (
         "completed"
         if review_requeued
-        else ("review" if execution_outcome.should_transition_to_review else "completed")
+        else (
+            "review" if execution_outcome.should_transition_to_review else "completed"
+        )
     )
-    if execution_outcome.session_status in {"failed", "timeout"} and not execution_outcome.pr_url:
+    if (
+        execution_outcome.session_status in {"failed", "timeout"}
+        and not execution_outcome.pr_url
+    ):
         final_phase = "blocked"
     if (
         execution_outcome.resolution_evaluation is not None
@@ -212,7 +218,8 @@ def maybe_escalate_claimed_session_failure(
             cp_config,
             config.project_owner,
             config.project_number,
-            reason=escalation_reason or f"max retries ({effective_max_retries}) exceeded",
+            reason=escalation_reason
+            or f"max retries ({effective_max_retries}) exceeded",
             board_info_resolver=board_info_resolver,
             comment_checker=comment_checker,
             comment_poster=comment_poster,

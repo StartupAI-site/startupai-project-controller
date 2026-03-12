@@ -14,7 +14,9 @@ from startupai_controller.domain.review_queue_policy import (
     session_retry_due_at as _session_retry_due_at,
 )
 from startupai_controller.runtime.wiring import build_github_port_bundle
-from startupai_controller.domain.scheduling_policy import snapshot_to_issue_ref as _snapshot_to_issue_ref
+from startupai_controller.domain.scheduling_policy import (
+    snapshot_to_issue_ref as _snapshot_to_issue_ref,
+)
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     evaluate_ready_promotion,
@@ -57,7 +59,9 @@ def effective_retry_backoff(
     config: Any,
     workflow: Any | None,
     *,
-    effective_retry_backoff_primitives: Callable[..., tuple[int, int]] = _effective_retry_backoff_primitives,
+    effective_retry_backoff_primitives: Callable[
+        ..., tuple[int, int]
+    ] = _effective_retry_backoff_primitives,
 ) -> tuple[int, int]:
     """Return effective retry backoff (base, max) in seconds."""
     runtime = workflow.runtime if workflow is not None else None
@@ -197,13 +201,16 @@ def select_best_candidate(
 ) -> str | None:
     """Select the highest-ranked ready issue for the executor."""
     if status_resolver is not None:
-        base_review_state_port = review_state_port or build_github_port_bundle(
-            project_owner,
-            project_number,
-            config=config,
-            github_memo=github_memo,
-            gh_runner=gh_runner,
-        ).review_state
+        base_review_state_port = (
+            review_state_port
+            or build_github_port_bundle(
+                project_owner,
+                project_number,
+                config=config,
+                github_memo=github_memo,
+                gh_runner=gh_runner,
+            ).review_state
+        )
         review_state_port = _CompatReviewStatePort(
             base_review_state_port,
             config=config,

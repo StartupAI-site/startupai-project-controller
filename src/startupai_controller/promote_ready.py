@@ -123,13 +123,7 @@ def _load_controller_owned_prefixes(path: Path) -> tuple[bool, tuple[str, ...]]:
     if not isinstance(repos_raw, list):
         return False, ()
     repos = tuple(
-        sorted(
-            {
-                str(repo).strip().lower()
-                for repo in repos_raw
-                if str(repo).strip()
-            }
-        )
+        sorted({str(repo).strip().lower() for repo in repos_raw if str(repo).strip()})
     )
     return bool(repos), repos
 
@@ -178,11 +172,17 @@ query($owner: String!, $repo: String!, $number: Int!) {
 """
 
     command = [
-        "gh", "api", "graphql",
-        "-f", f"query={query}",
-        "-f", f"owner={owner}",
-        "-f", f"repo={repo}",
-        "-F", f"number={parsed.number}",
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        f"query={query}",
+        "-f",
+        f"owner={owner}",
+        "-f",
+        f"repo={repo}",
+        "-F",
+        f"number={parsed.number}",
     ]
     output = _run_gh_command(command, f"Failed querying board info for {issue_ref}")
 
@@ -252,9 +252,13 @@ query($projectId: ID!) {
 
     if gh_runner is None:
         command = [
-            "gh", "api", "graphql",
-            "-f", f"query={query}",
-            "-f", f"projectId={project_id}",
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"projectId={project_id}",
         ]
         output = _run_gh_command(command, "Failed querying Status field")
     else:
@@ -327,12 +331,19 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 
     if gh_runner is None:
         command = [
-            "gh", "api", "graphql",
-            "-f", f"query={mutation}",
-            "-f", f"projectId={project_id}",
-            "-f", f"itemId={item_id}",
-            "-f", f"fieldId={field_id}",
-            "-f", f"optionId={option_id}",
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={mutation}",
+            "-f",
+            f"projectId={project_id}",
+            "-f",
+            f"itemId={item_id}",
+            "-f",
+            f"fieldId={field_id}",
+            "-f",
+            f"optionId={option_id}",
         ]
         output = _run_gh_command(command, "Failed setting board status")
     else:

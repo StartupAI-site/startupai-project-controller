@@ -42,7 +42,10 @@ def audit_in_progress(
             if parsed.prefix != this_repo_prefix:
                 continue
 
-        if pr_port.list_open_prs_for_issue(config.issue_prefixes[parse_issue_ref(ref).prefix], _resolve_issue_coordinates(ref, config)[2]):
+        if pr_port.list_open_prs_for_issue(
+            config.issue_prefixes[parse_issue_ref(ref).prefix],
+            _resolve_issue_coordinates(ref, config)[2],
+        ):
             continue
 
         owner, repo, number = _resolve_issue_coordinates(ref, config)

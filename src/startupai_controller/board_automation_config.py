@@ -75,9 +75,7 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except OSError as error:
-        raise ConfigError(
-            f"Cannot read automation config '{path}': {error}"
-        ) from error
+        raise ConfigError(f"Cannot read automation config '{path}': {error}") from error
     except json.JSONDecodeError as error:
         raise ConfigError(
             f"Invalid JSON in automation config '{path}': {error}"
@@ -85,9 +83,7 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
 
     version = payload.get("version")
     if version not in {1, 2}:
-        raise ConfigError(
-            f"Unsupported automation config version '{version}'."
-        )
+        raise ConfigError(f"Unsupported automation config version '{version}'.")
 
     wip_limits_raw = payload.get("wip_limits")
     if not isinstance(wip_limits_raw, dict):
@@ -131,33 +127,23 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
         raise ConfigError("automation config freshness_hours must be >= 1")
 
     try:
-        stale_confirmation_cycles = int(
-            payload.get("stale_confirmation_cycles", 2)
-        )
+        stale_confirmation_cycles = int(payload.get("stale_confirmation_cycles", 2))
     except (TypeError, ValueError) as error:
         raise ConfigError(
             "automation config stale_confirmation_cycles must be an integer"
         ) from error
     if stale_confirmation_cycles < 1:
-        raise ConfigError(
-            "automation config stale_confirmation_cycles must be >= 1"
-        )
+        raise ConfigError("automation config stale_confirmation_cycles must be >= 1")
 
     trusted_raw = payload.get("trusted_codex_actors", [])
     if not isinstance(trusted_raw, list):
-        raise ConfigError(
-            "automation config trusted_codex_actors must be a list"
-        )
+        raise ConfigError("automation config trusted_codex_actors must be a list")
     trusted_codex_actors = {
         str(actor).strip().lower() for actor in trusted_raw if str(actor).strip()
     }
-    trusted_local_authors_raw = payload.get(
-        "trusted_local_authors", trusted_raw
-    )
+    trusted_local_authors_raw = payload.get("trusted_local_authors", trusted_raw)
     if not isinstance(trusted_local_authors_raw, list):
-        raise ConfigError(
-            "automation config trusted_local_authors must be a list"
-        )
+        raise ConfigError("automation config trusted_local_authors must be a list")
     trusted_local_authors = {
         str(actor).strip().lower()
         for actor in trusted_local_authors_raw
@@ -176,9 +162,7 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
 
     canary_raw = payload.get("canary_thresholds") or {}
     if not isinstance(canary_raw, dict):
-        raise ConfigError(
-            "automation config canary_thresholds must be an object"
-        )
+        raise ConfigError("automation config canary_thresholds must be an object")
     canary_thresholds: dict[str, float] = {}
     for key, value in canary_raw.items():
         try:
@@ -189,9 +173,11 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
     authority_raw = payload.get("execution_authority") or {}
     if authority_raw and not isinstance(authority_raw, dict):
         raise ConfigError("automation config execution_authority must be an object")
-    authority_mode = str(
-        authority_raw.get("mode", "board" if version == 1 else "single_machine")
-    ).strip().lower()
+    authority_mode = (
+        str(authority_raw.get("mode", "board" if version == 1 else "single_machine"))
+        .strip()
+        .lower()
+    )
     if authority_mode not in VALID_EXECUTION_AUTHORITY_MODES:
         raise ConfigError(
             "automation config execution_authority.mode must be one of: "
@@ -278,15 +264,9 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
     issue_context_cache_enabled = bool(
         authority_raw.get("issue_context_cache_enabled", True)
     )
-    rate_limit_pause_enabled = bool(
-        authority_raw.get("rate_limit_pause_enabled", True)
-    )
-    worktree_reuse_enabled = bool(
-        authority_raw.get("worktree_reuse_enabled", True)
-    )
-    slo_metrics_enabled = bool(
-        authority_raw.get("slo_metrics_enabled", True)
-    )
+    rate_limit_pause_enabled = bool(authority_raw.get("rate_limit_pause_enabled", True))
+    worktree_reuse_enabled = bool(authority_raw.get("worktree_reuse_enabled", True))
+    slo_metrics_enabled = bool(authority_raw.get("slo_metrics_enabled", True))
 
     deprecated_raw = payload.get("deprecated_workflow_mutations") or {}
     if deprecated_raw and not isinstance(deprecated_raw, dict):
@@ -301,9 +281,7 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
 
     checks_raw = payload.get("required_checks_by_repo") or {}
     if checks_raw and not isinstance(checks_raw, dict):
-        raise ConfigError(
-            "automation config required_checks_by_repo must be an object"
-        )
+        raise ConfigError("automation config required_checks_by_repo must be an object")
     required_checks_by_repo: dict[str, tuple[str, ...]] = {}
     for repo_name, checks in checks_raw.items():
         if not isinstance(checks, list):
@@ -315,9 +293,11 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
         )
         required_checks_by_repo[str(repo_name).strip().lower()] = normalized_checks
 
-    non_local_pr_policy = str(
-        payload.get("non_local_pr_policy", "block" if version == 2 else "requeue")
-    ).strip().lower()
+    non_local_pr_policy = (
+        str(payload.get("non_local_pr_policy", "block" if version == 2 else "requeue"))
+        .strip()
+        .lower()
+    )
     if non_local_pr_policy not in VALID_NON_LOCAL_PR_POLICIES:
         raise ConfigError(
             "automation config non_local_pr_policy must be one of: "
@@ -334,9 +314,7 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
     if admission_raw and not isinstance(admission_raw, dict):
         raise ConfigError("automation config admission must be an object")
     try:
-        floor_multiplier = int(
-            admission_raw.get("ready_floor_multiplier", 2)
-        )
+        floor_multiplier = int(admission_raw.get("ready_floor_multiplier", 2))
         cap_multiplier = int(admission_raw.get("ready_cap_multiplier", 3))
         max_batch_size = int(admission_raw.get("max_batch_size", 6))
     except (TypeError, ValueError) as error:
@@ -353,9 +331,7 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
             "automation config admission.source_statuses must be a non-empty list"
         )
     source_statuses = tuple(
-        str(status).strip()
-        for status in source_statuses_raw
-        if str(status).strip()
+        str(status).strip() for status in source_statuses_raw if str(status).strip()
     )
     if not source_statuses:
         raise ConfigError(

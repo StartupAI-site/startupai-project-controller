@@ -67,7 +67,6 @@ from startupai_controller.automation_compat_ports import (
     wrap_review_state_port,
 )
 
-
 PROMOTABLE_STATUSES = frozenset({"Backlog", "Blocked"})
 
 
@@ -326,6 +325,7 @@ def _build_promote_to_ready_delegate(
             issue_ref=issue_ref,
             **kwargs,
         )
+
     return _promote_to_ready
 
 

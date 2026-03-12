@@ -153,9 +153,7 @@ def replay_deferred_check_rerun(
     run_id = int(payload["run_id"])
     if pr_port is not None:
         if not pr_port.rerun_failed_check(pr_repo, check_name, run_id):
-            raise GhQueryError(
-                f"Failed rerunning check for {pr_repo} run {run_id}"
-            )
+            raise GhQueryError(f"Failed rerunning check for {pr_repo} run {run_id}")
         return
     runtime_failed_check_rerun(pr_repo, run_id, gh_runner=gh_runner)
 

@@ -39,7 +39,6 @@ from startupai_controller.validate_critical_path_promotion import (
     parse_issue_ref,
 )
 
-
 # ---------------------------------------------------------------------------
 # Deps injection
 # ---------------------------------------------------------------------------
@@ -90,7 +89,9 @@ def _classify_admission_pr_state(
 ) -> str:
     """Classify PR state for backlog admission without extra per-issue queries."""
     linked_candidates = [
-        pr for pr in candidates if issue_number in _extract_closing_issue_numbers(pr.body)
+        pr
+        for pr in candidates
+        if issue_number in _extract_closing_issue_numbers(pr.body)
     ]
     if not linked_candidates:
         return "none"
@@ -408,7 +409,8 @@ def build_provisional_admission_candidates(
 
     provisional_candidates.sort(
         key=lambda item: _admission_candidate_rank(
-            _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes) or item.issue_ref,
+            _snapshot_to_issue_ref(item.issue_ref, config.issue_prefixes)
+            or item.issue_ref,
             priority=item.priority,
             is_graph_member=in_any_critical_path(
                 config,
@@ -462,7 +464,9 @@ def evaluate_admission_candidates(
             key = (owner, repo, number)
             body = memo.issue_bodies.get(key)
             if body is None:
-                body = deps.issue_context_port.get_issue_context(owner, repo, number).body
+                body = deps.issue_context_port.get_issue_context(
+                    owner, repo, number
+                ).body
                 memo.issue_bodies[key] = body
         if not has_structured_acceptance_criteria(
             body,

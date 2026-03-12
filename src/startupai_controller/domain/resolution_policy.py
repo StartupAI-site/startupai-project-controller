@@ -62,7 +62,9 @@ def normalize_resolution_payload(raw: Any) -> dict[str, Any] | None:
     kind = str(raw.get("kind") or "").strip()
     if kind not in VALID_RESOLUTION_KINDS:
         return None
-    equivalence_claim = str(raw.get("equivalence_claim") or "unknown").strip() or "unknown"
+    equivalence_claim = (
+        str(raw.get("equivalence_claim") or "unknown").strip() or "unknown"
+    )
     if equivalence_claim not in VALID_EQUIVALENCE_CLAIMS:
         equivalence_claim = "unknown"
 
@@ -91,7 +93,9 @@ def normalize_resolution_payload(raw: Any) -> dict[str, Any] | None:
         ),
         "validation_exit_code": raw.get("validation_exit_code"),
         "acceptance_criteria_met": bool(raw.get("acceptance_criteria_met")),
-        "acceptance_criteria_notes": str(raw.get("acceptance_criteria_notes") or "").strip(),
+        "acceptance_criteria_notes": str(
+            raw.get("acceptance_criteria_notes") or ""
+        ).strip(),
         "equivalence_claim": equivalence_claim,
     }
 

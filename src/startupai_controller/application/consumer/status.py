@@ -92,7 +92,9 @@ def _metric_window_payload(
     since = now - timedelta(hours=hours)
     counts = db.count_metric_events_since(since)
     occupied_slot_seconds = db.occupied_slot_seconds_since(since, now=now)
-    hydration_total = counts.get("context_cache_hit", 0) + counts.get("context_cache_miss", 0)
+    hydration_total = counts.get("context_cache_hit", 0) + counts.get(
+        "context_cache_miss", 0
+    )
     claim_attempted = counts.get("claim_attempted", 0)
     durable_starts = counts.get("worker_durable_start", 0)
     return {
@@ -117,9 +119,7 @@ def _metric_window_payload(
         "worktree_blocked": counts.get("worktree_blocked", 0),
         "rate_limit_events": counts.get("claim_suppressed", 0),
         "durable_start_reliability": (
-            durable_starts / claim_attempted
-            if claim_attempted
-            else None
+            durable_starts / claim_attempted if claim_attempted else None
         ),
     }
 
@@ -152,7 +152,9 @@ def _ready_pressure_hours(
     total_seconds = 0.0
     for index, (started_at, ready_count) in enumerate(observations):
         window_start = max(started_at, since)
-        next_started_at = observations[index + 1][0] if index + 1 < len(observations) else now
+        next_started_at = (
+            observations[index + 1][0] if index + 1 < len(observations) else now
+        )
         window_end = min(next_started_at, now)
         if ready_count < minimum_ready or window_end <= window_start:
             continue
@@ -347,11 +349,15 @@ def _load_status_runtime(
     )
     persisted_snapshot = deps.read_workflow_snapshot(config.workflow_state_path)
     last_reload_at = (
-        persisted_snapshot.generated_at
-        if persisted_snapshot is not None
-        else None
+        persisted_snapshot.generated_at if persisted_snapshot is not None else None
     )
-    return auto_config, main_workflows, workflow_statuses, effective_interval, last_reload_at
+    return (
+        auto_config,
+        main_workflows,
+        workflow_statuses,
+        effective_interval,
+        last_reload_at,
+    )
 
 
 def _collect_status_runtime_state(
@@ -375,7 +381,9 @@ def _collect_status_runtime_state(
     review_summary = (
         _local_review_summary(db)
         if local_only or review_state_port is None
-        else _github_review_summary(config, db, deps=deps, review_state_port=review_state_port)
+        else _github_review_summary(
+            config, db, deps=deps, review_state_port=review_state_port
+        )
     )
     review_queue = _local_review_queue_summary(db, now=status_now)
     admission_summary = deps.load_admission_summary(control_state, auto_config)
@@ -481,9 +489,15 @@ def _build_status_payload(
         "oldest_deferred_action_age_seconds": oldest_deferred_action_age_seconds,
         "control_plane_health": control_plane_health,
         "throughput_metrics": _throughput_status_payload(throughput_1h, throughput_24h),
-        "reliability_metrics": _reliability_status_payload(throughput_1h, throughput_24h),
-        "context_cache_metrics": _context_cache_status_payload(throughput_1h, throughput_24h),
-        "worktree_reuse_metrics": _worktree_reuse_status_payload(throughput_1h, throughput_24h),
+        "reliability_metrics": _reliability_status_payload(
+            throughput_1h, throughput_24h
+        ),
+        "context_cache_metrics": _context_cache_status_payload(
+            throughput_1h, throughput_24h
+        ),
+        "worktree_reuse_metrics": _worktree_reuse_status_payload(
+            throughput_1h, throughput_24h
+        ),
         "review_summary": review_summary,
         "review_queue": review_queue,
         "admission": admission_summary,
@@ -514,9 +528,13 @@ def collect_status_payload(
     deps: CollectStatusPayloadDeps,
 ) -> dict[str, Any]:
     """Collect consumer status as a JSON-serializable payload."""
-    auto_config, main_workflows, workflow_statuses, effective_interval, last_reload_at = (
-        _load_status_runtime(config, deps=deps)
-    )
+    (
+        auto_config,
+        main_workflows,
+        workflow_statuses,
+        effective_interval,
+        last_reload_at,
+    ) = _load_status_runtime(config, deps=deps)
     status_now = datetime.now(timezone.utc)
     status_state = _collect_status_runtime_state(
         config,

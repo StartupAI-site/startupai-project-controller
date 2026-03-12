@@ -57,7 +57,11 @@ def _classify_gh_failure_kind(detail: str) -> str:
         return "rate_limit"
     if any(marker in text for marker in _GH_RETRYABLE_ERROR_MARKERS):
         return "network"
-    if "authentication failed" in text or "http 401" in text or "must authenticate" in text:
+    if (
+        "authentication failed" in text
+        or "http 401" in text
+        or "must authenticate" in text
+    ):
         return "auth"
     if "http 403" in text and "rate limit" not in text:
         return "auth"

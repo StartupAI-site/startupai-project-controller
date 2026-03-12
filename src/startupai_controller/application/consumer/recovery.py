@@ -33,16 +33,21 @@ def recover_interrupted_sessions(
     log_error: Callable[[str, Exception], None] | None = None,
 ) -> list[Any]:
     """Recover leases left behind by a previous interrupted daemon process."""
-    recovered_leases = recovered if recovered is not None else db.recover_interrupted_leases()
+    recovered_leases = (
+        recovered if recovered is not None else db.recover_interrupted_leases()
+    )
     if not recovered_leases:
         return []
 
     for lease in recovered_leases:
         try:
-            owner, repo, number = deps.resolve_issue_coordinates(lease.issue_ref, cp_config)
+            owner, repo, number = deps.resolve_issue_coordinates(
+                lease.issue_ref, cp_config
+            )
             try:
-                effective_automation_config = automation_config or deps.load_automation_config(
-                    config.automation_config_path
+                effective_automation_config = (
+                    automation_config
+                    or deps.load_automation_config(config.automation_config_path)
                 )
                 classification, pr_match, _reason = deps.classify_open_pr_candidates(
                     lease.issue_ref,

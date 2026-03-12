@@ -33,9 +33,11 @@ def reconcile_handoffs(
     # Scan all issue prefixes for handoff markers
     for prefix, repo_slug in config.issue_prefixes.items():
         try:
-            issue_numbers = review_state_port.search_open_issue_numbers_with_comment_marker(
-                repo_slug,
-                f"{MARKER_PREFIX}:handoff:job=",
+            issue_numbers = (
+                review_state_port.search_open_issue_numbers_with_comment_marker(
+                    repo_slug,
+                    f"{MARKER_PREFIX}:handoff:job=",
+                )
             )
         except GhQueryError:
             continue

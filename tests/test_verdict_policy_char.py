@@ -15,7 +15,6 @@ from startupai_controller.domain.verdict_policy import (
     verdict_marker_text,
 )
 
-
 # ---------------------------------------------------------------------------
 # Verdict marker format
 # ---------------------------------------------------------------------------
