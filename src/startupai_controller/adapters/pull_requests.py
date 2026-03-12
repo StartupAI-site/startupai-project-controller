@@ -1529,6 +1529,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
             is_draft=payload.is_draft,
             body=payload.body,
             author=payload.author,
+            state=payload.state,
         )
 
     def linked_issue_refs(self, pr_repo: str, pr_number: int) -> tuple[str, ...]:

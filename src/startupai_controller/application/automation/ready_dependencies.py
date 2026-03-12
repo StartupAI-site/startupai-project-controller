@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Callable
 
 from startupai_controller.domain.models import IssueSnapshot
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.application.automation.ready_claim import (
+    _set_blocked_with_reason,
+)
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     GhQueryError,
@@ -20,12 +25,9 @@ def enforce_ready_dependency_guard(
     this_repo_prefix: str | None = None,
     all_prefixes: bool = False,
     dry_run: bool = False,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver=None,
-    board_mutator=None,
-    gh_runner=None,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     find_unmet_dependencies: Callable[..., list[tuple[str, str]]],
-    set_blocked_with_reason: Callable[..., None],
 ) -> list[str]:
     """Block Ready issues with unmet predecessors and return corrected refs."""
     unmet = find_unmet_dependencies(
@@ -33,22 +35,22 @@ def enforce_ready_dependency_guard(
         ready_items=ready_items,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
-        status_resolver=status_resolver,
+        status_resolver=review_state_port.get_issue_status,
         project_owner=project_owner,
         project_number=project_number,
     )
     for ref, reason in unmet:
         if not dry_run:
             try:
-                set_blocked_with_reason(
+                _set_blocked_with_reason(
                     ref,
                     reason,
                     config,
                     project_owner,
                     project_number,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
+                    dry_run=dry_run,
+                    review_state_port=review_state_port,
+                    board_port=board_port,
                 )
             except GhQueryError:
                 pass

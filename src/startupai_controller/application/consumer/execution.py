@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from startupai_controller.domain.models import CycleResult, ReviewQueueDrainSummary
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
 
 
 @dataclass(frozen=True)
@@ -58,13 +62,16 @@ def execute_claimed_session(
     deps: ExecutionDeps,
     launch_context: Any,
     claimed_context: Any,
-    subprocess_runner: Callable[..., Any] | None,
+    process_runner: ProcessRunnerPort | None,
     file_reader: Callable[[Path], str] | None,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
+    pr_port: PullRequestPort | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: GhRunnerPort | None,
 ) -> Any:
     """Execute Codex for a claimed session and apply immediate board handoff."""
     candidate = launch_context.issue_ref
@@ -94,7 +101,7 @@ def execute_claimed_session(
         output_path,
         launch_context.effective_consumer_config.codex_timeout_seconds,
         heartbeat_fn=lambda: db.update_heartbeat(candidate),
-        subprocess_runner=subprocess_runner,
+        subprocess_runner=process_runner.run if process_runner is not None else None,
     )
 
     codex_result = deps.parse_codex_result(output_path, file_reader=file_reader)
@@ -109,8 +116,8 @@ def execute_claimed_session(
         codex_result=codex_result,
         session_status=session_status,
         failure_reason=failure_reason,
-        subprocess_runner=subprocess_runner,
-        gh_runner=gh_runner,
+        subprocess_runner=process_runner.run if process_runner is not None else None,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
 
     should_transition_to_review = bool(pr_outcome.pr_url) and (
@@ -131,6 +138,8 @@ def execute_claimed_session(
             session_id=session_id,
             pr_url=pr_outcome.pr_url or "",
             session_status=pr_outcome.session_status,
+            review_state_port=review_state_port,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             gh_runner=gh_runner,
@@ -149,10 +158,12 @@ def execute_claimed_session(
             session_status=pr_outcome.session_status,
             codex_result=codex_result,
             has_commits=pr_outcome.has_commits,
+            pr_port=pr_port,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_poster=comment_poster,
-            subprocess_runner=subprocess_runner,
+            subprocess_runner=process_runner.run if process_runner is not None else None,
             gh_runner=gh_runner,
         )
 
@@ -179,9 +190,11 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: GhRunnerPort | None,
 ) -> ReviewQueueDrainSummary:
     """Transition a claimed session into Review and perform immediate rescue."""
     cp_config = prepared.cp_config
@@ -194,9 +207,11 @@ def handoff_execution_to_review(
         session_id=session_id,
         config=config,
         critical_path_config=cp_config,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     deps.record_metric(db, config, "session_transition_review", issue_ref=candidate)
 
@@ -209,7 +224,7 @@ def handoff_execution_to_review(
         db=db,
         pr_url=pr_url,
         session_id=session_id,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     queue_entry = deps.queue_claimed_session_for_review(
         store=handoff_store,
@@ -226,7 +241,7 @@ def handoff_execution_to_review(
         automation_config=auto_config,
         store=handoff_store,
         queue_entry=queue_entry,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
         db=db,
     )
 
@@ -242,11 +257,13 @@ def handle_non_review_execution_outcome(
     session_status: str,
     codex_result: dict[str, Any] | None,
     has_commits: bool,
+    pr_port: PullRequestPort | None,
+    board_port: BoardMutationPort | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     comment_poster: Callable[..., None] | None,
     subprocess_runner: Callable[..., Any] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: GhRunnerPort | None,
 ) -> tuple[str, Any | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
     cp_config = prepared.cp_config
@@ -261,16 +278,16 @@ def handle_non_review_execution_outcome(
             config.project_number,
             config=cp_config,
             github_memo=prepared.github_memo,
-            gh_runner=gh_runner,
+            gh_runner=gh_runner.run_gh if gh_runner is not None else None,
         )
         resolution_evaluation = deps.verify_resolution_payload(
             candidate,
             codex_result.get("resolution") if codex_result else None,
             config=launch_context.effective_consumer_config,
             workflows=prepared.main_workflows,
-            pr_port=github_bundle.pull_requests,
+            pr_port=pr_port or github_bundle.pull_requests,
             subprocess_runner=subprocess_runner,
-            gh_runner=gh_runner,
+            gh_runner=gh_runner.run_gh if gh_runner is not None else None,
         )
         done_reason = deps.apply_resolution_action(
             candidate,
@@ -279,10 +296,11 @@ def handle_non_review_execution_outcome(
             db=db,
             config=config,
             critical_path_config=cp_config,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_poster=comment_poster,
-            gh_runner=gh_runner,
+            gh_runner=gh_runner.run_gh if gh_runner is not None else None,
         )
         if done_reason == "already_resolved":
             deps.record_metric(db, config, "session_transition_done", issue_ref=candidate)
@@ -294,9 +312,10 @@ def handle_non_review_execution_outcome(
             cp_config,
             config.project_owner,
             config.project_number,
+            board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
-            gh_runner=gh_runner,
+            gh_runner=gh_runner.run_gh if gh_runner is not None else None,
         )
         deps.record_successful_github_mutation(db)
     except Exception as err:
@@ -332,10 +351,11 @@ def finalize_claimed_session(
     launch_context: Any,
     claimed_context: Any,
     execution_outcome: Any,
+    review_state_port: ReviewStatePort | None,
     board_info_resolver: Callable[..., Any] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: GhRunnerPort | None,
 ) -> CycleResult:
     """Persist final session state and return the cycle result."""
     cp_config = prepared.cp_config
@@ -360,9 +380,11 @@ def finalize_claimed_session(
         session_id=session_id,
         codex_result=execution_outcome.codex_result,
         cp_config=cp_config,
-        comment_checker=comment_checker,
+        comment_checker=comment_checker or (
+            review_state_port.comment_exists if review_state_port is not None else None
+        ),
         comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     deps.maybe_escalate_claimed_session_failure(
         config=config,
@@ -373,9 +395,11 @@ def finalize_claimed_session(
         codex_result=execution_outcome.codex_result,
         cp_config=cp_config,
         board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
+        comment_checker=comment_checker or (
+            review_state_port.comment_exists if review_state_port is not None else None
+        ),
         comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
 
     return CycleResult(

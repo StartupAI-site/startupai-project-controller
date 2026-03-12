@@ -190,25 +190,18 @@ def _post_claim_comment(
     *,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Post deterministic kickoff comment on successful claim."""
     marker = _marker_for("claim-ready", issue_ref)
     owner, repo, number = _resolve_issue_coordinates(issue_ref, config)
 
-    checker = comment_checker or (
-        lambda owner, repo, number, marker, *, gh_runner=None: _comment_exists(
-            owner,
-            repo,
-            number,
-            marker,
-            review_state_port=review_state_port,
-            gh_runner=gh_runner,
-        )
-    )
-    if checker(owner, repo, number, marker, gh_runner=gh_runner):
+    if _comment_exists(
+        owner,
+        repo,
+        number,
+        marker,
+        review_state_port=review_state_port,
+    ):
         return
 
     executor_label = f"Executor: `{executor}`" if executor else ""
@@ -218,9 +211,6 @@ def _post_claim_comment(
         "Board transition: `Ready -> In Progress`.\n"
         f"{executor_label}".strip()
     )
-    if comment_poster is not None:
-        comment_poster(owner, repo, number, body, gh_runner=gh_runner)
-        return
     board_port.post_issue_comment(f"{owner}/{repo}", number, body)
 
 
@@ -410,7 +400,6 @@ def _process_schedule_ready_snapshot(
             board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
         if not changed:
             return
@@ -566,9 +555,6 @@ def _attempt_claim_ready_candidate(
     board_port: BoardMutationPort,
     board_info_resolver: Callable[..., BoardInfo] | None,
     board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     norm_executor: str,
     lane_wip_counts: dict[tuple[str, str], int],
     wip_counts: dict[str, int],
@@ -624,7 +610,6 @@ def _attempt_claim_ready_candidate(
         board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
     if not changed:
         return ClaimReadyResult(reason=f"status-not-ready:{old_status}")
@@ -637,9 +622,6 @@ def _attempt_claim_ready_candidate(
                 config,
                 review_state_port=review_state_port,
                 board_port=board_port,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
-                gh_runner=gh_runner,
             )
         except GhQueryError:
             pass
@@ -665,9 +647,6 @@ def claim_ready_issue(
     status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> ClaimReadyResult:
     """Claim one Ready issue for a specific executor."""
     norm_executor = executor.strip().lower()
@@ -714,9 +693,6 @@ def claim_ready_issue(
             board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
-            gh_runner=gh_runner,
             norm_executor=norm_executor,
             lane_wip_counts=lane_wip_counts,
             wip_counts=wip_counts,

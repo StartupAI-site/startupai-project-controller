@@ -161,6 +161,7 @@ def prepare_selected_launch_candidate(
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
+    pr_port: Any | None,
     prepare_launch_candidate: Callable[..., Any],
     handle_selected_launch_query_error: Callable[..., tuple[None, Any]],
     handle_selected_launch_workflow_config_error: Callable[..., tuple[None, Any]],
@@ -184,6 +185,7 @@ def prepare_selected_launch_candidate(
                 board_info_resolver=board_info_resolver,
                 board_mutator=board_mutator,
                 gh_runner=gh_runner,
+                pr_port=pr_port,
             ),
             None,
         )

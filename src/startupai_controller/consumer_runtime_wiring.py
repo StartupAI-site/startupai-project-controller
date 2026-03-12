@@ -65,6 +65,7 @@ from startupai_controller.domain.review_queue_policy import (
 )
 from startupai_controller.runtime.wiring import (
     build_gh_runner_port,
+    build_github_port_bundle,
     build_process_runner_port,
     gh_reason_code,
     open_consumer_db,
@@ -284,6 +285,13 @@ def run_one_cycle(
         return cycle_result_factory(action="error", reason=f"control-plane:{err}")
 
     assert prepared is not None
+    github_bundle = build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
+        config=prepared.cp_config,
+        github_memo=prepared.github_memo,
+        gh_runner=gh_runner,
+    )
     gh_port = build_gh_runner_port(gh_runner=gh_runner)
     process_runner = build_process_runner_port(
         gh_runner=gh_runner,
@@ -301,6 +309,9 @@ def run_one_cycle(
         gh_runner=gh_port,
         process_runner=process_runner,
         file_reader=file_reader,
+        review_state_port=github_bundle.review_state,
+        board_port=github_bundle.board_mutations,
+        pr_port=github_bundle.pull_requests,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,

@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable
-
 from startupai_controller.board_automation_config import BoardAutomationConfig
-from startupai_controller.application.automation.ready_claim import (
-    BoardInfo,
-    _transition_issue_status,
-)
+from startupai_controller.application.automation.ready_claim import _transition_issue_status
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
@@ -31,9 +26,6 @@ def _sync_review_transition(
     dry_run: bool = False,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> tuple[int, str]:
     """Apply one review-state transition and format the result."""
     changed, old = _transition_issue_status(
@@ -46,9 +38,6 @@ def _sync_review_transition(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
     if changed:
         return 0, f"{issue_ref}: {old} -> {target_status} ({reason})"
@@ -82,9 +71,6 @@ def _handle_checks_failed_sync_event(
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., BoardInfo] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
 ) -> tuple[int, str]:
     """Handle checks_failed state sync for one issue."""
     if governed_single_machine_issue:
@@ -124,9 +110,6 @@ def _handle_checks_failed_sync_event(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
 
 
@@ -146,9 +129,6 @@ def sync_review_state(
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> tuple[int, str]:
     """Sync board state based on PR/review/check events."""
     del pr_state, review_state
@@ -176,9 +156,6 @@ def sync_review_state(
             dry_run=dry_run,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
 
     if event_kind == "changes_requested":
@@ -195,9 +172,6 @@ def sync_review_state(
             dry_run=dry_run,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
 
     if event_kind == "checks_failed":
@@ -212,9 +186,6 @@ def sync_review_state(
             pr_port=pr_port,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
 
     if event_kind == "pr_close_merged":
@@ -232,9 +203,6 @@ def sync_review_state(
             dry_run=dry_run,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
 
     if event_kind == "checks_passed":

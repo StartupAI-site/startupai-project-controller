@@ -8,6 +8,7 @@ A lazy ``_core()`` import avoids circular dependency since
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -409,6 +410,42 @@ def propagate_blocker(
 ) -> list[str]:
     """Propagate blocker info to successors. Returns list of commented refs."""
     core = _core()
+    review_state_port = review_state_port or core._default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port = board_port or core._default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+
+    if comment_checker is not None:
+        review_state_port = SimpleNamespace(
+            comment_exists=lambda repo, issue_number, marker: comment_checker(
+                repo.split("/", 1)[0],
+                repo.split("/", 1)[1],
+                issue_number,
+                marker,
+                gh_runner=gh_runner,
+            ),
+            list_issues_by_status=review_state_port.list_issues_by_status,
+            get_issue_fields=review_state_port.get_issue_fields,
+        )
+    if comment_poster is not None:
+        board_port = SimpleNamespace(
+            post_issue_comment=lambda repo, issue_number, body: comment_poster(
+                repo.split("/", 1)[0],
+                repo.split("/", 1)[1],
+                issue_number,
+                body,
+                gh_runner=gh_runner,
+            )
+        )
+
     return _app_propagate_blocker(
         issue_ref,
         config,
@@ -420,18 +457,6 @@ def propagate_blocker(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        board_info_resolver=board_info_resolver,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        list_project_items_by_status_fn=core._list_project_items_by_status,
-        snapshot_to_issue_ref_fn=core._snapshot_to_issue_ref,
-        query_project_item_field_fn=core._query_project_item_field,
-        comment_exists_fn=core._comment_exists,
-        post_comment_fn=core._post_comment,
-        issue_ref_to_repo_parts_fn=core._issue_ref_to_repo_parts,
     )
 
 
@@ -450,6 +475,17 @@ def reconcile_handoffs(
 ) -> dict[str, int]:
     """Reconcile handoff jobs. Returns {completed, retried, escalated, pending}."""
     core = _core()
+    if review_state_port is None or board_port is None:
+        github_bundle = core._ensure_github_bundle(
+            github_bundle,
+            project_owner=project_owner,
+            project_number=project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
+        review_state_port = review_state_port or github_bundle.review_state
+        board_port = board_port or github_bundle.board_mutations
+
     return _app_reconcile_handoffs(
         config,
         project_owner,
@@ -457,12 +493,8 @@ def reconcile_handoffs(
         ack_timeout_minutes=ack_timeout_minutes,
         max_retries=max_retries,
         dry_run=dry_run,
-        github_bundle=github_bundle,
         review_state_port=review_state_port,
         board_port=board_port,
-        gh_runner=gh_runner,
-        ensure_github_bundle_fn=core._ensure_github_bundle,
-        set_blocked_with_reason_fn=core._set_blocked_with_reason,
     )
 
 

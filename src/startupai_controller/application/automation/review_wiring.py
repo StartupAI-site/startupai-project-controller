@@ -12,6 +12,7 @@ parameters instead of importing concrete factories directly.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Callable
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
@@ -20,6 +21,8 @@ from startupai_controller.domain.models import (
     ReviewRescueSweep,
     ReviewSnapshot,
 )
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 from startupai_controller.application.automation.codex_gate import (
@@ -67,33 +70,16 @@ def has_copilot_review_signal(
 def review_scope_refs(
     pr_repo: str,
     pr_number: int,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
     *,
-    gh_runner: Callable[..., str] | None = None,
-    query_closing_issues_fn: Callable[..., list] | None = None,
-    query_issue_board_info_fn: Callable[..., object] | None = None,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
 ) -> list[str]:
     """Return linked issue refs currently in Review for a PR."""
-    if query_closing_issues_fn is None:
-        return []
-    linked = query_closing_issues_fn(
-        *pr_repo.split("/", maxsplit=1),
-        pr_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    review_refs: list[str] = []
-    if query_issue_board_info_fn is None:
-        return review_refs
-    for issue in linked:
-        info = query_issue_board_info_fn(
-            issue.ref, config, project_owner, project_number
-        )
-        if info.status == "Review":
-            review_refs.append(issue.ref)
-    return review_refs
+    return [
+        issue_ref
+        for issue_ref in pr_port.linked_issue_refs(pr_repo, pr_number)
+        if review_state_port.get_issue_status(issue_ref) == "Review"
+    ]
 
 
 def configured_review_checks(
@@ -112,42 +98,91 @@ def configured_review_checks(
 def build_review_snapshot(
     pr_repo: str,
     pr_number: int,
-    config: CriticalPathConfig,
     automation_config: BoardAutomationConfig,
-    project_owner: str,
-    project_number: int,
     *,
-    dry_run: bool = False,
-    pr_port=None,
-    gh_runner: Callable[..., str] | None = None,
-    default_pr_port_fn: Callable[..., object] | None = None,
-    query_closing_issues_fn: Callable[..., list] | None = None,
-    query_issue_board_info_fn: Callable[..., object] | None = None,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
 ) -> ReviewSnapshot:
     """Project PR review state into one explicit snapshot."""
     _review_refs = tuple(
         review_scope_refs(
             pr_repo,
             pr_number,
-            config,
-            project_owner,
-            project_number,
-            gh_runner=gh_runner,
-            query_closing_issues_fn=query_closing_issues_fn,
-            query_issue_board_info_fn=query_issue_board_info_fn,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
         )
     )
-    if pr_port is None and default_pr_port_fn is not None:
-        pr_port = default_pr_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
     return pr_port.review_snapshots(
         {(pr_repo, pr_number): _review_refs},
         trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
     )[(pr_repo, pr_number)]
+
+
+class _DelegatingPort:
+    """Delegate unknown attributes to an underlying port implementation."""
+
+    def __init__(self, base) -> None:
+        self._base = base
+
+    def __getattr__(self, name: str):
+        return getattr(self._base, name)
+
+
+def _wrap_status_transition_board_port(
+    board_port,
+    *,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    board_info_resolver: Callable[..., object] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+):
+    """Overlay legacy board-mutator behavior on a typed board port."""
+    if board_mutator is None or board_info_resolver is None:
+        return board_port
+
+    if board_port is None:
+        board_port = SimpleNamespace()
+
+    class _CompatBoardMutationPort(_DelegatingPort):
+        def set_issue_status(self, issue_ref: str, status: str) -> None:
+            info = board_info_resolver(
+                issue_ref,
+                config,
+                project_owner,
+                project_number,
+            )
+            board_mutator(info.project_id, info.item_id, status)
+
+    return _CompatBoardMutationPort(board_port)
+
+
+def _wrap_status_transition_review_state_port(
+    review_state_port,
+    *,
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    board_info_resolver: Callable[..., object] | None = None,
+):
+    """Overlay legacy board-info status reads on a typed review-state port."""
+    if board_info_resolver is None:
+        return review_state_port
+
+    if review_state_port is None:
+        review_state_port = SimpleNamespace()
+
+    class _CompatReviewStatePort(_DelegatingPort):
+        def get_issue_status(self, issue_ref: str):
+            info = board_info_resolver(
+                issue_ref,
+                config,
+                project_owner,
+                project_number,
+            )
+            return info.status
+
+    return _CompatReviewStatePort(review_state_port)
 
 
 # ---------------------------------------------------------------------------
@@ -198,15 +233,29 @@ def sync_review_state(
         board_port = default_board_mutation_port_fn(
             project_owner, project_number, config, gh_runner=gh_runner
         )
-    status_mutator = board_mutator
     if (
-        status_mutator is None
+        board_mutator is None
         and board_info_resolver is not None
         and legacy_board_status_mutator_fn is not None
     ):
-        status_mutator = legacy_board_status_mutator_fn(
+        board_mutator = legacy_board_status_mutator_fn(
             project_owner, project_number, config, gh_runner=gh_runner
         )
+    board_port = _wrap_status_transition_board_port(
+        board_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+    )
+    review_state_port = _wrap_status_transition_review_state_port(
+        review_state_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        board_info_resolver=board_info_resolver,
+    )
 
     return _app_sync_review_state(
         event_kind=event_kind,
@@ -223,9 +272,6 @@ def sync_review_state(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=status_mutator,
-        gh_runner=gh_runner,
     )
 
 
@@ -239,40 +285,18 @@ def codex_review_gate(
     *,
     dry_run: bool = False,
     apply_fail_routing: bool = True,
-    gh_runner: Callable[..., str] | None = None,
-    # Injected helpers
-    query_closing_issues_fn: Callable[..., list] | None = None,
-    query_issue_board_info_fn: Callable[..., object] | None = None,
-    query_latest_codex_verdict_fn: Callable[..., object] | None = None,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
     apply_codex_fail_routing_fn: Callable[..., None] | None = None,
 ) -> tuple[int, str]:
     """Assemble review data and delegate to the codex_review_gate use case."""
-    if query_closing_issues_fn is None:
-        return 4, f"{pr_repo}#{pr_number}: missing query_closing_issues_fn"
-    linked = query_closing_issues_fn(
-        *pr_repo.split("/", maxsplit=1),
-        pr_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    _review_refs = review_scope_refs(
+    snapshot = build_review_snapshot(
         pr_repo,
         pr_number,
-        config,
-        project_owner,
-        project_number,
-        gh_runner=gh_runner,
-        query_closing_issues_fn=query_closing_issues_fn,
-        query_issue_board_info_fn=query_issue_board_info_fn,
+        automation_config,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
     )
-    verdict = None
-    if query_latest_codex_verdict_fn is not None:
-        verdict = query_latest_codex_verdict_fn(
-            pr_repo,
-            pr_number,
-            trusted_actors=automation_config.trusted_codex_actors,
-            gh_runner=gh_runner,
-        )
 
     def _fail_router(**kwargs) -> None:
         if apply_codex_fail_routing_fn is not None:
@@ -284,15 +308,14 @@ def codex_review_gate(
                 project_owner=project_owner,
                 project_number=project_number,
                 dry_run=kwargs["dry_run"],
-                gh_runner=gh_runner,
             )
 
     return _app_codex_review_gate(
         pr_repo=pr_repo,
         pr_number=pr_number,
-        linked_refs=[issue.ref for issue in linked],
-        review_refs=_review_refs,
-        verdict=verdict,
+        linked_refs=list(pr_port.linked_issue_refs(pr_repo, pr_number)),
+        review_refs=list(snapshot.review_refs),
+        verdict=snapshot.codex_verdict,
         dry_run=dry_run,
         apply_fail_routing=apply_fail_routing,
         fail_router=_fail_router,
@@ -337,16 +360,9 @@ def review_rescue(
     snapshot = snapshot or build_review_snapshot(
         pr_repo=pr_repo,
         pr_number=pr_number,
-        config=config,
         automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        dry_run=dry_run,
         pr_port=pr_port,
-        gh_runner=gh_runner,
-        default_pr_port_fn=default_pr_port_fn,
-        query_closing_issues_fn=query_closing_issues_fn,
-        query_issue_board_info_fn=query_issue_board_info_fn,
+        review_state_port=review_state_port,
     )
 
     def _automerge_runner(**kwargs) -> tuple[int, str]:
@@ -483,7 +499,8 @@ def automerge_review(
                 project_number=project_number,
                 dry_run=kwargs["dry_run"],
                 apply_fail_routing=True,
-                gh_runner=gh_runner,
+                pr_port=pr_port,
+                review_state_port=review_state_port,
             )
         return 4, "codex_review_gate_fn not provided"
 

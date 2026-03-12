@@ -334,6 +334,7 @@ def prepare_selected_launch_candidate(
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
+    pr_port: Any | None = None,
 ) -> tuple[Any | None, Any | None]:
     """Prepare the selected candidate into launch-ready local context."""
     return _claim_wiring.prepare_selected_launch_candidate(
@@ -346,6 +347,7 @@ def prepare_selected_launch_candidate(
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
+        pr_port=pr_port,
         record_metric=_support_wiring.record_metric,
         prepare_launch_candidate=_cycle_wiring.prepare_launch_candidate,
         handle_selected_launch_query_error=handle_selected_launch_query_error,
@@ -464,6 +466,8 @@ def resolve_launch_context_for_cycle(
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
+    review_state_port: Any | None = None,
+    pr_port: Any | None = None,
 ) -> tuple[Any | None, Any | None]:
     """Resolve or prepare launch-ready work for this cycle."""
     return _cycle_wiring.resolve_launch_context_for_cycle(
@@ -473,6 +477,8 @@ def resolve_launch_context_for_cycle(
         launch_context=launch_context,
         target_issue=target_issue,
         dry_run=dry_run,
+        review_state_port=review_state_port,
+        pr_port=pr_port,
         status_resolver=status_resolver,
         subprocess_runner=subprocess_runner,
         board_info_resolver=board_info_resolver,
@@ -704,6 +710,8 @@ def claim_launch_context(
     prepared: Any,
     launch_context: Any,
     slot_id: int,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
     status_resolver: Callable[..., str] | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
@@ -718,6 +726,8 @@ def claim_launch_context(
         prepared=prepared,
         launch_context=launch_context,
         slot_id=slot_id,
+        review_state_port=review_state_port,
+        board_port=board_port,
         status_resolver=status_resolver,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
@@ -768,6 +778,8 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
@@ -781,6 +793,8 @@ def handoff_execution_to_review(
         session_id=session_id,
         pr_url=pr_url,
         session_status=session_status,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
@@ -800,6 +814,8 @@ def transition_claimed_session_to_review(
     session_id: str,
     config: Any,
     critical_path_config: Any,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
@@ -906,6 +922,8 @@ def handle_non_review_execution_outcome(
     comment_poster: Callable[..., None] | None,
     subprocess_runner: Callable[..., Any] | None,
     gh_runner: Callable[..., str] | None,
+    pr_port: Any | None = None,
+    board_port: Any | None = None,
 ) -> tuple[str, Any | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
     return _execution_outcome_wiring.handle_non_review_execution_outcome(
@@ -917,6 +935,8 @@ def handle_non_review_execution_outcome(
         session_status=session_status,
         codex_result=codex_result,
         has_commits=has_commits,
+        pr_port=pr_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_poster=comment_poster,
@@ -1028,13 +1048,17 @@ def execute_claimed_session(
     prepared: Any,
     launch_context: Any,
     claimed_context: Any,
-    subprocess_runner: Callable[..., Any] | None,
+    process_runner: Any | None = None,
+    subprocess_runner: Callable[..., Any] | None = None,
     file_reader: Callable[..., Any] | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
+    pr_port: Any | None = None,
 ) -> Any:
     """Execute Codex for a claimed session and apply immediate board handoff."""
     return _execution_outcome_wiring.execute_claimed_session(
@@ -1043,8 +1067,11 @@ def execute_claimed_session(
         prepared=prepared,
         launch_context=launch_context,
         claimed_context=claimed_context,
-        subprocess_runner=subprocess_runner,
+        process_runner=process_runner if process_runner is not None else subprocess_runner,
         file_reader=file_reader,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        pr_port=pr_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_checker=comment_checker,
@@ -1072,6 +1099,7 @@ def finalize_claimed_session(
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
+    review_state_port: Any | None = None,
 ) -> Any:
     """Persist final session state and return the cycle result."""
     return _execution_outcome_wiring.finalize_claimed_session(
@@ -1081,6 +1109,7 @@ def finalize_claimed_session(
         launch_context=launch_context,
         claimed_context=claimed_context,
         execution_outcome=execution_outcome,
+        review_state_port=review_state_port,
         board_info_resolver=board_info_resolver,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
