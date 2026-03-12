@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, cast
 
 import startupai_controller.consumer_automation_bridge as _automation_bridge
 import startupai_controller.consumer_board_state_helpers as _board_state_helpers
@@ -21,6 +22,7 @@ import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.automation_ready_review_wiring import (
     claim_ready_issue as _claim_ready_issue,
 )
+from startupai_controller.application.consumer.cycle import PreparedCycleDeps
 from startupai_controller.application.consumer.reconciliation import (
     ReconciliationWiringDeps,
     reconcile_active_repair_review_items as _reconcile_active_repair_review_items_use_case,
@@ -41,7 +43,10 @@ from startupai_controller.consumer_types import (
     ClaimedSessionContext,
     PendingClaimContext,
     PrCreationOutcome,
+    PreparedCycleContext,
+    PreparedLaunchContext,
     SelectedLaunchCandidate,
+    SessionExecutionOutcome,
     WorktreePrepareError,
 )
 from startupai_controller.consumer_workflow import WorkflowConfigError
@@ -58,7 +63,9 @@ from startupai_controller.domain.scheduling_policy import (
     snapshot_to_issue_ref as _snapshot_to_issue_ref,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.runtime.wiring import (
     GitHubRuntimeMemo as CycleGitHubMemo,
@@ -245,6 +252,21 @@ def reconcile_board_truth(
             config=critical_path_config,
             gh_runner=gh_runner,
         )
+    if pr_port is None:
+        assert github_bundle is not None
+        effective_pr_port = github_bundle.pull_requests
+    else:
+        effective_pr_port = pr_port
+    if review_state_port is None:
+        assert github_bundle is not None
+        effective_review_state_port = github_bundle.review_state
+    else:
+        effective_review_state_port = review_state_port
+    if board_port is None:
+        assert github_bundle is not None
+        effective_board_port = github_bundle.board_mutations
+    else:
+        effective_board_port = board_port
     return _wire_reconcile_board_truth_use_case(
         consumer_config,
         critical_path_config,
@@ -252,9 +274,9 @@ def reconcile_board_truth(
         db,
         deps=build_reconciliation_wiring_deps(),
         session_store=effective_session_store,
-        pr_port=pr_port or github_bundle.pull_requests,
-        review_state_port=review_state_port or github_bundle.review_state,
-        board_port=board_port or github_bundle.board_mutations,
+        pr_port=effective_pr_port,
+        review_state_port=effective_review_state_port,
+        board_port=effective_board_port,
         dry_run=dry_run,
         board_snapshot=board_snapshot,
     )
@@ -315,7 +337,10 @@ def select_launch_candidate_for_cycle(
         parse_issue_ref=parse_issue_ref,
         effective_retry_backoff=_selection_retry_wiring.effective_retry_backoff,
         retry_backoff_active=_selection_retry_wiring.retry_backoff_active,
-        maybe_activate_claim_suppression=_support_wiring.maybe_activate_claim_suppression,
+        maybe_activate_claim_suppression=cast(
+            Callable[..., None],
+            _support_wiring.maybe_activate_claim_suppression,
+        ),
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
         gh_query_error_type=GhQueryError,
@@ -374,7 +399,10 @@ def handle_selected_launch_query_error(
         config=config,
         db=db,
         record_metric=_support_wiring.record_metric,
-        maybe_activate_claim_suppression=_support_wiring.maybe_activate_claim_suppression,
+        maybe_activate_claim_suppression=cast(
+            Callable[..., None],
+            _support_wiring.maybe_activate_claim_suppression,
+        ),
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
         cycle_result_factory=CycleResult,
@@ -503,7 +531,7 @@ def open_pending_claim_session(
         launch_context=launch_context,
         executor=executor,
         slot_id=slot_id,
-        complete_session=_support_wiring.complete_session,
+        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
         pending_claim_context_factory=PendingClaimContext,
         cycle_result_factory=CycleResult,
     )
@@ -532,7 +560,7 @@ def enforce_claim_retry_ceiling(
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
-        complete_session=_support_wiring.complete_session,
+        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
         escalate_to_claude=_board_state_helpers.escalate_to_claude_from_shell,
         cycle_result_factory=CycleResult,
         logger=logger,
@@ -619,10 +647,13 @@ def handle_launch_claim_api_failure(
         config=config,
         db=db,
         pending_claim=pending_claim,
-        maybe_activate_claim_suppression=_support_wiring.maybe_activate_claim_suppression,
+        maybe_activate_claim_suppression=cast(
+            Callable[..., None],
+            _support_wiring.maybe_activate_claim_suppression,
+        ),
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
-        complete_session=_support_wiring.complete_session,
+        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
         record_metric=_support_wiring.record_metric,
         cycle_result_factory=CycleResult,
         logger=logger,
@@ -644,7 +675,7 @@ def handle_launch_claim_unexpected_failure(
         config=config,
         db=db,
         pending_claim=pending_claim,
-        complete_session=_support_wiring.complete_session,
+        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
         record_metric=_support_wiring.record_metric,
         cycle_result_factory=CycleResult,
         logger=logger,
@@ -666,7 +697,7 @@ def handle_launch_claim_rejection(
         config=config,
         db=db,
         pending_claim=pending_claim,
-        complete_session=_support_wiring.complete_session,
+        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
         record_metric=_support_wiring.record_metric,
         cycle_result_factory=CycleResult,
     )
@@ -899,7 +930,10 @@ def run_immediate_review_handoff(
         github_memo_factory=CycleGitHubMemo,
         build_review_snapshots_for_queue_entries=_review_queue_helpers.build_review_snapshots_for_queue_entries,
         review_rescue=_automation_bridge.review_rescue,
-        apply_review_queue_result=_review_queue_helpers.apply_review_queue_result,
+        apply_review_queue_result=cast(
+            Callable[..., None],
+            _review_queue_helpers.apply_review_queue_result,
+        ),
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
         summary_factory=ReviewQueueDrainSummary,
@@ -935,6 +969,16 @@ def handle_non_review_execution_outcome(
             github_memo=prepared.github_memo,
             gh_runner=gh_runner,
         )
+    if pr_port is None:
+        assert github_bundle is not None
+        effective_pr_port = github_bundle.pull_requests
+    else:
+        effective_pr_port = pr_port
+    if board_port is None:
+        assert github_bundle is not None
+        effective_board_port = github_bundle.board_mutations
+    else:
+        effective_board_port = board_port
     return _execution_outcome_wiring.handle_non_review_execution_outcome(
         config=config,
         db=db,
@@ -944,8 +988,8 @@ def handle_non_review_execution_outcome(
         session_status=session_status,
         codex_result=codex_result,
         has_commits=has_commits,
-        pr_port=pr_port or github_bundle.pull_requests,
-        board_port=board_port or github_bundle.board_mutations,
+        pr_port=effective_pr_port,
+        board_port=effective_board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         comment_poster=comment_poster,
@@ -989,7 +1033,7 @@ def persist_claimed_session_completion(
         issue_ref=issue_ref,
         execution_outcome=execution_outcome,
         final_phase=final_phase,
-        complete_session=_support_wiring.complete_session,
+        complete_session=cast(Callable[..., None], _support_wiring.complete_session),
     )
 
 
@@ -1063,7 +1107,7 @@ def execute_claimed_session(
     board_mutator: Callable[..., None] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: GhRunnerPort | Callable[..., str] | None,
     review_state_port: Any | None = None,
     board_port: Any | None = None,
     pr_port: Any | None = None,
@@ -1086,7 +1130,7 @@ def execute_claimed_session(
         board_mutator=board_mutator,
         comment_checker=comment_checker,
         comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        gh_runner=cast(Callable[..., str] | None, gh_runner),
         assemble_codex_prompt=_codex_comment_wiring.assemble_codex_prompt,
         run_codex_session=_codex_comment_wiring.run_codex_session,
         parse_codex_result=_codex_comment_wiring.parse_codex_result,
@@ -1138,22 +1182,22 @@ def prepared_cycle_deps(
     board_mutator: Callable[..., None] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-):
+) -> PreparedCycleDeps:
     """Bind compatibility seams at the outer wiring boundary."""
 
     def _resolve_launch_context_for_cycle(
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
-        launch_context: Any | None,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
+        launch_context: PreparedLaunchContext | None,
         target_issue: str | None,
         dry_run: bool,
-        review_state_port: Any | None,
-        pr_port: Any | None,
+        review_state_port: ReviewStatePort | None,
+        pr_port: PullRequestPort | None,
         subprocess_runner: Any | None,
-        gh_runner: Any | None,
-    ) -> tuple[Any | None, Any | None]:
+        gh_runner: Callable[..., str] | None,
+    ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
         return resolve_launch_context_for_cycle(
             config=config,
             db=db,
@@ -1172,15 +1216,15 @@ def prepared_cycle_deps(
 
     def _claim_launch_context(
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
-        launch_context: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
+        launch_context: PreparedLaunchContext,
         slot_id: int,
-        review_state_port: Any | None,
-        board_port: Any | None,
-        gh_runner: Any | None,
-    ) -> tuple[Any | None, Any | None]:
+        review_state_port: ReviewStatePort | None,
+        board_port: BoardMutationPort | None,
+        gh_runner: Callable[..., str] | None,
+    ) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
         return claim_launch_context(
             config=config,
             db=db,
@@ -1199,18 +1243,18 @@ def prepared_cycle_deps(
 
     def _execute_claimed_session(
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
-        launch_context: Any,
-        claimed_context: Any,
-        gh_runner: Any | None,
-        process_runner: Any | None,
-        file_reader: Callable[..., Any] | None,
-        review_state_port: Any | None,
-        board_port: Any | None,
-        pr_port: Any | None,
-    ) -> Any:
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
+        launch_context: PreparedLaunchContext,
+        claimed_context: ClaimedSessionContext,
+        gh_runner: GhRunnerPort | None,
+        process_runner: ProcessRunnerPort | None,
+        file_reader: Callable[[Path], str] | None,
+        review_state_port: ReviewStatePort | None,
+        board_port: BoardMutationPort | None,
+        pr_port: PullRequestPort | None,
+    ) -> SessionExecutionOutcome:
         return execute_claimed_session(
             config=config,
             db=db,
@@ -1231,15 +1275,15 @@ def prepared_cycle_deps(
 
     def _finalize_claimed_session(
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
-        launch_context: Any,
-        claimed_context: Any,
-        execution_outcome: Any,
-        review_state_port: Any | None,
-        gh_runner: Any | None,
-    ) -> Any:
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
+        launch_context: PreparedLaunchContext,
+        claimed_context: ClaimedSessionContext,
+        execution_outcome: SessionExecutionOutcome,
+        review_state_port: ReviewStatePort | None,
+        gh_runner: Callable[..., str] | None,
+    ) -> CycleResult:
         return finalize_claimed_session(
             config=config,
             db=db,
