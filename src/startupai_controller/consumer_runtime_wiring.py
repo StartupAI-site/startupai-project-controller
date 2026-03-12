@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 import inspect
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from subprocess import CompletedProcess
+from typing import Any, Callable, cast
 
 import startupai_controller.consumer_cycle_wiring as _cycle_wiring
 import startupai_controller.consumer_operational_wiring as _operational_wiring
@@ -15,17 +17,39 @@ import startupai_controller.consumer_preflight_wiring as _preflight_wiring
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
 import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.application.consumer.cycle import (
+    PreparedCycleDeps,
     run_prepared_cycle as _run_prepared_cycle_use_case,
 )
 from startupai_controller.application.consumer.daemon import (
+    ApplyAutomationRuntimeFn,
+    BlockPrelaunchIssueFn,
     ClaimSuppressionStateFn,
+    CurrentMainWorkflowsFn,
     DaemonRuntime,
     DispatchMultiWorkerLaunchesDeps,
+    DispatchMultiWorkerLaunchesFn,
+    ExecutorFactoryFn,
+    LoadAutomationConfigFn,
+    LoggerPort,
+    MarkDegradedFn,
+    MultiWorkerDispatchStateFn,
+    NextAvailableSlotsFn,
+    PrepareCycleFn,
     PrepareMultiWorkerCycleDeps,
+    PrepareMultiWorkerCycleFn,
+    PrepareLaunchCandidateFn,
     PrepareMultiWorkerLaunchContextDeps,
+    PrepareMultiWorkerLaunchContextFn,
+    RecordMetricFn,
     RecoverInterruptedSessionsFn,
     RunDaemonLoopDeps,
     RunMultiWorkerDaemonLoopDeps,
+    RunMultiWorkerDaemonLoopFn,
+    RunOneCycleFn,
+    SleepForClaimSuppressionFn,
+    SubmitMultiWorkerTaskFn,
+    WorkerExecutor,
+    WorkerFuture,
     dispatch_multi_worker_launches as _dispatch_multi_worker_launches_use_case,
     log_completed_worker_results as _log_completed_worker_results_use_case,
     multi_worker_dispatch_state as _multi_worker_dispatch_state_use_case,
@@ -51,9 +75,16 @@ from startupai_controller.board_automation_config import (
     load_automation_config,
 )
 from startupai_controller.consumer_config import ConsumerConfig
-from startupai_controller.consumer_types import ActiveWorkerTask, WorktreePrepareError
+from startupai_controller.consumer_types import (
+    ActiveWorkerTask,
+    PreparedCycleContext,
+    PreparedLaunchContext,
+    WorktreePrepareError,
+)
 from startupai_controller.consumer_workflow import (
     WorkflowConfigError,
+    WorkflowDefinition,
+    WorkflowRepoStatus,
     read_workflow_snapshot,
     workflow_status_payload,
 )
@@ -82,6 +113,8 @@ from startupai_controller.runtime.wiring import (
     gh_reason_code,
     open_consumer_db,
 )
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     GhQueryError,
@@ -97,7 +130,9 @@ def _drain_requested(path: Path) -> bool:
     return path.exists()
 
 
-def _log_completed_worker_results(active_tasks: dict[Any, Any]) -> None:
+def _log_completed_worker_results(
+    active_tasks: dict[WorkerFuture, ActiveWorkerTask],
+) -> None:
     """Log and discard completed worker futures."""
     _log_completed_worker_results_use_case(active_tasks, logger=logger)
 
@@ -105,8 +140,8 @@ def _log_completed_worker_results(active_tasks: dict[Any, Any]) -> None:
 def _build_daemon_runtime(
     *,
     gh_runner: Callable[..., str] | None,
-    subprocess_runner: Callable[..., Any] | None,
-    file_reader: Callable[..., Any] | None,
+    subprocess_runner: Callable[..., CompletedProcess[str]] | None,
+    file_reader: Callable[[Path], str] | None,
 ) -> DaemonRuntime:
     """Build the typed runtime bundle used by the daemon application module."""
     return DaemonRuntime(
@@ -143,35 +178,35 @@ class DaemonRuntimeWiringDeps:
     workflow_config_error_type: type[Exception]
     gh_query_error_type: type[Exception]
     worktree_prepare_error_type: type[Exception]
-    prepare_cycle: Callable[..., Any]
-    mark_degraded: Callable[..., None]
+    prepare_cycle: PrepareCycleFn
+    mark_degraded: MarkDegradedFn
     gh_reason_code: Callable[..., str]
-    logger: Any
+    logger: LoggerPort
     claim_suppression_state: ClaimSuppressionStateFn
-    parse_iso8601_timestamp: Callable[[str], Any]
-    record_metric: Callable[..., None]
-    prepare_launch_candidate: Callable[..., Any]
+    parse_iso8601_timestamp: Callable[[str], datetime | None]
+    record_metric: RecordMetricFn
+    prepare_launch_candidate: PrepareLaunchCandidateFn
     maybe_activate_claim_suppression: Callable[..., bool]
-    block_prelaunch_issue: Callable[..., None]
+    block_prelaunch_issue: BlockPrelaunchIssueFn
     select_candidate_for_cycle: Callable[..., str | None]
-    prepare_multi_worker_launch_context: Callable[..., tuple[Any | None, bool]]
-    submit_multi_worker_task: Callable[..., None]
-    run_worker_cycle: Callable[..., Any]
-    active_worker_task_type: type[Any]
-    next_available_slots: Callable[..., list[int]]
-    executor_factory: Callable[..., Any]
-    log_completed_worker_results: Callable[..., None]
-    drain_requested: Callable[[Any], bool]
-    prepare_multi_worker_cycle: Callable[..., Any | None]
-    multi_worker_dispatch_state: Callable[..., tuple[list[int], set[str]]]
-    sleep_for_claim_suppression_if_needed: Callable[..., bool]
-    dispatch_multi_worker_launches: Callable[..., int]
-    load_automation_config: Callable[[Any], Any]
-    apply_automation_runtime: Callable[[Any, Any | None], None]
-    current_main_workflows: Callable[..., tuple[Any, dict[str, Any], int]]
+    prepare_multi_worker_launch_context: PrepareMultiWorkerLaunchContextFn
+    submit_multi_worker_task: SubmitMultiWorkerTaskFn
+    run_worker_cycle: Callable[..., CycleResult]
+    active_worker_task_type: type[ActiveWorkerTask]
+    next_available_slots: NextAvailableSlotsFn
+    executor_factory: ExecutorFactoryFn
+    log_completed_worker_results: Callable[[dict[WorkerFuture, ActiveWorkerTask]], None]
+    drain_requested: Callable[[Path], bool]
+    prepare_multi_worker_cycle: PrepareMultiWorkerCycleFn
+    multi_worker_dispatch_state: MultiWorkerDispatchStateFn
+    sleep_for_claim_suppression_if_needed: SleepForClaimSuppressionFn
+    dispatch_multi_worker_launches: DispatchMultiWorkerLaunchesFn
+    load_automation_config: LoadAutomationConfigFn
+    apply_automation_runtime: ApplyAutomationRuntimeFn
+    current_main_workflows: CurrentMainWorkflowsFn
     recover_interrupted_sessions: RecoverInterruptedSessionsFn
-    run_multi_worker_daemon_loop: Callable[..., None]
-    run_one_cycle: Callable[..., Any]
+    run_multi_worker_daemon_loop: RunMultiWorkerDaemonLoopFn
+    run_one_cycle: RunOneCycleFn
 
 
 @dataclass(frozen=True)
@@ -211,7 +246,7 @@ def _daemon_runtime_wiring_deps(
 ) -> DaemonRuntimeWiringDeps:
     """Build daemon-loop wiring deps without reaching back into compat."""
 
-    def _run_worker_cycle(*args: Any, **kwargs: Any) -> Any:
+    def _run_worker_cycle(*args: Any, **kwargs: Any) -> CycleResult:
         run_worker_cycle_fn = _support_wiring.run_worker_cycle
         parameters: tuple[inspect.Parameter, ...]
         try:
@@ -233,11 +268,11 @@ def _daemon_runtime_wiring_deps(
     def _prepare_launch_candidate(
         issue_ref: str,
         *,
-        config: Any,
-        prepared: Any,
-        db: Any,
+        config: ConsumerConfig,
+        prepared: PreparedCycleContext,
+        db: ConsumerRuntimeStatePort,
         runtime: DaemonRuntime | None = None,
-    ) -> Any:
+    ) -> PreparedLaunchContext:
         gh_runner_fn = (
             runtime.gh_runner.run_gh
             if runtime and runtime.gh_runner is not None
@@ -264,9 +299,9 @@ def _daemon_runtime_wiring_deps(
         )
 
     def _select_candidate_for_cycle(
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
         *,
         target_issue: str | None = None,
         runtime: DaemonRuntime | None = None,
@@ -298,9 +333,9 @@ def _daemon_runtime_wiring_deps(
         issue_ref: str,
         blocked_reason: str,
         *,
-        config: Any,
-        cp_config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        cp_config: object,
+        db: ConsumerRuntimeStatePort,
         runtime: DaemonRuntime | None = None,
     ) -> None:
         _operational_wiring.block_prelaunch_issue(
@@ -337,13 +372,13 @@ def _daemon_runtime_wiring_deps(
         )
 
     def _run_one_cycle(
-        config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
         *,
         dry_run: bool = False,
         runtime: DaemonRuntime | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> CycleResult:
         return run_one_cycle_live(
             config,
             db,
@@ -372,13 +407,13 @@ def _daemon_runtime_wiring_deps(
         workflow_config_error_type=WorkflowConfigError,
         gh_query_error_type=GhQueryError,
         worktree_prepare_error_type=WorktreePrepareError,
-        prepare_cycle=_preflight_wiring.prepare_cycle,
+        prepare_cycle=cast(PrepareCycleFn, _preflight_wiring.prepare_cycle),
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
         logger=logger,
         claim_suppression_state=_support_wiring.claim_suppression_state,
         parse_iso8601_timestamp=_parse_iso8601_timestamp,
-        record_metric=_support_wiring.record_metric,
+        record_metric=cast(RecordMetricFn, _support_wiring.record_metric),
         prepare_launch_candidate=_prepare_launch_candidate,
         maybe_activate_claim_suppression=_support_wiring.maybe_activate_claim_suppression,
         block_prelaunch_issue=_block_prelaunch_issue,
@@ -388,7 +423,7 @@ def _daemon_runtime_wiring_deps(
         run_worker_cycle=_run_worker_cycle,
         active_worker_task_type=ActiveWorkerTask,
         next_available_slots=_next_available_slots_use_case,
-        executor_factory=ThreadPoolExecutor,
+        executor_factory=cast(ExecutorFactoryFn, ThreadPoolExecutor),
         log_completed_worker_results=_log_completed_worker_results,
         drain_requested=_drain_requested,
         prepare_multi_worker_cycle=prepare_multi_worker_cycle,
@@ -432,36 +467,36 @@ def _status_runtime_wiring_deps() -> StatusRuntimeWiringDeps:
 
 
 def run_one_cycle(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool,
     target_issue: str | None,
-    prepared: Any | None,
-    launch_context: Any | None,
+    prepared: PreparedCycleContext | None,
+    launch_context: PreparedLaunchContext | None,
     slot_id_override: int | None,
     skip_control_plane: bool,
     gh_runner: Callable[..., str] | None,
-    subprocess_runner: Callable[..., Any] | None,
-    file_reader: Callable[..., Any] | None,
+    subprocess_runner: Callable[..., CompletedProcess[str]] | None,
+    file_reader: Callable[[Path], str] | None,
     status_resolver: Callable[..., str] | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-    prepare_cycle: Callable[..., Any],
+    prepare_cycle: PrepareCycleFn,
     config_error_type: type[Exception],
     workflow_config_error_type: type[Exception],
     gh_query_error_type: type[Exception],
-    mark_degraded: Callable[..., None],
+    mark_degraded: MarkDegradedFn,
     gh_reason_code: Callable[..., str],
-    cycle_result_factory: Callable[..., Any],
-    build_gh_runner_port: Callable[..., Any],
-    build_process_runner_port: Callable[..., Any],
-    run_prepared_cycle: Callable[..., Any],
-    prepared_cycle_deps: Any,
-    logger: Any,
-) -> Any:
+    cycle_result_factory: type[CycleResult],
+    build_gh_runner_port: Callable[..., GhRunnerPort | None],
+    build_process_runner_port: Callable[..., ProcessRunnerPort | None],
+    run_prepared_cycle: Callable[..., CycleResult],
+    prepared_cycle_deps: PreparedCycleDeps,
+    logger: LoggerPort,
+) -> CycleResult:
     """Execute one poll-claim-execute cycle through the application layer."""
     try:
         if skip_control_plane:
@@ -519,18 +554,18 @@ def run_one_cycle(
 
 
 def run_one_cycle_live(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool = False,
     target_issue: str | None = None,
-    prepared: Any | None = None,
-    launch_context: Any | None = None,
+    prepared: PreparedCycleContext | None = None,
+    launch_context: PreparedLaunchContext | None = None,
     slot_id_override: int | None = None,
     skip_control_plane: bool = False,
     gh_runner: Callable[..., str] | None = None,
-    subprocess_runner: Callable[..., Any] | None = None,
-    file_reader: Callable[..., Any] | None = None,
+    subprocess_runner: Callable[..., CompletedProcess[str]] | None = None,
+    file_reader: Callable[[Path], str] | None = None,
     status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
@@ -538,7 +573,7 @@ def run_one_cycle_live(
     comment_poster: Callable[..., None] | None = None,
     runtime: DaemonRuntime | None = None,
     di_kwargs: dict[str, Any] | None = None,
-) -> Any:
+) -> CycleResult:
     """Execute one poll-claim-execute cycle through direct runtime deps."""
     effective_di_kwargs = di_kwargs or {}
     runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
@@ -563,7 +598,7 @@ def run_one_cycle_live(
         board_mutator=board_mutator or effective_di_kwargs.get("board_mutator"),
         comment_checker=comment_checker or effective_di_kwargs.get("comment_checker"),
         comment_poster=comment_poster or effective_di_kwargs.get("comment_poster"),
-        prepare_cycle=_preflight_wiring.prepare_cycle,
+        prepare_cycle=cast(PrepareCycleFn, _preflight_wiring.prepare_cycle),
         config_error_type=ConfigError,
         workflow_config_error_type=WorkflowConfigError,
         gh_query_error_type=GhQueryError,
@@ -585,14 +620,14 @@ def run_one_cycle_live(
 
 
 def prepare_multi_worker_cycle(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool,
     sleeper: Callable[[float], None],
     runtime: DaemonRuntime | None = None,
     di_kwargs: dict[str, Any] | None = None,
-) -> Any | None:
+) -> PreparedCycleContext | None:
     """Run one bounded preflight pass for the multi-worker daemon."""
     effective_di_kwargs = di_kwargs or {}
     runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
@@ -622,9 +657,9 @@ def prepare_multi_worker_cycle(
 
 
 def multi_worker_dispatch_state(
-    db: Any,
-    prepared: Any,
-    active_tasks: dict[Any, Any],
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    active_tasks: dict[WorkerFuture, ActiveWorkerTask],
 ) -> tuple[list[int], set[str]]:
     """Compute currently available slots and active issue refs."""
     deps = _daemon_runtime_wiring_deps()
@@ -637,8 +672,8 @@ def multi_worker_dispatch_state(
 
 
 def sleep_for_claim_suppression_if_needed(
-    db: Any,
-    config: Any,
+    db: ConsumerRuntimeStatePort,
+    config: ConsumerConfig,
     *,
     sleeper: Callable[[float], None],
 ) -> bool:
@@ -656,13 +691,13 @@ def sleep_for_claim_suppression_if_needed(
 def prepare_multi_worker_launch_context(
     candidate: str,
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     dry_run: bool,
     runtime: DaemonRuntime | None = None,
     di_kwargs: dict[str, Any] | None = None,
-) -> tuple[Any | None, bool]:
+) -> tuple[PreparedLaunchContext | None, bool]:
     """Prepare launch context for one candidate."""
     effective_di_kwargs = di_kwargs or {}
     runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
@@ -695,14 +730,14 @@ def prepare_multi_worker_launch_context(
 
 
 def submit_multi_worker_task(
-    executor: Any,
-    active_tasks: dict[Any, Any],
+    executor: WorkerExecutor,
+    active_tasks: dict[WorkerFuture, ActiveWorkerTask],
     *,
-    config: Any,
+    config: ConsumerConfig,
     candidate: str,
     slot_id: int,
-    prepared: Any,
-    launch_context: Any | None,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext | None,
     dry_run: bool,
     runtime: DaemonRuntime | None = None,
     di_kwargs: dict[str, Any] | None = None,
@@ -733,14 +768,14 @@ def submit_multi_worker_task(
 
 
 def dispatch_multi_worker_launches(
-    executor: Any,
-    config: Any,
-    db: Any,
+    executor: WorkerExecutor,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
-    prepared: Any,
+    prepared: PreparedCycleContext,
     available_slots: list[int],
     active_issue_refs: set[str],
-    active_tasks: dict[Any, Any],
+    active_tasks: dict[WorkerFuture, ActiveWorkerTask],
     dry_run: bool,
     runtime: DaemonRuntime | None = None,
     di_kwargs: dict[str, Any] | None = None,
@@ -778,8 +813,8 @@ def dispatch_multi_worker_launches(
 
 
 def run_multi_worker_daemon_loop(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
@@ -816,8 +851,8 @@ def run_multi_worker_daemon_loop(
 
 
 def run_daemon_loop(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
