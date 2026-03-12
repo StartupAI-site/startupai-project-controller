@@ -10,18 +10,29 @@ board_consumer.py retains thin compatibility wrappers that delegate here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.application.consumer.preflight import (
     ReconciliationDeps,
     ReconciliationResult,
     reconcile_board_truth as _reconcile_board_truth_use_case,
 )
-from startupai_controller.domain.models import IssueSnapshot
+from startupai_controller.domain.models import CycleBoardSnapshot
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+
+class SnapshotIssueRefView(Protocol):
+    """Minimal snapshot surface needed for issue-ref normalization."""
+
+    issue_ref: str
+
 
 # ---------------------------------------------------------------------------
 # Wiring deps
@@ -48,10 +59,10 @@ class ReconciliationWiringDeps:
     set_blocked_with_reason: Callable[..., None]
 
     # Utilities
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]]
-    classify_open_pr_candidates: Callable[..., tuple[str, Any | None, str]]
+    resolve_issue_coordinates: Callable[[str, CriticalPathConfig], tuple[str, str, int]]
+    classify_open_pr_candidates: Callable[..., tuple[str, object | None, str]]
     reconcile_in_progress_decision: Callable[..., str]
-    snapshot_to_issue_ref: Callable[[str, dict], str | None]
+    snapshot_to_issue_ref: Callable[[str, dict[str, str]], str | None]
 
 
 # ---------------------------------------------------------------------------
@@ -60,15 +71,15 @@ class ReconciliationWiringDeps:
 
 
 def reconcile_active_repair_review_items(
-    consumer_config: Any,
-    critical_path_config: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
     *,
     deps: ReconciliationWiringDeps,
     active_repair_issue_refs: set[str],
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_snapshot: Any | None,
-    issue_ref_for_snapshot: Callable[..., str | None],
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
     dry_run: bool,
 ) -> list[str]:
     """Return active repair items that should move from Review back to In Progress."""
@@ -89,9 +100,9 @@ def reconcile_single_in_progress_item(
     issue_ref: str,
     *,
     deps: ReconciliationWiringDeps,
-    consumer_config: Any,
-    critical_path_config: Any,
-    automation_config: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
     store: SessionStorePort,
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
@@ -119,17 +130,17 @@ def reconcile_single_in_progress_item(
 
 
 def reconcile_stale_in_progress_items(
-    consumer_config: Any,
-    critical_path_config: Any,
-    automation_config: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
     *,
     deps: ReconciliationWiringDeps,
     store: SessionStorePort,
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
-    board_snapshot: Any | None,
-    issue_ref_for_snapshot: Callable[..., str | None],
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
     active_issue_refs: set[str],
     dry_run: bool,
 ) -> tuple[list[str], list[str], list[str]]:
@@ -182,10 +193,10 @@ def reconcile_stale_in_progress_items(
 
 
 def wire_reconcile_board_truth(
-    consumer_config: Any,
-    critical_path_config: Any,
-    automation_config: Any,
-    db: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
+    db: ConsumerRuntimeStatePort,
     *,
     deps: ReconciliationWiringDeps,
     session_store: SessionStorePort | None = None,
@@ -193,12 +204,12 @@ def wire_reconcile_board_truth(
     review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort | None = None,
     dry_run: bool = False,
-    board_snapshot: Any | None = None,
+    board_snapshot: CycleBoardSnapshot | None = None,
 ) -> ReconciliationResult:
     """Wire and execute board-truth reconciliation."""
 
-    def _issue_ref_for_snapshot(snapshot: Any) -> str | None:
-        if isinstance(snapshot, IssueSnapshot):
+    def _issue_ref_for_snapshot(snapshot: SnapshotIssueRefView) -> str | None:
+        if "/" not in snapshot.issue_ref:
             return snapshot.issue_ref
         return deps.snapshot_to_issue_ref(
             snapshot.issue_ref, critical_path_config.issue_prefixes
