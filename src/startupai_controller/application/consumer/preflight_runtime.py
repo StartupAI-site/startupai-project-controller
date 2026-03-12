@@ -32,6 +32,7 @@ from startupai_controller.domain.models import (
     ReviewQueueDrainSummary,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.control_plane_state import ControlValueStorePort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
@@ -149,11 +150,11 @@ class PhaseHelperDeps:
         tuple[ReviewQueueDrainSummary, CycleBoardSnapshot],
     ]
     reconcile_board_truth: Callable[..., ReconcileBoardTruthResult]
-    record_successful_github_mutation: Callable[[ConsumerRuntimeStatePort], None]
-    record_successful_board_sync: Callable[[ConsumerRuntimeStatePort], None]
-    clear_degraded: Callable[[ConsumerRuntimeStatePort], None]
-    mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None]
-    persist_admission_summary: Callable[..., None]
+    record_successful_github_mutation: Callable[[ControlValueStorePort], None]
+    record_successful_board_sync: Callable[[ControlValueStorePort], None]
+    clear_degraded: Callable[[ControlValueStorePort], None]
+    mark_degraded: Callable[[ControlValueStorePort, str], None]
+    persist_admission_summary: Callable[[ControlValueStorePort, dict[str, Any]], None]
     logger: logging.Logger
 
 
