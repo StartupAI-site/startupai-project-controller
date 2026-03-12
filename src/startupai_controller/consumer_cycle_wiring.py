@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import startupai_controller.consumer_board_state_helpers as _board_state_helpers
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
@@ -37,6 +37,9 @@ from startupai_controller.consumer_types import (
     PreparedLaunchContext,
     SessionExecutionOutcome,
 )
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.process_runner import GhRunnerPort
 from startupai_controller.runtime.wiring import (
     build_gh_runner_port,
     build_process_runner_port,
@@ -64,7 +67,7 @@ def assemble_prepared_launch_context(
     branch_name: str,
     workflow_definition: Any,
     effective_consumer_config: Any,
-    dependency_summary: str | None,
+    dependency_summary: str,
     branch_reconcile_state: str | None,
     branch_reconcile_error: str | None,
 ) -> PreparedLaunchContext:
@@ -122,6 +125,25 @@ def prepare_launch_candidate(
         else build_gh_runner_port(gh_runner=gh_runner)
     )
     gh_runner_fn = gh_port.run_gh if gh_port is not None else None
+    github_bundle = (
+        None
+        if pr_port is not None and issue_context_port is not None
+        else build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=prepared.cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner_fn,
+        )
+    )
+    effective_pr_port = pr_port or (
+        github_bundle.pull_requests if github_bundle is not None else None
+    )
+    effective_issue_context_port = issue_context_port or (
+        github_bundle.issue_context if github_bundle is not None else None
+    )
+    assert effective_pr_port is not None
+    assert effective_issue_context_port is not None
 
     def _resolve_launch_candidate_metadata(
         issue_ref: str,
@@ -209,15 +231,8 @@ def prepare_launch_candidate(
         subprocess_runner=process_runner_port,
         review_state_port=review_state_port,
         gh_runner=gh_port,
-        pr_port=pr_port
-        or build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=prepared.cp_config,
-            github_memo=prepared.github_memo,
-            gh_runner=gh_runner_fn,
-        ).pull_requests,
-        issue_context_port=issue_context_port,
+        pr_port=effective_pr_port,
+        issue_context_port=effective_issue_context_port,
         session_store=session_store or build_session_store(db),
         worktree_port=worktree_port
         or build_worktree_port(
@@ -534,6 +549,8 @@ def handle_non_review_execution_outcome(
     logger: Any,
 ) -> tuple[str, Any | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
+    if pr_port is None or board_port is None:
+        raise ValueError("pr_port and board_port are required for execution outcome")
 
     def _verify_resolution_payload(
         issue_ref: str,
@@ -655,6 +672,15 @@ def execute_claimed_session(
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
 
+    def _gh_runner_callable(
+        gh_runner: Any | None,
+    ) -> Callable[..., str] | None:
+        if gh_runner is None:
+            return None
+        if hasattr(gh_runner, "run_gh"):
+            return cast(GhRunnerPort, gh_runner).run_gh
+        return cast(Callable[..., str], gh_runner)
+
     def _create_pr_for_execution_result(
         *,
         config: Any,
@@ -691,9 +717,6 @@ def execute_claimed_session(
         board_port: Any | None,
     ) -> Any:
         del session_store
-        effective_gh_runner = (
-            gh_runner.run_gh if hasattr(gh_runner, "run_gh") else gh_runner
-        )
         return handoff_execution_to_review(
             config=config,
             db=db,
@@ -706,7 +729,7 @@ def execute_claimed_session(
             board_port=board_port,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
-            gh_runner=effective_gh_runner,
+            gh_runner=_gh_runner_callable(gh_runner),
         )
 
     def _handle_non_review_execution_outcome(
@@ -723,9 +746,6 @@ def execute_claimed_session(
         pr_port: Any | None,
         board_port: Any | None,
     ) -> tuple[str, Any | None, str | None]:
-        effective_gh_runner = (
-            gh_runner.run_gh if hasattr(gh_runner, "run_gh") else gh_runner
-        )
         return handle_non_review_execution_outcome(
             config=config,
             db=db,
@@ -735,15 +755,15 @@ def execute_claimed_session(
             session_status=session_status,
             codex_result=codex_result,
             has_commits=has_commits,
-            pr_port=pr_port,
-            board_port=board_port,
+            pr_port=cast(PullRequestPort | None, pr_port),
+            board_port=cast(BoardMutationPort | None, board_port),
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_poster=comment_poster,
             subprocess_runner=(
                 process_runner.run if process_runner is not None else None
             ),
-            gh_runner=effective_gh_runner,
+            gh_runner=_gh_runner_callable(gh_runner),
         )
 
     return _execute_claimed_session_use_case(
