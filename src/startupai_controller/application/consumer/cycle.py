@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    PreparedCycleContext,
     PreparedLaunchContext,
     SessionExecutionOutcome,
 )
@@ -25,9 +27,9 @@ class ResolveLaunchContextForCycleFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
+        config: ConsumerConfig,
         db: ConsumerRuntimeStatePort,
-        prepared: Any,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext | None,
         target_issue: str | None,
         dry_run: bool,
@@ -44,9 +46,9 @@ class ClaimLaunchContextFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
+        config: ConsumerConfig,
         db: ConsumerRuntimeStatePort,
-        prepared: Any,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext,
         slot_id: int,
         review_state_port: ReviewStatePort | None,
@@ -61,9 +63,9 @@ class ExecuteClaimedSessionFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
+        config: ConsumerConfig,
         db: ConsumerRuntimeStatePort,
-        prepared: Any,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext,
         claimed_context: ClaimedSessionContext,
         gh_runner: GhRunnerPort | None,
@@ -81,9 +83,9 @@ class FinalizeClaimedSessionFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
+        config: ConsumerConfig,
         db: ConsumerRuntimeStatePort,
-        prepared: Any,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext,
         claimed_context: ClaimedSessionContext,
         execution_outcome: SessionExecutionOutcome,
@@ -108,10 +110,10 @@ class PreparedCycleDeps:
 
 
 def run_prepared_cycle(
-    config: Any,
+    config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     *,
-    prepared: Any,
+    prepared: PreparedCycleContext,
     deps: PreparedCycleDeps,
     dry_run: bool = False,
     target_issue: str | None = None,

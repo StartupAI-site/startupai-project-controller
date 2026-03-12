@@ -6,19 +6,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, cast
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
     PrCreationOutcome,
+    PreparedCycleContext,
     PreparedLaunchContext,
     SessionExecutionOutcome,
 )
+from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.domain.models import CycleResult, ReviewQueueDrainSummary
 from startupai_controller.domain.models import ResolutionEvaluation, ReviewQueueEntry
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+CodexResultPayload = dict[str, Any]
 
 
 class CreatePrForExecutionResultFn(Protocol):
@@ -27,10 +35,10 @@ class CreatePrForExecutionResultFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
+        config: ConsumerConfig,
         launch_context: PreparedLaunchContext,
         claimed_context: ClaimedSessionContext,
-        codex_result: dict[str, Any] | None,
+        codex_result: CodexResultPayload | None,
         session_status: str,
         failure_reason: str | None,
         subprocess_runner: Callable[..., Any] | None,
@@ -44,9 +52,9 @@ class HandoffExecutionToReviewFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext,
         session_id: str,
         pr_url: str,
@@ -63,13 +71,13 @@ class HandleNonReviewExecutionOutcomeFn(Protocol):
     def __call__(
         self,
         *,
-        config: Any,
-        db: Any,
-        prepared: Any,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        prepared: PreparedCycleContext,
         launch_context: PreparedLaunchContext,
         session_id: str,
         session_status: str,
-        codex_result: dict[str, Any] | None,
+        codex_result: CodexResultPayload | None,
         has_commits: bool,
         gh_runner: GhRunnerPort | Callable[..., str] | None,
         pr_port: PullRequestPort,
@@ -87,7 +95,7 @@ class BuildSessionExecutionOutcomeFn(Protocol):
         failure_reason: str | None,
         pr_url: str | None,
         has_commits: bool,
-        codex_result: dict[str, Any] | None,
+        codex_result: CodexResultPayload | None,
         should_transition_to_review: bool,
         immediate_review_summary: ReviewQueueDrainSummary,
         resolution_evaluation: ResolutionEvaluation | None,
@@ -101,10 +109,10 @@ class VerifyResolutionPayloadFn(Protocol):
     def __call__(
         self,
         issue_ref: str,
-        resolution: dict[str, Any] | None,
+        resolution: CodexResultPayload | None,
         *,
-        config: Any,
-        workflows: dict[str, Any],
+        config: ConsumerConfig,
+        workflows: dict[str, WorkflowDefinition],
         pr_port: PullRequestPort,
     ) -> ResolutionEvaluation: ...
 
@@ -118,11 +126,149 @@ class ApplyResolutionActionFn(Protocol):
         resolution_evaluation: ResolutionEvaluation,
         *,
         session_id: str,
-        db: Any,
-        config: Any,
-        critical_path_config: Any,
+        db: ConsumerRuntimeStatePort,
+        config: ConsumerConfig,
+        critical_path_config: CriticalPathConfig,
         board_port: BoardMutationPort,
     ) -> str | None: ...
+
+
+class TransitionClaimedSessionToReviewFn(Protocol):
+    """Transition a claimed issue into Review."""
+
+    def __call__(
+        self,
+        *,
+        db: ConsumerRuntimeStatePort,
+        issue_ref: str,
+        session_id: str,
+        config: ConsumerConfig,
+        critical_path_config: CriticalPathConfig,
+        review_state_port: ReviewStatePort | None,
+        board_port: BoardMutationPort | None,
+    ) -> None: ...
+
+
+class PostClaimedSessionVerdictMarkerFn(Protocol):
+    """Post the structured review verdict marker for a claimed session."""
+
+    def __call__(
+        self,
+        *,
+        db: ConsumerRuntimeStatePort,
+        pr_url: str,
+        session_id: str,
+    ) -> None: ...
+
+
+class RunImmediateReviewHandoffFn(Protocol):
+    """Run immediate review rescue for a freshly opened review PR."""
+
+    def __call__(
+        self,
+        *,
+        config: ConsumerConfig,
+        critical_path_config: CriticalPathConfig,
+        automation_config: BoardAutomationConfig,
+        store: SessionStorePort,
+        queue_entry: ReviewQueueEntry,
+        db: ConsumerRuntimeStatePort,
+    ) -> ReviewQueueDrainSummary: ...
+
+
+class RecordMetricFn(Protocol):
+    """Record one consumer metric event."""
+
+    def __call__(
+        self,
+        db: ConsumerRuntimeStatePort,
+        config: ConsumerConfig,
+        metric_name: str,
+        *,
+        issue_ref: str | None = None,
+    ) -> None: ...
+
+
+class ReturnIssueToReadyFn(Protocol):
+    """Return one issue to Ready after a non-review outcome."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        config: CriticalPathConfig,
+        project_owner: str,
+        project_number: int,
+        *,
+        board_port: BoardMutationPort | None = None,
+    ) -> None: ...
+
+
+class QueueStatusTransitionFn(Protocol):
+    """Queue one deferred board-status transition."""
+
+    def __call__(
+        self,
+        db: ConsumerRuntimeStatePort,
+        issue_ref: str,
+        *,
+        to_status: str,
+        from_statuses: set[str],
+        blocked_reason: str | None = None,
+    ) -> None: ...
+
+
+class FinalPhaseForClaimedSessionFn(Protocol):
+    """Resolve the final persisted phase for a claimed session."""
+
+    def __call__(
+        self,
+        *,
+        launch_context: PreparedLaunchContext,
+        execution_outcome: SessionExecutionOutcome,
+    ) -> str: ...
+
+
+class PersistClaimedSessionCompletionFn(Protocol):
+    """Persist the final session state for one claimed execution."""
+
+    def __call__(
+        self,
+        *,
+        db: ConsumerRuntimeStatePort,
+        session_id: str,
+        issue_ref: str,
+        execution_outcome: SessionExecutionOutcome,
+        final_phase: str,
+    ) -> None: ...
+
+
+class PostClaimedSessionResultCommentFn(Protocol):
+    """Post the final result comment for one claimed session."""
+
+    def __call__(
+        self,
+        *,
+        issue_ref: str,
+        session_id: str,
+        codex_result: CodexResultPayload | None,
+        cp_config: CriticalPathConfig,
+    ) -> None: ...
+
+
+class MaybeEscalateClaimedSessionFailureFn(Protocol):
+    """Escalate a terminal claimed-session failure after retries exhaust."""
+
+    def __call__(
+        self,
+        *,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        issue_ref: str,
+        effective_max_retries: int,
+        session_status: str,
+        codex_result: CodexResultPayload | None,
+        cp_config: CriticalPathConfig,
+    ) -> None: ...
 
 
 class QueueClaimedSessionForReviewFn(Protocol):
@@ -144,7 +290,7 @@ class ExecutionDeps:
 
     assemble_codex_prompt: Callable[..., str]
     run_codex_session: Callable[..., int]
-    parse_codex_result: Callable[..., dict[str, Any] | None]
+    parse_codex_result: Callable[..., CodexResultPayload | None]
     session_status_from_codex_result: Callable[..., tuple[str, str | None]]
     create_pr_for_execution_result: CreatePrForExecutionResultFn
     handoff_execution_to_review: HandoffExecutionToReviewFn
@@ -156,11 +302,11 @@ class ExecutionDeps:
 class ReviewHandoffDeps:
     """Injected seams for claimed-session review handoff."""
 
-    transition_claimed_session_to_review: Callable[..., None]
-    post_claimed_session_verdict_marker: Callable[..., None]
+    transition_claimed_session_to_review: TransitionClaimedSessionToReviewFn
+    post_claimed_session_verdict_marker: PostClaimedSessionVerdictMarkerFn
     queue_claimed_session_for_review: QueueClaimedSessionForReviewFn
-    run_immediate_review_handoff: Callable[..., ReviewQueueDrainSummary]
-    record_metric: Callable[..., None]
+    run_immediate_review_handoff: RunImmediateReviewHandoffFn
+    record_metric: RecordMetricFn
 
 
 @dataclass(frozen=True)
@@ -169,22 +315,22 @@ class NonReviewOutcomeDeps:
 
     verify_resolution_payload: VerifyResolutionPayloadFn
     apply_resolution_action: ApplyResolutionActionFn
-    return_issue_to_ready: Callable[..., None]
-    record_successful_github_mutation: Callable[..., None]
-    mark_degraded: Callable[..., None]
-    queue_status_transition: Callable[..., None]
-    record_metric: Callable[..., None]
+    return_issue_to_ready: ReturnIssueToReadyFn
+    record_successful_github_mutation: Callable[[ConsumerRuntimeStatePort], None]
+    mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None]
+    queue_status_transition: QueueStatusTransitionFn
+    record_metric: RecordMetricFn
     log_ready_reset_failure: Callable[[Exception], None]
 
 
 def execute_claimed_session(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     deps: ExecutionDeps,
-    launch_context: Any,
-    claimed_context: Any,
+    launch_context: PreparedLaunchContext,
+    claimed_context: ClaimedSessionContext,
     session_store: SessionStorePort,
     gh_runner: GhRunnerPort | None,
     process_runner: ProcessRunnerPort | None,
@@ -300,9 +446,9 @@ def execute_claimed_session(
 
 def handoff_execution_to_review(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     deps: ReviewHandoffDeps,
     launch_context: PreparedLaunchContext,
     session_id: str,
@@ -359,14 +505,14 @@ def handoff_execution_to_review(
 
 def handle_non_review_execution_outcome(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     deps: NonReviewOutcomeDeps,
     launch_context: PreparedLaunchContext,
     session_id: str,
     session_status: str,
-    codex_result: dict[str, Any] | None,
+    codex_result: CodexResultPayload | None,
     has_commits: bool,
     gh_runner: GhRunnerPort | Callable[..., str] | None,
     pr_port: PullRequestPort,
@@ -435,17 +581,17 @@ def handle_non_review_execution_outcome(
 class FinalizeClaimedSessionDeps:
     """Injected seams for claimed-session finalization."""
 
-    final_phase_for_claimed_session: Callable[..., str]
-    persist_claimed_session_completion: Callable[..., None]
-    post_claimed_session_result_comment: Callable[..., None]
-    maybe_escalate_claimed_session_failure: Callable[..., None]
+    final_phase_for_claimed_session: FinalPhaseForClaimedSessionFn
+    persist_claimed_session_completion: PersistClaimedSessionCompletionFn
+    post_claimed_session_result_comment: PostClaimedSessionResultCommentFn
+    maybe_escalate_claimed_session_failure: MaybeEscalateClaimedSessionFailureFn
 
 
 def finalize_claimed_session(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
     deps: FinalizeClaimedSessionDeps,
     launch_context: PreparedLaunchContext,
     claimed_context: ClaimedSessionContext,
