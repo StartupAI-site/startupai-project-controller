@@ -12,7 +12,6 @@ from startupai_controller.application.consumer.preflight_runtime import (
 )
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
-    IssueSnapshot,
     ReviewQueueDrainSummary,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
@@ -120,6 +119,12 @@ class RunAdmissionPhaseFn(Protocol):
         ...
 
 
+class SnapshotIssueRefView(Protocol):
+    """Minimal snapshot surface needed for board-truth normalization."""
+
+    issue_ref: str
+
+
 class ReconcileActiveRepairReviewItemsFn(Protocol):
     """Return active repair items that should move back to In Progress."""
 
@@ -132,7 +137,7 @@ class ReconcileActiveRepairReviewItemsFn(Protocol):
         review_state_port: ReviewStatePort,
         board_port: BoardMutationPort,
         board_snapshot: CycleBoardSnapshot | None,
-        issue_ref_for_snapshot: Callable[[IssueSnapshot], str | None],
+        issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
         dry_run: bool,
     ) -> list[str]:
         """Return issue refs moved back to In Progress."""
@@ -153,7 +158,7 @@ class ReconcileStaleInProgressItemsFn(Protocol):
         review_state_port: ReviewStatePort,
         board_port: BoardMutationPort,
         board_snapshot: CycleBoardSnapshot | None,
-        issue_ref_for_snapshot: Callable[[IssueSnapshot], str | None],
+        issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
         active_issue_refs: set[str],
         dry_run: bool,
     ) -> tuple[list[str], list[str], list[str]]:
@@ -260,7 +265,7 @@ class ReconciliationResult:
 class ReconciliationDeps:
     """Injected seams for board-truth reconciliation."""
 
-    issue_ref_for_snapshot: Callable[[IssueSnapshot], str | None]
+    issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None]
     reconcile_active_repair_review_items: ReconcileActiveRepairReviewItemsFn
     reconcile_stale_in_progress_items: ReconcileStaleInProgressItemsFn
 
