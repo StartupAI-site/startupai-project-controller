@@ -2,7 +2,58 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, Protocol
+
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.domain.models import OpenPullRequest, OpenPullRequestMatch
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.ready_flow import GitHubBundleView, GitHubRunnerFn
+from startupai_controller.ports.status_store import StatusStorePort
+from startupai_controller.runtime.wiring import GitHubRuntimeMemo
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+
+class CommentMarkerCheckerFn(Protocol):
+    """Check whether a marker comment already exists on an issue or PR."""
+
+    def __call__(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        marker: str,
+        *,
+        gh_runner: GitHubRunnerFn | None = None,
+    ) -> bool: ...
+
+
+class CommentPosterFn(Protocol):
+    """Post an issue or pull-request comment through the shell boundary."""
+
+    def __call__(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        body: str,
+        *,
+        gh_runner: GitHubRunnerFn | None = None,
+    ) -> None: ...
+
+
+class BuildGitHubPortBundleFn(Protocol):
+    """Build the runtime GitHub bundle used by comment and PR helpers."""
+
+    def __call__(
+        self,
+        project_owner: str,
+        project_number: int,
+        *,
+        config: CriticalPathConfig | None = None,
+        github_memo: GitHubRuntimeMemo | None = None,
+        gh_runner: GitHubRunnerFn | None = None,
+    ) -> GitHubBundleView: ...
 
 
 def post_consumer_claim_comment(
@@ -11,15 +62,18 @@ def post_consumer_claim_comment(
     repo_prefix: str,
     branch_name: str,
     executor: str,
-    config: Any,
+    config: CriticalPathConfig,
     *,
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig],
+        tuple[str, str, int],
+    ],
     consumer_provenance_marker: Callable[..., str],
-    default_review_comment_checker: Callable[..., Callable[..., bool]],
-    runtime_comment_poster: Callable[..., None],
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    default_review_comment_checker: Callable[..., CommentMarkerCheckerFn],
+    runtime_comment_poster: CommentPosterFn,
+    comment_checker: CommentMarkerCheckerFn | None = None,
+    comment_poster: CommentPosterFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
 ) -> None:
     """Post a deterministic claim provenance marker on the issue."""
     owner, repo, number = resolve_issue_coordinates(issue_ref, config)
@@ -50,12 +104,12 @@ def list_open_pr_candidates(
     repo: str,
     issue_number: int,
     *,
-    build_github_port_bundle: Callable[..., Any],
-    open_pr_match_factory: Callable[..., Any],
+    build_github_port_bundle: BuildGitHubPortBundleFn,
+    open_pr_match_factory: type[OpenPullRequestMatch],
     parse_consumer_provenance: Callable[[str], dict[str, str] | None],
-    pr_port: Any | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> list[Any]:
+    pr_port: PullRequestPort | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
+) -> list[OpenPullRequestMatch]:
     """Return open PRs that reference an issue number in the repository."""
     port = (
         pr_port
@@ -66,16 +120,17 @@ def list_open_pr_candidates(
         ).pull_requests
     )
     payload = port.list_open_prs_for_issue(f"{owner}/{repo}", issue_number)
-    matches: list[Any] = []
+    matches: list[OpenPullRequestMatch] = []
     for item in payload:
-        body = item.body
+        typed_item: OpenPullRequest = item
+        body = typed_item.body
         matches.append(
             open_pr_match_factory(
-                url=item.url,
-                number=item.number,
-                author=item.author,
+                url=typed_item.url,
+                number=typed_item.number,
+                author=typed_item.author,
                 body=body,
-                branch_name=item.head_ref_name,
+                branch_name=typed_item.head_ref_name,
                 provenance=parse_consumer_provenance(body),
             )
         )
@@ -87,14 +142,17 @@ def classify_open_pr_candidates(
     owner: str,
     repo: str,
     issue_number: int,
-    automation_config: Any,
+    automation_config: BoardAutomationConfig,
     *,
-    list_open_pr_candidates: Callable[..., list[Any]],
-    classify_pr_candidates_pure: Callable[..., tuple[str, Any | None, str]],
+    list_open_pr_candidates: Callable[..., list[OpenPullRequestMatch]],
+    classify_pr_candidates_pure: Callable[
+        ...,
+        tuple[str, OpenPullRequestMatch | None, str],
+    ],
     expected_branch: str | None = None,
-    pr_port: Any | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> tuple[str, Any | None, str]:
+    pr_port: PullRequestPort | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
+) -> tuple[str, OpenPullRequestMatch | None, str]:
     """Classify open PRs for an issue as adoptable, ambiguous, non-local, or none."""
     candidates = list_open_pr_candidates(
         owner,
@@ -116,16 +174,19 @@ def post_result_comment(
     issue_ref: str,
     result: dict[str, Any],
     session_id: str,
-    config: Any,
+    config: CriticalPathConfig,
     *,
     marker_for: Callable[..., str],
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
-    normalize_resolution_payload: Callable[..., Any],
-    default_review_comment_checker: Callable[..., Callable[..., bool]],
-    runtime_comment_poster: Callable[..., None],
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig],
+        tuple[str, str, int],
+    ],
+    normalize_resolution_payload: Callable[[object], dict[str, Any] | None],
+    default_review_comment_checker: Callable[..., CommentMarkerCheckerFn],
+    runtime_comment_poster: CommentPosterFn,
+    comment_checker: CommentMarkerCheckerFn | None = None,
+    comment_poster: CommentPosterFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
 ) -> None:
     """Post a machine-marker result comment on the issue."""
     marker = marker_for("consumer-result", issue_ref)
@@ -169,15 +230,15 @@ def post_pr_codex_verdict(
     pr_url: str,
     session_id: str,
     *,
-    parse_pr_url: Callable[..., Any],
+    parse_pr_url: Callable[[str], tuple[str, str, int] | None],
     verdict_marker_text: Callable[[str], str],
-    default_review_comment_checker: Callable[..., Callable[..., bool]],
+    default_review_comment_checker: Callable[..., CommentMarkerCheckerFn],
     verdict_comment_body: Callable[[str], str],
-    runtime_comment_poster: Callable[..., None],
+    runtime_comment_poster: CommentPosterFn,
     gh_query_error_cls: type[Exception],
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    comment_checker: CommentMarkerCheckerFn | None = None,
+    comment_poster: CommentPosterFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
 ) -> bool:
     """Post the machine-readable codex pass verdict required for auto-merge."""
     parsed = parse_pr_url(pr_url)
@@ -197,15 +258,15 @@ def post_pr_codex_verdict(
 
 
 def backfill_review_verdicts(
-    db: Any,
+    db: StatusStorePort,
     *,
     post_pr_codex_verdict: Callable[..., bool],
     log_warning: Callable[[str, str, Exception], None],
     session_limit: int = 50,
     review_refs: tuple[str, ...] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    comment_checker: CommentMarkerCheckerFn | None = None,
+    comment_poster: CommentPosterFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
 ) -> tuple[str, ...]:
     """Re-post missing codex verdict markers for successful review sessions."""
     backfilled: list[str] = []

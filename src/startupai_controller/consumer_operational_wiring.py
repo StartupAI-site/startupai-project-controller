@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import subprocess
-from typing import Any, Callable, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import startupai_controller.consumer_automation_bridge as _automation_bridge
 import startupai_controller.consumer_board_state_helpers as _board_state_helpers
@@ -25,8 +26,10 @@ from startupai_controller.automation_ready_review_wiring import (
     claim_ready_issue as _claim_ready_issue,
 )
 from startupai_controller.application.consumer.cycle import PreparedCycleDeps
+from startupai_controller.application.consumer.preflight import ReconciliationResult
 from startupai_controller.application.consumer.reconciliation import (
     ReconciliationWiringDeps,
+    SnapshotIssueRefView,
     reconcile_active_repair_review_items as _reconcile_active_repair_review_items_use_case,
     reconcile_single_in_progress_item as _reconcile_single_in_progress_item_use_case,
     reconcile_stale_in_progress_items as _reconcile_stale_in_progress_items_use_case,
@@ -59,6 +62,7 @@ from startupai_controller.control_plane_runtime import (
 from startupai_controller.domain.launch_policy import reconcile_in_progress_decision
 from startupai_controller.domain.models import (
     ClaimReadyResult,
+    CycleBoardSnapshot,
     CycleResult,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
@@ -98,6 +102,9 @@ from startupai_controller.validate_critical_path_promotion import (
 
 logger = logging.getLogger("board-consumer")
 
+CodexResultPayload = dict[str, Any]
+SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
+
 
 def build_reconciliation_wiring_deps() -> ReconciliationWiringDeps:
     """Build the wiring deps for board-truth reconciliation."""
@@ -117,17 +124,17 @@ def build_reconciliation_wiring_deps() -> ReconciliationWiringDeps:
 
 
 def reconcile_active_repair_review_items(
-    consumer_config: Any,
-    critical_path_config: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
     *,
     active_repair_issue_refs: set[str],
-    review_state_port: Any,
-    board_port: Any,
-    board_snapshot: Any,
-    issue_ref_for_snapshot: Callable[..., Any],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
     dry_run: bool,
 ) -> list[str]:
     """Return active repair items that should move from Review back to In Progress."""
@@ -147,16 +154,16 @@ def reconcile_active_repair_review_items(
 def reconcile_single_in_progress_item(
     issue_ref: str,
     *,
-    consumer_config: Any,
-    critical_path_config: Any,
-    automation_config: Any,
-    store: Any,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
     dry_run: bool,
 ) -> str:
     """Reconcile one stale In Progress item and return its target lane."""
@@ -175,20 +182,20 @@ def reconcile_single_in_progress_item(
 
 
 def reconcile_stale_in_progress_items(
-    consumer_config: Any,
-    critical_path_config: Any,
-    automation_config: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
     *,
-    store: Any,
-    pr_port: Any,
-    review_state_port: Any,
-    board_port: Any,
-    board_snapshot: Any,
-    issue_ref_for_snapshot: Callable[..., Any],
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
     active_issue_refs: set[str],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
     dry_run: bool,
 ) -> tuple[list[str], list[str], list[str]]:
     """Reconcile stale In Progress items back to their truthful lanes."""
@@ -243,23 +250,23 @@ def recover_interrupted_sessions(
 
 
 def reconcile_board_truth(
-    consumer_config: Any,
-    critical_path_config: Any,
-    automation_config: Any | None,
-    db: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
+    db: ConsumerRuntimeStatePort,
     *,
-    session_store: Any | None = None,
-    pr_port: Any | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
+    session_store: SessionStorePort | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     dry_run: bool = False,
-    board_snapshot: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> Any:
+    board_snapshot: CycleBoardSnapshot | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
+) -> ReconciliationResult:
     """Make board In Progress truthful against local consumer state."""
-    effective_session_store = session_store or build_session_store(db)
+    effective_session_store = session_store or build_session_store(cast(ConsumerDB, db))
     github_bundle = None
     if pr_port is None or review_state_port is None or board_port is None:
         github_bundle = build_github_port_bundle(
@@ -302,12 +309,12 @@ def block_prelaunch_issue(
     issue_ref: str,
     blocked_reason: str,
     *,
-    config: Any,
-    cp_config: Any,
-    db: Any,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    config: ConsumerConfig,
+    cp_config: CriticalPathConfig,
+    db: ConsumerRuntimeStatePort,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
 ) -> None:
     """Move a launch-unready issue to Blocked before claim."""
     _execution_outcome_wiring.block_prelaunch_issue(
@@ -370,7 +377,7 @@ def prepare_selected_launch_candidate(
     config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
     prepared: PreparedCycleContext,
-    subprocess_runner: Callable[..., Any] | None,
+    subprocess_runner: SubprocessRunnerFn | None,
     status_resolver: StatusResolverFn | None,
     board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: BoardStatusMutatorFn | None,
@@ -431,7 +438,7 @@ def handle_selected_launch_workflow_config_error(
     err: Exception,
     config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
-    cp_config: Any,
+    cp_config: CriticalPathConfig,
     board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: BoardStatusMutatorFn | None,
     gh_runner: GitHubRunnerFn | None,
@@ -476,7 +483,7 @@ def handle_selected_launch_runtime_error(
     err: RuntimeError,
     config: ConsumerConfig,
     db: ConsumerRuntimeStatePort,
-    cp_config: Any,
+    cp_config: CriticalPathConfig,
     board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: BoardStatusMutatorFn | None,
     gh_runner: GitHubRunnerFn | None,
@@ -506,7 +513,7 @@ def resolve_launch_context_for_cycle(
     target_issue: str | None,
     dry_run: bool,
     status_resolver: StatusResolverFn | None,
-    subprocess_runner: Callable[..., Any] | None,
+    subprocess_runner: SubprocessRunnerFn | None,
     board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: BoardStatusMutatorFn | None,
     gh_runner: GitHubRunnerFn | None,
@@ -562,7 +569,7 @@ def enforce_claim_retry_ceiling(
     db: ConsumerRuntimeStatePort,
     launch_context: PreparedLaunchContext,
     pending_claim: PendingClaimContext,
-    cp_config: Any,
+    cp_config: CriticalPathConfig,
     board_info_resolver: BoardInfoResolverFn | None,
     comment_checker: CommentCheckerFn | None,
     comment_poster: CommentPosterFn | None,
@@ -743,7 +750,7 @@ def mark_claimed_session_running(
     slot_id: int,
     comment_checker: CommentCheckerFn | None,
     comment_poster: CommentPosterFn | None,
-    cp_config: Any,
+    cp_config: CriticalPathConfig,
     gh_runner: GitHubRunnerFn | None,
 ) -> ClaimedSessionContext:
     """Persist the durable-start state and post the claim marker."""
@@ -808,10 +815,10 @@ def create_pr_for_execution_result(
     config: ConsumerConfig,
     launch_context: PreparedLaunchContext,
     claimed_context: ClaimedSessionContext,
-    codex_result: dict[str, Any] | None,
+    codex_result: CodexResultPayload | None,
     session_status: str,
     failure_reason: str | None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    subprocess_runner: SubprocessRunnerFn | None,
     gh_runner: GitHubRunnerFn | None,
 ) -> PrCreationOutcome:
     """Reuse or create a PR from claimed-session output."""
@@ -984,12 +991,12 @@ def handle_non_review_execution_outcome(
     launch_context: PreparedLaunchContext,
     session_id: str,
     session_status: str,
-    codex_result: dict[str, Any] | None,
+    codex_result: CodexResultPayload | None,
     has_commits: bool,
     board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: BoardStatusMutatorFn | None,
     comment_poster: CommentPosterFn | None,
-    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    subprocess_runner: SubprocessRunnerFn | None,
     gh_runner: GitHubRunnerFn | GhRunnerPort | None,
     pr_port: PullRequestPort | None = None,
     board_port: BoardMutationPort | None = None,
@@ -1057,7 +1064,7 @@ def post_claimed_session_result_comment(
     *,
     issue_ref: str,
     session_id: str,
-    codex_result: dict[str, Any] | None,
+    codex_result: CodexResultPayload | None,
     cp_config: CriticalPathConfig,
     comment_checker: CommentCheckerFn | None,
     comment_poster: CommentPosterFn | None,
@@ -1084,7 +1091,7 @@ def maybe_escalate_claimed_session_failure(
     issue_ref: str,
     effective_max_retries: int,
     session_status: str,
-    codex_result: dict[str, Any] | None,
+    codex_result: CodexResultPayload | None,
     cp_config: CriticalPathConfig,
     board_info_resolver: BoardInfoResolverFn | None,
     comment_checker: CommentCheckerFn | None,
@@ -1195,11 +1202,11 @@ def finalize_claimed_session(
 
 def prepared_cycle_deps(
     *,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
+    status_resolver: StatusResolverFn | None,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    comment_checker: CommentCheckerFn | None,
+    comment_poster: CommentPosterFn | None,
 ) -> PreparedCycleDeps:
     """Bind compatibility seams at the outer wiring boundary."""
 
@@ -1213,8 +1220,8 @@ def prepared_cycle_deps(
         dry_run: bool,
         review_state_port: ReviewStatePort | None,
         pr_port: PullRequestPort | None,
-        subprocess_runner: Any | None,
-        gh_runner: Callable[..., str] | None,
+        subprocess_runner: SubprocessRunnerFn | None,
+        gh_runner: GitHubRunnerFn | None,
     ) -> tuple[PreparedLaunchContext | None, CycleResult | None]:
         return resolve_launch_context_for_cycle(
             config=config,
@@ -1241,7 +1248,7 @@ def prepared_cycle_deps(
         slot_id: int,
         review_state_port: ReviewStatePort | None,
         board_port: BoardMutationPort | None,
-        gh_runner: Callable[..., str] | None,
+        gh_runner: GitHubRunnerFn | None,
     ) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
         return claim_launch_context(
             config=config,
@@ -1300,7 +1307,7 @@ def prepared_cycle_deps(
         claimed_context: ClaimedSessionContext,
         execution_outcome: SessionExecutionOutcome,
         review_state_port: ReviewStatePort | None,
-        gh_runner: Callable[..., str] | None,
+        gh_runner: GitHubRunnerFn | None,
     ) -> CycleResult:
         return finalize_claimed_session(
             config=config,
