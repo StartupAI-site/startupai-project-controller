@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-26`
-- Active branch: `refactor/controller-10-10-phase-26`
-- Fresh-main baseline already includes merged work through `origin/main` commit `d741934`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-27`
+- Active branch: `refactor/controller-10-10-phase-27`
+- Fresh-main baseline already includes merged work through `origin/main` commit `606d955`
 
-Do not resume from the main checkout. Continue from the phase-26 worktree.
+Do not resume from the main checkout. Continue from the phase-27 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -58,49 +58,54 @@ Recent merged phases:
 
 - `PR #66` `refactor: type launch claim wiring cluster`
 - `PR #67` `refactor: type review handoff wiring cluster`
+- `PR #68` `refactor: type execution finalization wiring cluster`
 
-Latest successful validation on the just-merged work:
+Latest successful validation on the current phase-27 worktree:
 
-- targeted `mypy` on touched modules: passed
-- targeted `pytest`: passed
-- full suite: `871 passed`
+- targeted `mypy` on touched review-queue/control-plane modules: passed
+- targeted `pytest` on consumer/control-plane/adapter/boundary slices: `202 passed`
+- full suite: `872 passed`
 
-No PR is open at the moment. No poller should be running until the next PR is
-opened.
+No PR is open yet for phase 27. No poller should be running until the next PR
+is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining `Any` density and structural hotspots at the time this note was
-written:
+Remaining structural hotspots after the phase-27 review-queue split:
 
-- `117` `Any` usages in `src/startupai_controller/consumer_cycle_wiring.py`
-- `101` `Any` usages in `src/startupai_controller/consumer_operational_wiring.py`
-- `69` `Any` usages in `src/startupai_controller/consumer_execution_outcome_wiring.py`
-- `79` `Any` usages in `src/startupai_controller/consumer_review_queue_helpers.py`
 - `2325` lines in `src/startupai_controller/adapters/pull_requests.py`
 - `1377` lines in `src/startupai_controller/project_field_sync.py`
+- `1326` lines in `src/startupai_controller/consumer_operational_wiring.py`
+- `984` lines in `src/startupai_controller/consumer_review_queue_processing.py`
+- `623` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
+- `23` `Any` usages in `src/startupai_controller/consumer_codex_comment_wiring.py`
+- `5` `Any` usages in `src/startupai_controller/control_plane_rescue.py`
 
 Bounded-context completion estimate at handoff time:
 
-- consumer/control-plane: about 80%
-- automation/review: about 60%
+- consumer/control-plane: about 90%
+- automation/review: about 82-85%
 - field sync: about 15-20%
-- overall program: about 70%
+- overall program: about 82-84%
 
 ## Recommended Next Batch
 
-Pick the next larger responsibility-cluster batch from the phase-26 worktree.
+If phase 27 is not yet merged, finish shipping the current review-queue split:
 
-The strongest next target is the execution/finalization cluster:
+- `src/startupai_controller/consumer_review_queue_state.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
+- `src/startupai_controller/consumer_review_queue_wiring.py`
 
-- `src/startupai_controller/consumer_cycle_wiring.py`
-- `src/startupai_controller/consumer_operational_wiring.py`
-- `src/startupai_controller/consumer_execution_outcome_wiring.py`
+Once phase 27 is merged, the strongest next target is the adjacent review
+adapter seam:
+
+- `src/startupai_controller/adapters/pull_requests.py`
+- `src/startupai_controller/consumer_codex_comment_wiring.py`
 
 After that, the biggest structural work still pending is:
 
-- `src/startupai_controller/adapters/pull_requests.py`
 - `src/startupai_controller/project_field_sync.py`
+- the remaining typed-shell cleanup in `src/startupai_controller/consumer_operational_wiring.py`
 
 ## Fresh-Session Prompt
 
@@ -111,8 +116,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-26
-- active branch: refactor/controller-10-10-phase-26
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-27
+- active branch: refactor/controller-10-10-phase-27
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -131,8 +136,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66 and #67
-- no PR is open right now
-- latest full local validation was 871 passed
-- next best batch is the execution/finalization cluster in consumer_cycle_wiring.py, consumer_operational_wiring.py, and consumer_execution_outcome_wiring.py
+- latest merged PRs: #66, #67, and #68
+- no PR is open yet for phase 27
+- latest full local validation on phase 27 was 872 passed
+- current batch is the review-queue state/processing split; next batch after merge is adapters/pull_requests.py plus remaining review-comment wiring cleanup
 ```

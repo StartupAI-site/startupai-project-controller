@@ -2084,7 +2084,7 @@ class TestRunOneCycle:
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_processing.build_review_snapshots_for_queue_entries",
             lambda *args, **kwargs: {
                 ("StartupAI-site/startupai-crew", 210): SimpleNamespace(
                     pr_comment_bodies=(),
@@ -2092,7 +2092,7 @@ class TestRunOneCycle:
             },
         )
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.backfill_review_verdicts_from_snapshots",
+            "startupai_controller.consumer_codex_comment_wiring.backfill_review_verdicts_from_snapshots",
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
@@ -2157,7 +2157,7 @@ class TestRunOneCycle:
             now=now,
         )
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_processing.build_review_snapshots_for_queue_entries",
             lambda *args, **kwargs: {
                 ("StartupAI-site/startupai-crew", 210): SimpleNamespace(
                     pr_comment_bodies=(),
@@ -2165,7 +2165,7 @@ class TestRunOneCycle:
             },
         )
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.backfill_review_verdicts_from_snapshots",
+            "startupai_controller.consumer_codex_comment_wiring.backfill_review_verdicts_from_snapshots",
             lambda *args, **kwargs: (),
         )
         monkeypatch.setattr(
@@ -2423,14 +2423,14 @@ class TestRunOneCycle:
             )
 
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.datetime",
+            "startupai_controller.consumer_review_queue_processing.datetime",
             SimpleNamespace(
                 now=lambda tz=None: now,
                 fromisoformat=datetime.fromisoformat,
             ),
         )
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_processing.build_review_snapshots_for_queue_entries",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 GhQueryError("query:rate_limit:Failed running gh pr view")
             ),
@@ -2499,7 +2499,7 @@ class TestRunOneCycle:
         )
 
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.partition_review_queue_entries_by_probe_change",
+            "startupai_controller.consumer_review_queue_state.partition_review_queue_entries_by_probe_change",
             lambda entries, **kwargs: ([], entries),
         )
 
@@ -2507,7 +2507,7 @@ class TestRunOneCycle:
             raise AssertionError("full review snapshot build should be skipped")
 
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_processing.build_review_snapshots_for_queue_entries",
             fail_build,
         )
 
@@ -2581,7 +2581,7 @@ class TestRunOneCycle:
             lambda self, pr_refs: {pr_ref: "digest-new" for pr_ref in pr_refs},
         )
         monkeypatch.setattr(
-            "startupai_controller.consumer_review_queue_helpers.build_review_snapshots_for_queue_entries",
+            "startupai_controller.consumer_review_queue_processing.build_review_snapshots_for_queue_entries",
             lambda **kwargs: {
                 ("StartupAI-site/startupai-crew", 210): SimpleNamespace(
                     pr_comment_bodies=(),

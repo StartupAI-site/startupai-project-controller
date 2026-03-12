@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
 from typing import Any, Callable
 
@@ -12,15 +11,9 @@ import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiri
 from startupai_controller import (
     consumer_deferred_action_helpers as _deferred_action_helpers,
 )
-from startupai_controller import consumer_review_queue_helpers as _review_queue_helpers
+import startupai_controller.consumer_review_queue_wiring as _review_queue_wiring
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.board_graph import _resolve_issue_coordinates
-from startupai_controller.consumer_types import (
-    PreparedDueReviewProcessing,
-    PreparedReviewQueueBatch,
-    ReviewGroupProcessingOutcome,
-    ReviewQueueProcessingOutcome,
-)
 from startupai_controller.control_plane_runtime import (
     _clear_degraded,
     _record_successful_github_mutation,
@@ -34,10 +27,9 @@ from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.runtime.wiring import (
-    GitHubRuntimeMemo as CycleGitHubMemo,
     build_github_port_bundle,
-    build_session_store,
-    gh_reason_code,
+    ConsumerDB,
+    GitHubRuntimeMemo,
 )
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -47,9 +39,23 @@ from startupai_controller.validate_critical_path_promotion import (
 logger = logging.getLogger("board-consumer")
 
 
+def _runtime_automerge_enabler(
+    pr_repo: str,
+    pr_number: int,
+    *,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Enable auto-merge for deferred actions without exposing the status value."""
+    _codex_comment_wiring.runtime_automerge_enabler(
+        pr_repo,
+        pr_number,
+        gh_runner=gh_runner,
+    )
+
+
 def _drain_review_queue(
     config: Any,
-    db: Any,
+    db: ConsumerDB,
     critical_path_config: CriticalPathConfig,
     automation_config: BoardAutomationConfig | None,
     *,
@@ -57,80 +63,21 @@ def _drain_review_queue(
     session_store: SessionStorePort | None = None,
     board_snapshot: CycleBoardSnapshot | None = None,
     dry_run: bool = False,
-    github_memo: CycleGitHubMemo | None = None,
+    github_memo: GitHubRuntimeMemo | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
     """Process a bounded batch of queued Review items."""
-    memo = github_memo or CycleGitHubMemo()
-    if automation_config is None:
-        return ReviewQueueDrainSummary(), (
-            board_snapshot
-            if board_snapshot is not None
-            else build_github_port_bundle(
-                config.project_owner,
-                config.project_number,
-                config=critical_path_config,
-                github_memo=memo,
-                gh_runner=gh_runner,
-            ).review_state.build_board_snapshot()
-        )
-
-    effective_board_snapshot = (
-        board_snapshot
-        or build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=critical_path_config,
-            github_memo=memo,
-            gh_runner=gh_runner,
-        ).review_state.build_board_snapshot()
-    )
-
-    store = session_store or build_session_store(db)
-    return _review_queue_helpers.drain_review_queue(
-        config,
-        db,
-        critical_path_config,
-        automation_config,
+    return _review_queue_wiring.drain_review_queue_from_shell(
+        config=config,
+        db=db,
+        critical_path_config=critical_path_config,
+        automation_config=automation_config,
         pr_port=pr_port,
-        session_store=store,
-        board_snapshot=effective_board_snapshot,
+        session_store=session_store,
+        board_snapshot=board_snapshot,
         dry_run=dry_run,
-        github_memo=memo,
+        github_memo=github_memo,
         gh_runner=gh_runner,
-        build_github_port_bundle=build_github_port_bundle,
-        build_session_store=build_session_store,
-        github_memo_factory=CycleGitHubMemo,
-        prepared_batch_factory=PreparedReviewQueueBatch,
-        summary_factory=ReviewQueueDrainSummary,
-        prepared_due_processing_factory=PreparedDueReviewProcessing,
-        review_group_outcome_factory=ReviewGroupProcessingOutcome,
-        review_queue_processing_outcome_factory=ReviewQueueProcessingOutcome,
-        post_pr_codex_verdict=_codex_comment_wiring.post_pr_codex_verdict,
-        review_rescue_fn=_automation_bridge.review_rescue,
-        escalate_to_claude=_board_state_helpers.escalate_to_claude_from_shell,
-        gh_reason_code=gh_reason_code,
-        log_probe_warning=lambda err: logger.warning(
-            "Review queue wakeup probe failed: %s",
-            err,
-        ),
-        log_pre_backfill_warning=lambda issue_ref, err: logger.warning(
-            "Pre-backfill verdict failed for %s: %s",
-            issue_ref,
-            err,
-        ),
-        log_backfill_warning=lambda issue_ref, session_id, err: logger.warning(
-            "Review verdict backfill failed for %s (%s): %s",
-            issue_ref,
-            session_id,
-            err,
-        ),
-        wakeup_changed_review_queue_entries_fn=_review_queue_helpers.wakeup_changed_review_queue_entries,
-        pre_backfill_verdicts_for_due_prs_fn=_codex_comment_wiring.pre_backfill_verdicts_for_due_prs,
-        partition_review_queue_entries_by_probe_change_fn=_review_queue_helpers.partition_review_queue_entries_by_probe_change,
-        repark_unchanged_review_queue_entries_fn=_review_queue_helpers.repark_unchanged_review_queue_entries,
-        build_review_snapshots_for_queue_entries_fn=_review_queue_helpers.build_review_snapshots_for_queue_entries,
-        backfill_review_verdicts_from_snapshots_fn=_codex_comment_wiring.backfill_review_verdicts_from_snapshots,
     )
 
 
@@ -192,7 +139,7 @@ def _replay_deferred_actions(
             runtime_comment_poster=_codex_comment_wiring.runtime_comment_poster,
             runtime_issue_closer=_codex_comment_wiring.runtime_issue_closer,
             runtime_failed_check_rerun=_codex_comment_wiring.runtime_failed_check_rerun,
-            runtime_automerge_enabler=_codex_comment_wiring.runtime_automerge_enabler,
+            runtime_automerge_enabler=_runtime_automerge_enabler,
         ),
         record_successful_github_mutation=_record_successful_github_mutation,
         clear_degraded=_clear_degraded,
