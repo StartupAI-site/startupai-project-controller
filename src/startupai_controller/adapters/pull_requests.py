@@ -82,7 +82,9 @@ def _marker_for(kind: str, ref: str) -> str:
 
 
 _query_project_item_field = _pull_request_support._query_project_item_field
-_query_single_select_field_option = _pull_request_support._query_single_select_field_option
+_query_single_select_field_option = (
+    _pull_request_support._query_single_select_field_option
+)
 _set_text_field = _pull_request_support._set_text_field
 _set_single_select_field = _pull_request_support._set_single_select_field
 _set_status_if_changed = _pull_request_support._set_status_if_changed
