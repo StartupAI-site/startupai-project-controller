@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, cast
 
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 
 
@@ -45,6 +46,13 @@ class PrepareMultiWorkerLaunchContextDeps:
     mark_degraded: Callable[[Any, str], None]
     gh_reason_code: Callable[[Exception], str]
     block_prelaunch_issue: Callable[..., None]
+
+
+class WorktreePrepareErrorInfo(Protocol):
+    """Structured worktree-prepare failure surfaced by outer layers."""
+
+    reason_code: str
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -90,7 +98,7 @@ class RunDaemonLoopDeps:
 
 
 def next_available_slots(
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     limit: int,
     *,
     reserved_slots: set[int] | None = None,
@@ -130,7 +138,7 @@ def log_completed_worker_results(
 
 def prepare_multi_worker_cycle(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool,
     sleeper: Callable[[float], None],
@@ -157,7 +165,7 @@ def prepare_multi_worker_cycle(
 
 
 def multi_worker_dispatch_state(
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     prepared: Any,
     active_tasks: dict[Any, Any],
     *,
@@ -176,7 +184,7 @@ def multi_worker_dispatch_state(
 
 
 def sleep_for_claim_suppression_if_needed(
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     config: Any,
     *,
     sleeper: Callable[[float], None],
@@ -203,7 +211,7 @@ def prepare_multi_worker_launch_context(
     candidate: str,
     *,
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     prepared: Any,
     dry_run: bool,
     runtime: DaemonRuntime | None,
@@ -261,12 +269,13 @@ def prepare_multi_worker_launch_context(
         )
         return None, False
     except deps.worktree_prepare_error_type as err:
+        typed_err = cast(WorktreePrepareErrorInfo, err)
         deps.record_metric(
             db,
             config,
             "worker_start_failed",
             issue_ref=candidate,
-            payload={"reason": err.reason_code, "detail": err.detail},
+            payload={"reason": typed_err.reason_code, "detail": typed_err.detail},
         )
         return None, False
     except RuntimeError as err:
@@ -323,7 +332,7 @@ def submit_multi_worker_task(
 def dispatch_multi_worker_launches(
     executor: Any,
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     *,
     prepared: Any,
     available_slots: list[int],
@@ -383,7 +392,7 @@ def dispatch_multi_worker_launches(
 
 def run_multi_worker_daemon_loop(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
@@ -448,7 +457,7 @@ def run_multi_worker_daemon_loop(
 
 def run_daemon_loop(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
