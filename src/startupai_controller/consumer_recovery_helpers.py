@@ -2,35 +2,96 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from logging import Logger
+from pathlib import Path
+from typing import Callable, Protocol
 
-from startupai_controller.application.consumer.recovery import RecoveryDeps
+from startupai_controller.application.consumer.recovery import (
+    ClassifyOpenPrCandidatesFn,
+    LoadAutomationConfigFn,
+    RecoveryDeps,
+    RecoveredLeaseInfo,
+    RecoveryStatePort,
+    ResolveIssueCoordinatesFn,
+    ReturnIssueToReadyFn,
+    SetBlockedWithReasonFn,
+    TransitionIssueToReviewFn,
+)
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.runtime.wiring import GitHubPortBundle
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+
+class LoadCriticalPathConfigFn(Protocol):
+    """Load the critical-path config used to resolve issue refs."""
+
+    def __call__(self, path: Path) -> CriticalPathConfig:
+        """Return the parsed critical-path config."""
+        ...
+
+
+class RecoveryUseCaseFn(Protocol):
+    """Typed recovery use-case seam consumed by the shell helper."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        db: RecoveryStatePort,
+        *,
+        recovered: list[RecoveredLeaseInfo] | None = None,
+        cp_config: CriticalPathConfig,
+        deps: RecoveryDeps,
+        automation_config: BoardAutomationConfig | None = None,
+        pr_port: PullRequestPort,
+        review_state_port: ReviewStatePort,
+        board_port: BoardMutationPort,
+        log_error: Callable[[str, Exception], None] | None = None,
+    ) -> list[RecoveredLeaseInfo]:
+        """Recover interrupted leases and update the board truthfully."""
+        ...
+
+
+class BuildGitHubPortBundleFn(Protocol):
+    """Build the canonical GitHub-backed port bundle when ports are omitted."""
+
+    def __call__(
+        self,
+        project_owner: str,
+        project_number: int,
+        *,
+        config: CriticalPathConfig | None = None,
+        gh_runner: Callable[..., str] | None = None,
+    ) -> GitHubPortBundle:
+        """Return the GitHub port bundle for one command/cycle."""
+        ...
 
 
 def recover_interrupted_sessions(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: RecoveryStatePort,
     *,
-    automation_config: Any | None = None,
-    pr_port: Any | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
+    automation_config: BoardAutomationConfig | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
     gh_runner: Callable[..., str] | None = None,
-    load_config: Callable[[Any], Any],
+    load_config: LoadCriticalPathConfigFn,
     config_error_type: type[Exception],
-    logger: Any,
-    recovery_use_case: Callable[..., list[Any]],
+    logger: Logger,
+    recovery_use_case: RecoveryUseCaseFn,
     gh_query_error_type: type[Exception],
-    build_github_port_bundle: Callable[..., Any],
-    load_automation_config: Callable[[Any], Any],
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
-    classify_open_pr_candidates: Callable[..., tuple[str, Any | None, str]],
-    return_issue_to_ready: Callable[..., None],
-    transition_issue_to_review: Callable[..., None],
-    set_blocked_with_reason: Callable[..., None],
-) -> list[Any]:
+    build_github_port_bundle: BuildGitHubPortBundleFn,
+    load_automation_config: LoadAutomationConfigFn,
+    resolve_issue_coordinates: ResolveIssueCoordinatesFn,
+    classify_open_pr_candidates: ClassifyOpenPrCandidatesFn,
+    return_issue_to_ready: ReturnIssueToReadyFn,
+    transition_issue_to_review: TransitionIssueToReviewFn,
+    set_blocked_with_reason: SetBlockedWithReasonFn,
+) -> list[RecoveredLeaseInfo]:
     """Recover leases left behind by a previous interrupted daemon process."""
     recovered = db.recover_interrupted_leases()
     if not recovered:
@@ -42,7 +103,6 @@ def recover_interrupted_sessions(
         logger.error("Interrupted-session recovery skipped: %s", err)
         return recovered
 
-    bundle = None
     if pr_port is None or review_state_port is None or board_port is None:
         bundle = build_github_port_bundle(
             config.project_owner,
@@ -50,9 +110,13 @@ def recover_interrupted_sessions(
             config=cp_config,
             gh_runner=gh_runner,
         )
-    effective_pr_port = pr_port or bundle.pull_requests
-    effective_review_state_port = review_state_port or bundle.review_state
-    effective_board_port = board_port or bundle.board_mutations
+        effective_pr_port = pr_port or bundle.pull_requests
+        effective_review_state_port = review_state_port or bundle.review_state
+        effective_board_port = board_port or bundle.board_mutations
+    else:
+        effective_pr_port = pr_port
+        effective_review_state_port = review_state_port
+        effective_board_port = board_port
 
     return recovery_use_case(
         config,

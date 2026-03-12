@@ -23,6 +23,7 @@ from startupai_controller.application.consumer.daemon import (
     DispatchMultiWorkerLaunchesDeps,
     PrepareMultiWorkerCycleDeps,
     PrepareMultiWorkerLaunchContextDeps,
+    RecoverInterruptedSessionsFn,
     RunDaemonLoopDeps,
     RunMultiWorkerDaemonLoopDeps,
     dispatch_multi_worker_launches as _dispatch_multi_worker_launches_use_case,
@@ -36,12 +37,20 @@ from startupai_controller.application.consumer.daemon import (
     sleep_for_claim_suppression_if_needed as _sleep_for_claim_suppression_if_needed_use_case,
     submit_multi_worker_task as _submit_multi_worker_task_use_case,
 )
+from startupai_controller.application.consumer.recovery import (
+    RecoveredLeaseInfo,
+    RecoveryStatePort,
+)
 from startupai_controller.application.consumer.status import (
     CollectStatusPayloadDeps,
     collect_status_payload as _collect_status_payload_use_case,
 )
 from startupai_controller.automation_port_helpers import _list_project_items_by_status
-from startupai_controller.board_automation_config import load_automation_config
+from startupai_controller.board_automation_config import (
+    BoardAutomationConfig,
+    load_automation_config,
+)
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import ActiveWorkerTask, WorktreePrepareError
 from startupai_controller.consumer_workflow import (
     WorkflowConfigError,
@@ -160,7 +169,7 @@ class DaemonRuntimeWiringDeps:
     load_automation_config: Callable[[Any], Any]
     apply_automation_runtime: Callable[[Any, Any | None], None]
     current_main_workflows: Callable[..., tuple[Any, dict[str, Any], int]]
-    recover_interrupted_sessions: Callable[..., list[Any]]
+    recover_interrupted_sessions: RecoverInterruptedSessionsFn
     run_multi_worker_daemon_loop: Callable[..., None]
     run_one_cycle: Callable[..., Any]
 
@@ -310,12 +319,12 @@ def _daemon_runtime_wiring_deps(
         )
 
     def _recover_interrupted_sessions(
-        config: Any,
-        db: Any,
+        config: ConsumerConfig,
+        db: RecoveryStatePort,
         *,
-        automation_config: Any | None = None,
+        automation_config: BoardAutomationConfig | None = None,
         runtime: DaemonRuntime | None = None,
-    ) -> list[Any]:
+    ) -> list[RecoveredLeaseInfo]:
         return _operational_wiring.recover_interrupted_sessions(
             config,
             db,
@@ -325,8 +334,6 @@ def _daemon_runtime_wiring_deps(
                 if runtime and runtime.gh_runner is not None
                 else None
             ),
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
         )
 
     def _run_one_cycle(

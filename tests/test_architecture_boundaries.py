@@ -381,6 +381,22 @@ def test_consumer_recovery_use_case_has_no_legacy_board_or_gh_callables() -> Non
     )
 
 
+def test_consumer_recovery_shell_has_no_dead_board_callable_kwargs() -> None:
+    params = _function_parameter_names(
+        SRC_ROOT / "consumer_operational_wiring.py",
+        "recover_interrupted_sessions",
+    )
+    forbidden = {
+        "board_info_resolver",
+        "board_mutator",
+    }
+    offending = sorted(params & forbidden)
+    assert offending == [], (
+        "consumer_operational_wiring.recover_interrupted_sessions() regained "
+        f"dead legacy board kwargs: {offending}"
+    )
+
+
 def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
     source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
     forbidden = [

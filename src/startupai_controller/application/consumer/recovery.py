@@ -3,11 +3,124 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from pathlib import Path
+from typing import Callable, Protocol
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.domain.models import OpenPullRequestMatch
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+
+class RecoveredLeaseInfo(Protocol):
+    """Recovered interrupted session lease metadata needed for board recovery."""
+
+    issue_ref: str
+    branch_name: str | None
+    pr_url: str | None
+    session_kind: str
+
+
+class RecoveryStatePort(Protocol):
+    """Persistence operations required by interrupted-session recovery."""
+
+    def recover_interrupted_leases(self) -> list[RecoveredLeaseInfo]:
+        """Return and clear interrupted leases from local runtime state."""
+        ...
+
+
+class LoadAutomationConfigFn(Protocol):
+    """Load board automation policy config from disk."""
+
+    def __call__(self, path: Path) -> BoardAutomationConfig:
+        """Return the parsed automation config."""
+        ...
+
+
+class ResolveIssueCoordinatesFn(Protocol):
+    """Resolve one canonical issue ref into owner/repo/issue-number coordinates."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        config: CriticalPathConfig,
+    ) -> tuple[str, str, int]:
+        """Return (owner, repo, number) for an issue ref."""
+        ...
+
+
+class ClassifyOpenPrCandidatesFn(Protocol):
+    """Classify open PR candidates for interrupted-session recovery."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        automation_config: BoardAutomationConfig,
+        *,
+        expected_branch: str | None = None,
+        pr_port: PullRequestPort,
+    ) -> tuple[str, OpenPullRequestMatch | None, str]:
+        """Return (classification, matching_pr, reason_code)."""
+        ...
+
+
+class ReturnIssueToReadyFn(Protocol):
+    """Move an interrupted issue back to Ready."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        config: CriticalPathConfig,
+        project_owner: str,
+        project_number: int,
+        *,
+        from_statuses: set[str] | None = None,
+        review_state_port: ReviewStatePort,
+        board_port: BoardMutationPort,
+    ) -> None:
+        """Apply the Ready transition if allowed."""
+        ...
+
+
+class TransitionIssueToReviewFn(Protocol):
+    """Move an interrupted issue into Review."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        config: CriticalPathConfig,
+        project_owner: str,
+        project_number: int,
+        *,
+        review_state_port: ReviewStatePort,
+        board_port: BoardMutationPort,
+    ) -> None:
+        """Apply the Review transition."""
+        ...
+
+
+class SetBlockedWithReasonFn(Protocol):
+    """Block an interrupted issue with a reason code."""
+
+    def __call__(
+        self,
+        issue_ref: str,
+        reason: str,
+        config: CriticalPathConfig,
+        project_owner: str,
+        project_number: int,
+        *,
+        review_state_port: ReviewStatePort,
+        board_port: BoardMutationPort,
+    ) -> None:
+        """Apply the Blocked transition."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -15,27 +128,27 @@ class RecoveryDeps:
     """Injected seams for interrupted-session recovery."""
 
     gh_query_error_type: type[Exception]
-    load_automation_config: Callable[[Any], Any]
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]]
-    classify_open_pr_candidates: Callable[..., tuple[str, Any | None, str]]
-    return_issue_to_ready: Callable[..., None]
-    transition_issue_to_review: Callable[..., None]
-    set_blocked_with_reason: Callable[..., None]
+    load_automation_config: LoadAutomationConfigFn
+    resolve_issue_coordinates: ResolveIssueCoordinatesFn
+    classify_open_pr_candidates: ClassifyOpenPrCandidatesFn
+    return_issue_to_ready: ReturnIssueToReadyFn
+    transition_issue_to_review: TransitionIssueToReviewFn
+    set_blocked_with_reason: SetBlockedWithReasonFn
 
 
 def recover_interrupted_sessions(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: RecoveryStatePort,
     *,
-    recovered: list[Any] | None = None,
-    cp_config: Any,
+    recovered: list[RecoveredLeaseInfo] | None = None,
+    cp_config: CriticalPathConfig,
     deps: RecoveryDeps,
-    automation_config: Any | None = None,
+    automation_config: BoardAutomationConfig | None = None,
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
     log_error: Callable[[str, Exception], None] | None = None,
-) -> list[Any]:
+) -> list[RecoveredLeaseInfo]:
     """Recover leases left behind by a previous interrupted daemon process."""
     recovered_leases = (
         recovered if recovered is not None else db.recover_interrupted_leases()
