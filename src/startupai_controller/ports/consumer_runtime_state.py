@@ -5,14 +5,11 @@ from __future__ import annotations
 from typing import Protocol
 
 from startupai_controller.domain.models import SessionInfo
+from startupai_controller.ports.control_plane_state import ControlValueStorePort
 
 
-class ConsumerRuntimeStatePort(Protocol):
+class ConsumerRuntimeStatePort(ControlValueStorePort, Protocol):
     """Persistence operations consumed by preflight and daemon runtime flows."""
-
-    def set_control_value(self, key: str, value: str | None) -> None:
-        """Persist one control-plane value."""
-        ...
 
     def active_slot_ids(self) -> list[int]:
         """Return currently occupied slot ids."""
@@ -36,4 +33,12 @@ class ConsumerRuntimeStatePort(Protocol):
 
     def get_control_value(self, key: str) -> str | None:
         """Return one persisted control-plane value."""
+        ...
+
+    def update_heartbeat(self, issue_ref: str) -> None:
+        """Refresh the heartbeat for one in-flight lease/session."""
+        ...
+
+    def release_lease(self, issue_ref: str) -> None:
+        """Release one claimed execution lease."""
         ...
