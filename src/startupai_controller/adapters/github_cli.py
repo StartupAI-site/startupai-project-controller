@@ -13,10 +13,12 @@ import json
 
 from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdapter
 from startupai_controller.adapters.github_transport import _run_gh
+from startupai_controller.adapters import (
+    pull_request_review_state as _review_state_builders,
+)
 from startupai_controller.adapters.pull_requests import (
     CycleGitHubMemo,
     GitHubPullRequestAdapter,
-    _codex_gate_from_payload,
     _list_project_items as _impl_list_project_items,
     _is_pr_open as _impl_is_pr_open,
     _query_failed_check_runs as _impl_query_failed_check_runs,
@@ -32,12 +34,8 @@ from startupai_controller.adapters.pull_requests import (
     _set_single_select_field as _impl_set_single_select_field,
     _set_status_if_changed as _impl_set_status_if_changed,
     _set_text_field as _impl_set_text_field,
-    _review_state_digest_from_probe,
-    build_pr_gate_status_from_payload,
     clear_required_status_checks_cache,
     enable_pull_request_automerge,
-    has_copilot_review_signal_from_payload,
-    latest_codex_verdict_from_payload,
     memoized_query_pull_request_state_probes,
     memoized_query_pull_request_view_payloads,
     query_closing_issues,
@@ -56,6 +54,17 @@ from startupai_controller.adapters.review_state import (
 )
 from startupai_controller.domain.models import IssueContext, ReviewSnapshot
 from startupai_controller.domain.repair_policy import MARKER_PREFIX
+
+_review_state_digest_from_probe = _review_state_builders.review_state_digest_from_probe
+build_pr_gate_status_from_payload = (
+    _review_state_builders.build_pr_gate_status_from_payload
+)
+has_copilot_review_signal_from_payload = (
+    _review_state_builders.has_copilot_review_signal_from_payload
+)
+latest_codex_verdict_from_payload = (
+    _review_state_builders.latest_codex_verdict_from_payload
+)
 
 
 def _query_project_item_field(
@@ -319,63 +328,18 @@ class GitHubCliAdapter(
                     pr_repo,
                     getattr(payload, "base_ref_name", None) or "main",
                 )
-                review_refs = review_refs_by_pr[(pr_repo, pr_number)]
-                verdict = latest_codex_verdict_from_payload(
-                    payload,
-                    trusted_actors=trusted_codex_actors,
-                )
-                codex_gate_code, codex_gate_message = _codex_gate_from_payload(
-                    pr_repo,
-                    pr_number,
-                    review_refs=review_refs,
-                    verdict=verdict,
-                )
-                gate_status = build_pr_gate_status_from_payload(
-                    payload,
-                    required=required_checks,
-                )
-                rescue_checks = tuple(sorted(gate_status.required))
-                rescue_passed: set[str] = set()
-                rescue_pending: set[str] = set()
-                rescue_failed: set[str] = set()
-                rescue_cancelled: set[str] = set()
-                rescue_missing: set[str] = set()
-                for name in rescue_checks:
-                    observation = gate_status.checks.get(name)
-                    if observation is None:
-                        rescue_missing.add(name)
-                        continue
-                    if observation.result == "pass":
-                        rescue_passed.add(name)
-                    elif observation.result == "cancelled":
-                        rescue_cancelled.add(name)
-                    elif observation.result == "fail":
-                        rescue_failed.add(name)
-                    else:
-                        rescue_pending.add(name)
-                snapshots[(pr_repo, pr_number)] = ReviewSnapshot(
-                    pr_repo=pr_repo,
-                    pr_number=pr_number,
-                    review_refs=review_refs,
-                    pr_author=str(getattr(payload, "author", "") or ""),
-                    pr_body=str(getattr(payload, "body", "") or ""),
-                    pr_comment_bodies=tuple(
-                        str(comment.get("body") or "")
-                        for comment in getattr(payload, "comments", ())
-                    ),
-                    copilot_review_present=has_copilot_review_signal_from_payload(
-                        payload
-                    ),
-                    codex_verdict=verdict,
-                    codex_gate_code=codex_gate_code,
-                    codex_gate_message=codex_gate_message,
-                    gate_status=gate_status,
-                    rescue_checks=rescue_checks,
-                    rescue_passed=rescue_passed,
-                    rescue_pending=rescue_pending,
-                    rescue_failed=rescue_failed,
-                    rescue_cancelled=rescue_cancelled,
-                    rescue_missing=rescue_missing,
+                snapshots[(pr_repo, pr_number)] = (
+                    _review_state_builders.build_review_snapshot_from_payload(
+                        pr_repo=pr_repo,
+                        pr_number=pr_number,
+                        review_refs=review_refs_by_pr[(pr_repo, pr_number)],
+                        pr_payload=payload,
+                        trusted_codex_actors=trusted_codex_actors,
+                        required_checks=required_checks,
+                        has_copilot_review_signal_from_payload_fn=has_copilot_review_signal_from_payload,
+                        latest_codex_verdict_from_payload_fn=latest_codex_verdict_from_payload,
+                        build_pr_gate_status_from_payload_fn=build_pr_gate_status_from_payload,
+                    )
                 )
         return snapshots
 
