@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, cast
 
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
@@ -36,6 +36,8 @@ from startupai_controller.validate_critical_path_promotion import (
     GhQueryError,
     parse_issue_ref,
 )
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.runtime.wiring import gh_reason_code as _gh_reason_code
 
 
@@ -46,6 +48,25 @@ class ReviewRescueExecution:
     result: ReviewRescueResult
     partial_failure: bool = False
     error: str | None = None
+
+
+class ReviewQueueResultView(Protocol):
+    """Minimal queue-result shape consumed by review queue persistence."""
+
+    @property
+    def rerun_checks(self) -> tuple[str, ...]: ...
+
+    @property
+    def auto_merge_enabled(self) -> bool: ...
+
+    @property
+    def requeued_refs(self) -> tuple[str, ...]: ...
+
+    @property
+    def blocked_reason(self) -> str | None: ...
+
+    @property
+    def skipped_reason(self) -> str | None: ...
 
 
 def group_review_queue_entries_by_pr(
@@ -84,9 +105,9 @@ def review_queue_next_attempt_at(
 
 
 def apply_review_queue_result(
-    store: Any,
+    store: SessionStorePort,
     entry: ReviewQueueEntry,
-    result: Any,
+    result: ReviewQueueResultView,
     *,
     now: datetime | None = None,
     retry_seconds: int | None = None,
@@ -186,7 +207,7 @@ def apply_review_queue_partial_failure(
     *,
     config: Any,
     error: str | None,
-    gh_reason_code: Callable[[str | Exception], str] = _gh_reason_code,
+    gh_reason_code: Callable[[Any], str] = _gh_reason_code,
     now: datetime | None = None,
 ) -> None:
     """Back off queued review entries after a partial-failure cycle."""
@@ -235,7 +256,7 @@ def review_scope_issue_refs(
 
 
 def queue_review_item(
-    store: Any,
+    store: SessionStorePort,
     issue_ref: str,
     pr_url: str,
     *,
@@ -261,7 +282,7 @@ def queue_review_item(
 
 def prune_stale_review_entries(
     store: Any,
-    review_refs: set[str],
+    review_refs: set[str] | frozenset[str],
     existing_entries: list[ReviewQueueEntry],
     *,
     dry_run: bool = False,
@@ -279,7 +300,7 @@ def prune_stale_review_entries(
 
 def seed_new_review_entries(
     store: Any,
-    review_refs: set[str],
+    review_refs: set[str] | frozenset[str],
     existing_refs: set[str],
     *,
     dry_run: bool = False,
@@ -311,7 +332,7 @@ def seed_new_review_entries(
 
 def reconcile_review_queue_identity(
     store: Any,
-    review_refs: set[str],
+    review_refs: set[str] | frozenset[str],
     *,
     now: datetime | None = None,
 ) -> None:
@@ -394,22 +415,25 @@ def partition_review_queue_entries_by_probe_change(
 
 
 def repark_unchanged_review_queue_entries(
-    store: Any,
+    store: SessionStorePort,
     entries: list[ReviewQueueEntry],
     *,
     now: datetime,
 ) -> None:
     """Re-schedule unchanged review entries without rehydrating the full PR state."""
     for entry in entries:
-        synthetic_result = SimpleNamespace(
-            rerun_checks=(),
-            auto_merge_enabled=entry.last_result == "auto_merge_enabled",
-            requeued_refs=(),
-            blocked_reason=(
-                entry.last_reason if entry.last_result == "blocked" else None
-            ),
-            skipped_reason=(
-                entry.last_reason if entry.last_result == "skipped" else None
+        synthetic_result = cast(
+            ReviewQueueResultView,
+            SimpleNamespace(
+                rerun_checks=(),
+                auto_merge_enabled=entry.last_result == "auto_merge_enabled",
+                requeued_refs=(),
+                blocked_reason=(
+                    entry.last_reason if entry.last_result == "blocked" else None
+                ),
+                skipped_reason=(
+                    entry.last_reason if entry.last_result == "skipped" else None
+                ),
             ),
         )
         retry_seconds = review_queue_retry_seconds_for_result(synthetic_result)
@@ -461,7 +485,7 @@ def build_review_snapshots_for_queue_entries(
     *,
     queue_entries: list[ReviewQueueEntry],
     review_refs: set[str],
-    pr_port: Any,
+    pr_port: PullRequestPort,
     trusted_codex_actors: frozenset[str],
 ) -> dict[tuple[str, int], ReviewSnapshot]:
     """Build one review snapshot per unique PR for queued review entries."""
@@ -907,7 +931,7 @@ def run_review_rescue_for_group(
         )
     except GhQueryError as err:
         return ReviewRescueExecution(
-            result=ReviewRescueResult(),
+            result=ReviewRescueResult(pr_repo=pr_repo, pr_number=pr_number),
             partial_failure=True,
             error=str(err),
         )

@@ -48,6 +48,7 @@ from startupai_controller.domain.models import (
     CycleResult,
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
+    ReviewQueueEntry,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
@@ -62,6 +63,7 @@ from startupai_controller.ports.ready_flow import (
     StatusResolverFn,
 )
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.runtime.wiring import (
     build_gh_runner_port,
     build_process_runner_port,
@@ -459,36 +461,36 @@ def claim_launch_context(
 
 def handoff_execution_to_review(
     *,
-    config: Any,
-    db: Any,
-    prepared: Any,
-    launch_context: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    launch_context: PreparedLaunchContext,
     session_id: str,
     pr_url: str,
     session_status: str,
-    session_store: Any,
-    review_state_port: Any | None,
-    board_port: Any | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Any | None,
+    session_store: SessionStorePort,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | GhRunnerPort | None,
     transition_claimed_session_to_review: Callable[..., None],
     post_claimed_session_verdict_marker: Callable[..., None],
-    queue_claimed_session_for_review: Callable[..., Any | None],
-    run_immediate_review_handoff: Callable[..., Any],
+    queue_claimed_session_for_review: Callable[..., ReviewQueueEntry | None],
+    run_immediate_review_handoff: Callable[..., ReviewQueueDrainSummary],
     record_metric: Callable[..., None],
-) -> Any:
+) -> ReviewQueueDrainSummary:
     """Transition a claimed session into Review and perform immediate rescue."""
 
     def _transition_claimed_session_to_review(
         *,
-        db: Any,
+        db: ConsumerRuntimeStatePort,
         issue_ref: str,
         session_id: str,
-        config: Any,
+        config: ConsumerConfig,
         critical_path_config: Any,
-        review_state_port: Any | None,
-        board_port: Any | None,
+        review_state_port: ReviewStatePort | None,
+        board_port: BoardMutationPort | None,
     ) -> None:
         return transition_claimed_session_to_review(
             db=db,
@@ -518,13 +520,13 @@ def handoff_execution_to_review(
 
     def _run_immediate_review_handoff(
         *,
-        config: Any,
+        config: ConsumerConfig,
         critical_path_config: Any,
         automation_config: Any,
-        store: Any,
-        queue_entry: Any,
-        db: Any,
-    ) -> Any:
+        store: SessionStorePort,
+        queue_entry: ReviewQueueEntry,
+        db: ConsumerRuntimeStatePort,
+    ) -> ReviewQueueDrainSummary:
         return run_immediate_review_handoff(
             config=config,
             critical_path_config=critical_path_config,

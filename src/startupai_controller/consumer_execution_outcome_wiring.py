@@ -5,6 +5,13 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import startupai_controller.consumer_cycle_wiring as _cycle_wiring
+import startupai_controller.consumer_review_handoff_helpers as _review_handoff_helpers
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_types import (
+    PreparedCycleContext,
+    PreparedLaunchContext,
+)
 from startupai_controller.consumer_review_handoff_helpers import (
     post_claimed_session_verdict_marker as _post_claimed_session_verdict_marker_helper,
     queue_claimed_session_for_review as _queue_claimed_session_for_review_helper,
@@ -12,6 +19,20 @@ from startupai_controller.consumer_review_handoff_helpers import (
     transition_claimed_session_to_review as _transition_claimed_session_to_review_helper,
 )
 import startupai_controller.consumer_session_completion_helpers as _session_completion_helpers
+from startupai_controller.domain.models import (
+    ReviewQueueDrainSummary,
+    ReviewQueueEntry,
+)
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
+from startupai_controller.ports.ready_flow import (
+    BoardInfoResolverFn,
+    BoardStatusMutatorFn,
+    GitHubRunnerFn,
+)
+from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 
 def block_prelaunch_issue(
@@ -88,18 +109,18 @@ def create_pr_for_execution_result(
 
 def transition_claimed_session_to_review(
     *,
-    db: Any,
+    db: _review_handoff_helpers.ReviewHandoffStatePort,
     issue_ref: str,
     session_id: str,
-    config: Any,
-    critical_path_config: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    transition_issue_to_review: Callable[..., None],
-    record_successful_github_mutation: Callable[..., None],
-    mark_degraded: Callable[..., None],
-    queue_status_transition: Callable[..., None],
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+    transition_issue_to_review: _review_handoff_helpers.TransitionIssueToReviewFn,
+    record_successful_github_mutation: Callable[[ConsumerRuntimeStatePort], None],
+    mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None],
+    queue_status_transition: _review_handoff_helpers.QueueStatusTransitionFn,
     logger: Any,
 ) -> None:
     """Move one claimed issue into Review or queue the transition on failure."""
@@ -122,14 +143,14 @@ def transition_claimed_session_to_review(
 
 def post_claimed_session_verdict_marker(
     *,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     pr_url: str,
     session_id: str,
-    gh_runner: Callable[..., str] | None,
-    post_pr_codex_verdict: Callable[..., bool],
-    record_successful_github_mutation: Callable[..., None],
-    mark_degraded: Callable[..., None],
-    queue_verdict_marker: Callable[..., None],
+    gh_runner: GitHubRunnerFn | None,
+    post_pr_codex_verdict: _review_handoff_helpers.PostPrCodexVerdictFn,
+    record_successful_github_mutation: Callable[[ConsumerRuntimeStatePort], None],
+    mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None],
+    queue_verdict_marker: _review_handoff_helpers.QueueVerdictMarkerFn,
     logger: Any,
 ) -> None:
     """Post the codex verdict marker for a newly handed-off review PR."""
@@ -148,12 +169,12 @@ def post_claimed_session_verdict_marker(
 
 def queue_claimed_session_for_review(
     *,
-    store: Any,
+    store: SessionStorePort,
     issue_ref: str,
     pr_url: str,
     session_id: str,
-    queue_review_item: Callable[..., Any | None],
-) -> Any | None:
+    queue_review_item: _review_handoff_helpers.QueueReviewItemFn,
+) -> ReviewQueueEntry | None:
     """Queue one claimed session for immediate review handling."""
     return _queue_claimed_session_for_review_helper(
         store=store,
@@ -166,23 +187,25 @@ def queue_claimed_session_for_review(
 
 def run_immediate_review_handoff(
     *,
-    config: Any,
-    critical_path_config: Any,
-    automation_config: Any,
-    store: Any,
-    queue_entry: Any,
-    gh_runner: Callable[..., str] | None,
-    db: Any,
-    build_github_port_bundle: Callable[..., Any],
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig,
+    store: SessionStorePort,
+    queue_entry: ReviewQueueEntry,
+    gh_runner: GitHubRunnerFn | None,
+    db: ConsumerRuntimeStatePort,
+    build_github_port_bundle: _review_handoff_helpers.BuildGitHubPortBundleFn,
     github_memo_factory: Callable[[], Any],
-    build_review_snapshots_for_queue_entries: Callable[..., dict[tuple[str, int], Any]],
-    review_rescue: Callable[..., Any],
-    apply_review_queue_result: Callable[..., None],
-    mark_degraded: Callable[..., None],
-    gh_reason_code: Callable[..., str],
-    summary_factory: Callable[..., Any],
+    build_review_snapshots_for_queue_entries: (
+        _review_handoff_helpers.BuildReviewSnapshotsForQueueEntriesFn
+    ),
+    review_rescue: _review_handoff_helpers.ReviewRescueFn,
+    apply_review_queue_result: _review_handoff_helpers.ApplyReviewQueueResultFn,
+    mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None],
+    gh_reason_code: Callable[[Any], str],
+    summary_factory: type[ReviewQueueDrainSummary],
     logger: Any,
-) -> Any:
+) -> ReviewQueueDrainSummary:
     """Run immediate rescue for the just-opened review PR."""
     return _run_immediate_review_handoff_helper(
         config=config,
