@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
@@ -19,10 +19,6 @@ from startupai_controller.domain.repair_policy import (
 )
 from startupai_controller.domain.scheduling_policy import VALID_EXECUTORS, wip_limit_for_lane
 from startupai_controller.application.automation.ready_claim import _transition_issue_status
-from startupai_controller.application.automation.ready_wiring import (
-    _wrap_board_port,
-    _wrap_review_state_port,
-)
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
@@ -30,18 +26,8 @@ from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     direct_predecessors,
     evaluate_ready_promotion,
-    in_any_critical_path,
     parse_issue_ref,
 )
-
-if TYPE_CHECKING:
-    from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
-    from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
-    from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
-else:
-    _BoardMutationPort = None
-    _PullRequestPort = None
-    _ReviewStatePort = None
 @dataclass(frozen=True)
 class _WipCandidate:
     ref: str
@@ -409,120 +395,3 @@ def rebalance_wip(
         )
 
     return decision
-
-
-# ---------------------------------------------------------------------------
-# Wiring entry-points (port materialisation + delegation)
-# ---------------------------------------------------------------------------
-
-
-def load_rebalance_in_progress_items(
-    *,
-    config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    review_state_port: _ReviewStatePort | None,
-    board_port: _BoardMutationPort | None,
-    pr_port: _PullRequestPort | None,
-    gh_runner: Callable[..., str] | None,
-    # Injected board-automation helpers
-    default_review_state_port_fn: Callable[..., object] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
-    default_pr_port_fn: Callable[..., object] | None = None,
-) -> tuple[_ReviewStatePort, _BoardMutationPort, _PullRequestPort, list[IssueSnapshot]]:
-    """Load the current In Progress set for WIP rebalance."""
-    review_state_port = review_state_port or default_review_state_port_fn(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    board_port = board_port or default_board_mutation_port_fn(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    pr_port = pr_port or default_pr_port_fn(
-        project_owner,
-        project_number,
-        config,
-        gh_runner=gh_runner,
-    )
-    return review_state_port, board_port, pr_port, review_state_port.list_issues_by_status(
-        "In Progress"
-    )
-
-
-def wire_rebalance_wip(
-    config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    project_owner: str,
-    project_number: int,
-    *,
-    this_repo_prefix: str | None = None,
-    all_prefixes: bool = False,
-    cycle_minutes: int = DEFAULT_REBALANCE_CYCLE_MINUTES,
-    dry_run: bool = False,
-    review_state_port: _ReviewStatePort | None = None,
-    board_port: _BoardMutationPort | None = None,
-    pr_port: _PullRequestPort | None = None,
-    board_info_resolver: Callable[..., object] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    # Injected board-automation helpers
-    default_review_state_port_fn: Callable[..., object] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
-    default_pr_port_fn: Callable[..., object] | None = None,
-    is_graph_member_fn: Callable[[CriticalPathConfig, str], bool] | None = None,
-    ready_promotion_evaluator_fn: Callable[..., tuple[int, str]] | None = None,
-    comment_exists_fn: Callable[..., bool] | None = None,
-) -> RebalanceDecision:
-    """Wire port materialization, then delegate to core rebalance."""
-    review_state_port, board_port, pr_port, in_progress = load_rebalance_in_progress_items(
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        pr_port=pr_port,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=default_review_state_port_fn,
-        default_board_mutation_port_fn=default_board_mutation_port_fn,
-        default_pr_port_fn=default_pr_port_fn,
-    )
-    review_state_port = _wrap_review_state_port(
-        review_state_port,
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        status_resolver=status_resolver,
-        comment_exists_fn=comment_exists_fn,
-        gh_runner=gh_runner,
-    )
-    board_port = _wrap_board_port(
-        board_port,
-        config=config,
-        project_owner=project_owner,
-        project_number=project_number,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-    )
-    return rebalance_wip(
-        config=config,
-        automation_config=automation_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        in_progress_items=in_progress,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        pr_port=pr_port,
-        is_graph_member=is_graph_member_fn or in_any_critical_path,
-        ready_promotion_evaluator=ready_promotion_evaluator_fn or evaluate_ready_promotion,
-        this_repo_prefix=this_repo_prefix,
-        all_prefixes=all_prefixes,
-        cycle_minutes=cycle_minutes,
-        dry_run=dry_run,
-    )

@@ -267,10 +267,6 @@ def run_one_cycle(
                 config,
                 db,
                 dry_run=dry_run,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
                 gh_runner=gh_runner,
             )
     except config_error_type as err:
@@ -312,11 +308,6 @@ def run_one_cycle(
         review_state_port=github_bundle.review_state,
         board_port=github_bundle.board_mutations,
         pr_port=github_bundle.pull_requests,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
     )
 
 
@@ -367,7 +358,13 @@ def run_one_cycle_live(
         build_gh_runner_port=build_gh_runner_port,
         build_process_runner_port=build_process_runner_port,
         run_prepared_cycle=_run_prepared_cycle_use_case,
-        prepared_cycle_deps=_operational_wiring.prepared_cycle_deps(),
+        prepared_cycle_deps=_operational_wiring.prepared_cycle_deps(
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+        ),
         logger=logger,
     )
 

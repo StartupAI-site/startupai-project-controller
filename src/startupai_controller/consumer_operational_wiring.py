@@ -112,9 +112,6 @@ def reconcile_active_repair_review_items(
         board_port=board_port,
         board_snapshot=board_snapshot,
         issue_ref_for_snapshot=issue_ref_for_snapshot,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
 
@@ -145,9 +142,6 @@ def reconcile_single_in_progress_item(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
 
@@ -182,9 +176,6 @@ def reconcile_stale_in_progress_items(
         board_snapshot=board_snapshot,
         issue_ref_for_snapshot=issue_ref_for_snapshot,
         active_issue_refs=active_issue_refs,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
 
@@ -256,9 +247,6 @@ def reconcile_board_truth(
         board_port=board_port,
         dry_run=dry_run,
         board_snapshot=board_snapshot,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
 
 
@@ -1121,13 +1109,133 @@ def finalize_claimed_session(
     )
 
 
-def prepared_cycle_deps():
-    """Bind board_consumer helpers for the extracted prepared-cycle slice."""
+def prepared_cycle_deps(
+    *,
+    status_resolver: Callable[..., str] | None,
+    board_info_resolver: Callable[..., Any] | None,
+    board_mutator: Callable[..., None] | None,
+    comment_checker: Callable[..., bool] | None,
+    comment_poster: Callable[..., None] | None,
+):
+    """Bind compatibility seams at the outer wiring boundary."""
+    def _resolve_launch_context_for_cycle(
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: Any | None,
+        target_issue: str | None,
+        dry_run: bool,
+        review_state_port: Any | None,
+        pr_port: Any | None,
+        subprocess_runner: Any | None,
+        gh_runner: Any | None,
+    ) -> tuple[Any | None, Any | None]:
+        return resolve_launch_context_for_cycle(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            target_issue=target_issue,
+            dry_run=dry_run,
+            review_state_port=review_state_port,
+            pr_port=pr_port,
+            status_resolver=status_resolver,
+            subprocess_runner=subprocess_runner,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+
+    def _claim_launch_context(
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: Any,
+        slot_id: int,
+        review_state_port: Any | None,
+        board_port: Any | None,
+        gh_runner: Any | None,
+    ) -> tuple[Any | None, Any | None]:
+        return claim_launch_context(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            slot_id=slot_id,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
+    def _execute_claimed_session(
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: Any,
+        claimed_context: Any,
+        gh_runner: Any | None,
+        process_runner: Any | None,
+        file_reader: Callable[..., Any] | None,
+        review_state_port: Any | None,
+        board_port: Any | None,
+        pr_port: Any | None,
+    ) -> Any:
+        return execute_claimed_session(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            claimed_context=claimed_context,
+            process_runner=process_runner,
+            file_reader=file_reader,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            pr_port=pr_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
+    def _finalize_claimed_session(
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: Any,
+        claimed_context: Any,
+        execution_outcome: Any,
+        review_state_port: Any | None,
+        gh_runner: Any | None,
+    ) -> Any:
+        return finalize_claimed_session(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            claimed_context=claimed_context,
+            execution_outcome=execution_outcome,
+            review_state_port=review_state_port,
+            board_info_resolver=board_info_resolver,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
     return _cycle_wiring.prepared_cycle_deps(
         claim_suppression_state=_support_wiring.claim_suppression_state,
         next_available_slot=_support_wiring.next_available_slot,
-        resolve_launch_context_for_cycle=resolve_launch_context_for_cycle,
-        claim_launch_context=claim_launch_context,
-        execute_claimed_session=execute_claimed_session,
-        finalize_claimed_session=finalize_claimed_session,
+        resolve_launch_context_for_cycle=_resolve_launch_context_for_cycle,
+        claim_launch_context=_claim_launch_context,
+        execute_claimed_session=_execute_claimed_session,
+        finalize_claimed_session=_finalize_claimed_session,
     )

@@ -42,11 +42,6 @@ def execute_prepare_cycle_phases(
     runtime: Any,
     deps: PrepareCyclePhasesDeps,
     dry_run: bool = False,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> PrepareCyclePhasesResult:
     """Run the preflight phases for one consumer cycle."""
     timings_ms: dict[str, int] = {}
@@ -56,18 +51,12 @@ def execute_prepare_cycle_phases(
         db,
         runtime,
         timings_ms=timings_ms,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
     board_snapshot = deps.load_board_snapshot_phase(
         config,
         runtime,
         timings_ms=timings_ms,
-        gh_runner=gh_runner,
     )
     deps.run_executor_routing_phase(
         config,
@@ -75,7 +64,6 @@ def execute_prepare_cycle_phases(
         runtime,
         board_snapshot=board_snapshot,
         timings_ms=timings_ms,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
     deps.run_reconciliation_phase(
@@ -84,9 +72,6 @@ def execute_prepare_cycle_phases(
         runtime,
         board_snapshot=board_snapshot,
         timings_ms=timings_ms,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
     review_queue_summary, board_snapshot = deps.run_review_queue_phase(
         config,
@@ -94,7 +79,6 @@ def execute_prepare_cycle_phases(
         runtime,
         board_snapshot=board_snapshot,
         timings_ms=timings_ms,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
     admission_summary = deps.run_admission_phase(
@@ -103,7 +87,6 @@ def execute_prepare_cycle_phases(
         runtime,
         board_snapshot=board_snapshot,
         timings_ms=timings_ms,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
 
@@ -149,9 +132,6 @@ def reconcile_board_truth(
     board_port: Any | None = None,
     dry_run: bool = False,
     board_snapshot: CycleBoardSnapshot | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> ReconciliationResult:
     """Make board `In Progress` truthful against local consumer state."""
     if automation_config is None:
@@ -176,7 +156,7 @@ def reconcile_board_truth(
             consumer_config.project_owner,
             consumer_config.project_number,
             config=critical_path_config,
-            gh_runner=gh_runner,
+            gh_runner=None,
         ).pull_requests
     effective_review_state_port = review_state_port or effective_pr_port
     effective_board_port = board_port or effective_pr_port
@@ -190,9 +170,6 @@ def reconcile_board_truth(
             board_port=effective_board_port,
             board_snapshot=board_snapshot,
             issue_ref_for_snapshot=deps.issue_ref_for_snapshot,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
             dry_run=dry_run,
         )
     )
@@ -207,9 +184,6 @@ def reconcile_board_truth(
         board_snapshot=board_snapshot,
         issue_ref_for_snapshot=deps.issue_ref_for_snapshot,
         active_issue_refs=active_issue_refs,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )
     moved_ready.extend(ready_refs)

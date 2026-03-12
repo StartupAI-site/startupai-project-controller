@@ -26,6 +26,8 @@ def transition_issue_to_review(
     project_owner: str,
     project_number: int,
     *,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -37,6 +39,8 @@ def transition_issue_to_review(
         config=config,
         project_owner=project_owner,
         project_number=project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,
@@ -129,9 +133,6 @@ def reconcile_active_repair_review_items(
     board_port: Any,
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
     transition_issue_to_in_progress: Callable[..., None],
 ) -> list[str]:
@@ -162,9 +163,6 @@ def reconcile_active_repair_review_items(
                 consumer_config.project_number,
                 review_state_port=review_state_port,
                 board_port=board_port,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
             )
         moved_in_progress.append(issue_ref)
     return moved_in_progress
@@ -180,9 +178,6 @@ def reconcile_single_in_progress_item(
     pr_port: Any,
     review_state_port: Any,
     board_port: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
     resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
     classify_open_pr_candidates: Callable[..., tuple[str, Any | None, str]],
@@ -203,7 +198,6 @@ def reconcile_single_in_progress_item(
         automation_config,
         expected_branch=expected_branch,
         pr_port=pr_port,
-        gh_runner=gh_runner,
     )
     target = reconcile_in_progress_decision(
         classification,
@@ -225,9 +219,6 @@ def reconcile_single_in_progress_item(
                 from_statuses={"In Progress"},
                 review_state_port=review_state_port,
                 board_port=board_port,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
             )
         return "ready"
 
@@ -246,9 +237,6 @@ def reconcile_single_in_progress_item(
                 consumer_config.project_number,
                 review_state_port=review_state_port,
                 board_port=board_port,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                gh_runner=gh_runner,
             )
         return "review"
 
@@ -261,7 +249,6 @@ def reconcile_single_in_progress_item(
             consumer_config.project_number,
             review_state_port=review_state_port,
             board_port=board_port,
-            gh_runner=gh_runner,
         )
     return "blocked"
 
@@ -278,9 +265,6 @@ def reconcile_stale_in_progress_items(
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
     active_issue_refs: set[str],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
     reconcile_single_in_progress_item: Callable[..., str],
 ) -> tuple[list[str], list[str], list[str]]:
@@ -314,9 +298,6 @@ def reconcile_stale_in_progress_items(
             pr_port=pr_port,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
             dry_run=dry_run,
         )
         if target == "ready":
@@ -341,12 +322,13 @@ def transition_issue_to_review_from_shell(
     gh_runner: Callable[..., str] | None = None,
 ) -> None:
     """Move a successfully submitted issue from In Progress to Review."""
-    del review_state_port, board_port
     return transition_issue_to_review(
         issue_ref,
         config,
         project_owner,
         project_number,
+        review_state_port=review_state_port,
+        board_port=board_port,
         board_info_resolver=board_info_resolver,
         board_mutator=board_mutator,
         gh_runner=gh_runner,

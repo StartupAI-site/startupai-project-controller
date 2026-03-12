@@ -70,9 +70,6 @@ def reconcile_active_repair_review_items(
     board_port: Any,
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
 ) -> list[str]:
     """Return active repair items that should move from Review back to In Progress."""
@@ -84,9 +81,6 @@ def reconcile_active_repair_review_items(
         board_port=board_port,
         board_snapshot=board_snapshot,
         issue_ref_for_snapshot=issue_ref_for_snapshot,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
         transition_issue_to_in_progress=deps.transition_issue_to_in_progress,
     )
@@ -103,9 +97,6 @@ def reconcile_single_in_progress_item(
     pr_port: Any,
     review_state_port: Any,
     board_port: Any,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
 ) -> str:
     """Reconcile one stale In Progress item and return its target lane."""
@@ -118,9 +109,6 @@ def reconcile_single_in_progress_item(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
         resolve_issue_coordinates=deps.resolve_issue_coordinates,
         classify_open_pr_candidates=deps.classify_open_pr_candidates,
@@ -144,17 +132,22 @@ def reconcile_stale_in_progress_items(
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
     active_issue_refs: set[str],
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
 ) -> tuple[list[str], list[str], list[str]]:
     """Reconcile stale In Progress items back to their truthful lanes."""
 
-    def _reconcile_single(issue_ref, *, consumer_config, critical_path_config,
-                           automation_config, store, pr_port, review_state_port,
-                           board_port, board_info_resolver, board_mutator,
-                           gh_runner, dry_run):
+    def _reconcile_single(
+        issue_ref,
+        *,
+        consumer_config,
+        critical_path_config,
+        automation_config,
+        store,
+        pr_port,
+        review_state_port,
+        board_port,
+        dry_run,
+    ):
         return reconcile_single_in_progress_item(
             issue_ref,
             deps=deps,
@@ -165,9 +158,6 @@ def reconcile_stale_in_progress_items(
             pr_port=pr_port,
             review_state_port=review_state_port,
             board_port=board_port,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
             dry_run=dry_run,
         )
 
@@ -182,9 +172,6 @@ def reconcile_stale_in_progress_items(
         board_snapshot=board_snapshot,
         issue_ref_for_snapshot=issue_ref_for_snapshot,
         active_issue_refs=active_issue_refs,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
         reconcile_single_in_progress_item=_reconcile_single,
     )
@@ -208,9 +195,6 @@ def wire_reconcile_board_truth(
     board_port: Any | None = None,
     dry_run: bool = False,
     board_snapshot: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
 ) -> ReconciliationResult:
     """Wire and execute board-truth reconciliation."""
 
@@ -230,9 +214,6 @@ def wire_reconcile_board_truth(
         board_port,
         board_snapshot,
         issue_ref_for_snapshot,
-        board_info_resolver,
-        board_mutator,
-        gh_runner,
         dry_run,
     ):
         return reconcile_active_repair_review_items(
@@ -244,9 +225,6 @@ def wire_reconcile_board_truth(
             board_port=board_port,
             board_snapshot=board_snapshot,
             issue_ref_for_snapshot=issue_ref_for_snapshot,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
             dry_run=dry_run,
         )
 
@@ -262,9 +240,6 @@ def wire_reconcile_board_truth(
         board_snapshot,
         issue_ref_for_snapshot,
         active_issue_refs,
-        board_info_resolver,
-        board_mutator,
-        gh_runner,
         dry_run,
     ):
         return reconcile_stale_in_progress_items(
@@ -279,9 +254,6 @@ def wire_reconcile_board_truth(
             board_snapshot=board_snapshot,
             issue_ref_for_snapshot=issue_ref_for_snapshot,
             active_issue_refs=active_issue_refs,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
             dry_run=dry_run,
         )
 
@@ -302,8 +274,5 @@ def wire_reconcile_board_truth(
         review_state_port=review_state_port,
         board_port=board_port,
         board_snapshot=board_snapshot,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         dry_run=dry_run,
     )

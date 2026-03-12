@@ -163,10 +163,6 @@ def prepare_multi_worker_cycle(
             config,
             db,
             dry_run=dry_run,
-            board_info_resolver=di_kwargs.get("board_info_resolver"),
-            board_mutator=di_kwargs.get("board_mutator"),
-            comment_checker=di_kwargs.get("comment_checker"),
-            comment_poster=di_kwargs.get("comment_poster"),
             gh_runner=di_kwargs.get("gh_runner"),
         )
     except deps.config_error_type:

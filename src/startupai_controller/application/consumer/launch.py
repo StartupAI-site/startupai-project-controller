@@ -48,13 +48,6 @@ def resolve_launch_context_for_cycle(
     launch_context: Any | None,
     target_issue: str | None,
     dry_run: bool,
-    review_state_port: ReviewStatePort | None,
-    pr_port: PullRequestPort | None,
-    status_resolver: Callable[..., str] | None,
-    subprocess_runner: ProcessRunnerPort | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: GhRunnerPort | None,
     log_dry_run: Callable[[str], None] | None = None,
 ) -> tuple[Any | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
@@ -66,10 +59,6 @@ def resolve_launch_context_for_cycle(
         db=db,
         prepared=prepared,
         target_issue=target_issue,
-        status_resolver=status_resolver or (
-            review_state_port.get_issue_status if review_state_port is not None else None
-        ),
-        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     if cycle_result is not None:
         return None, cycle_result
@@ -89,14 +78,6 @@ def resolve_launch_context_for_cycle(
         config=config,
         db=db,
         prepared=prepared,
-        subprocess_runner=subprocess_runner,
-        status_resolver=status_resolver or (
-            review_state_port.get_issue_status if review_state_port is not None else None
-        ),
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        pr_port=pr_port,
     )
 
 
@@ -109,9 +90,6 @@ def prepare_launch_candidate(
     deps: PrepareLaunchDeps,
     subprocess_runner: ProcessRunnerPort | None = None,
     review_state_port: ReviewStatePort | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
     gh_runner: GhRunnerPort | None = None,
     pr_port: PullRequestPort | None = None,
     issue_context_port: IssueContextPort | None = None,
@@ -154,7 +132,6 @@ def prepare_launch_candidate(
         auto_config=auto_config,
         board_snapshot=prepared.board_snapshot,
         pr_port=effective_pr_port,
-        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     context, title = deps.resolve_launch_issue_context(
         issue_ref,
@@ -165,7 +142,6 @@ def prepare_launch_candidate(
         config=config,
         db=db,
         issue_context_port=effective_issue_context_port,
-        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error = (
         deps.setup_launch_worktree(
@@ -181,9 +157,6 @@ def prepare_launch_candidate(
             subprocess_runner=(
                 subprocess_runner.run if subprocess_runner is not None else None
             ),
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner.run_gh if gh_runner is not None else None,
         )
     )
 
@@ -209,7 +182,7 @@ def prepare_launch_candidate(
         cp_config,
         config.project_owner,
         config.project_number,
-        status_resolver=status_resolver or (
+        status_resolver=(
             review_state_port.get_issue_status if review_state_port is not None else None
         ),
     )
@@ -252,14 +225,6 @@ def claim_launch_context(
     deps: ClaimLaunchDeps,
     launch_context: Any,
     slot_id: int,
-    review_state_port: ReviewStatePort | None,
-    board_port: BoardMutationPort | None,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: GhRunnerPort | None,
 ) -> tuple[Any | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
     pending_claim, cycle_result = deps.open_pending_claim_session(
@@ -278,12 +243,6 @@ def claim_launch_context(
         launch_context=launch_context,
         pending_claim=pending_claim,
         cp_config=prepared.cp_config,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker or (
-            review_state_port.comment_exists if review_state_port is not None else None
-        ),
-        comment_poster=comment_poster,
-        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     if retry_ceiling_result is not None:
         return None, retry_ceiling_result
@@ -295,16 +254,6 @@ def claim_launch_context(
         launch_context=launch_context,
         pending_claim=pending_claim,
         slot_id=slot_id,
-        status_resolver=status_resolver or (
-            review_state_port.get_issue_status if review_state_port is not None else None
-        ),
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker or (
-            review_state_port.comment_exists if review_state_port is not None else None
-        ),
-        comment_poster=comment_poster,
-        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     if cycle_result is not None:
         return None, cycle_result
@@ -316,12 +265,7 @@ def claim_launch_context(
             launch_context=launch_context,
             pending_claim=pending_claim,
             slot_id=slot_id,
-            comment_checker=comment_checker or (
-                review_state_port.comment_exists if review_state_port is not None else None
-            ),
-            comment_poster=comment_poster,
             cp_config=prepared.cp_config,
-            gh_runner=gh_runner.run_gh if gh_runner is not None else None,
         ),
         None,
     )

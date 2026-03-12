@@ -86,6 +86,20 @@ def _source_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _function_parameter_names(path: Path, function_name: str) -> set[str]:
+    tree = ast.parse(_source_text(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            names = {arg.arg for arg in node.args.args}
+            names.update(arg.arg for arg in node.args.kwonlyargs)
+            if node.args.vararg is not None:
+                names.add(node.args.vararg.arg)
+            if node.args.kwarg is not None:
+                names.add(node.args.kwarg.arg)
+            return names
+    raise AssertionError(f"Function {function_name} not found in {path}")
+
+
 def test_orchestrators_use_canonical_runtime_boundaries() -> None:
     for path in ORCHESTRATOR_MODULES:
         imported = _runtime_imported_modules(path)
@@ -245,6 +259,86 @@ def test_consumer_stack_has_no_compat_or_shell_service_locator_patterns() -> Non
     assert offending_service_locator_usage == [], (
         "consumer modules still use shell service-locator patterns: "
         f"{offending_service_locator_usage}"
+    )
+
+
+def test_consumer_prepared_cycle_use_case_has_no_legacy_board_or_comment_callables() -> None:
+    params = _function_parameter_names(
+        APPLICATION_ROOT / "consumer" / "cycle.py",
+        "run_prepared_cycle",
+    )
+    forbidden = {
+        "status_resolver",
+        "board_info_resolver",
+        "board_mutator",
+        "comment_checker",
+        "comment_poster",
+    }
+    offending = sorted(params & forbidden)
+    assert offending == [], (
+        "run_prepared_cycle() regained legacy board/comment callable seams: "
+        f"{offending}"
+    )
+
+
+def test_consumer_reconciliation_use_case_has_no_legacy_board_or_gh_callables() -> None:
+    params = _function_parameter_names(
+        APPLICATION_ROOT / "consumer" / "preflight.py",
+        "reconcile_board_truth",
+    )
+    forbidden = {
+        "board_info_resolver",
+        "board_mutator",
+        "gh_runner",
+    }
+    offending = sorted(params & forbidden)
+    assert offending == [], (
+        "reconcile_board_truth() regained legacy board/gh callable seams: "
+        f"{offending}"
+    )
+
+
+def test_consumer_launch_use_case_has_no_legacy_board_or_status_callables() -> None:
+    params = _function_parameter_names(
+        APPLICATION_ROOT / "consumer" / "launch.py",
+        "prepare_launch_candidate",
+    )
+    forbidden = {
+        "status_resolver",
+        "board_info_resolver",
+        "board_mutator",
+    }
+    offending = sorted(params & forbidden)
+    assert offending == [], (
+        "prepare_launch_candidate() regained legacy board/status callable seams: "
+        f"{offending}"
+    )
+
+
+def test_consumer_recovery_use_case_has_no_legacy_board_or_gh_callables() -> None:
+    params = _function_parameter_names(
+        APPLICATION_ROOT / "consumer" / "recovery.py",
+        "recover_interrupted_sessions",
+    )
+    forbidden = {
+        "board_info_resolver",
+        "board_mutator",
+        "gh_runner",
+    }
+    offending = sorted(params & forbidden)
+    assert offending == [], (
+        "recover_interrupted_sessions() regained legacy board/gh callable seams: "
+        f"{offending}"
+    )
+
+
+def test_rebalance_application_module_no_longer_contains_outer_wiring_entry_points() -> None:
+    source = _source_text(APPLICATION_ROOT / "automation" / "rebalance.py")
+    assert "def load_rebalance_in_progress_items(" not in source, (
+        "application/automation/rebalance.py regained outer port-materialization helpers"
+    )
+    assert "def wire_rebalance_wip(" not in source, (
+        "application/automation/rebalance.py regained outer rebalance wiring"
     )
 
 

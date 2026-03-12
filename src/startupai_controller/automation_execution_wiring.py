@@ -44,10 +44,14 @@ from startupai_controller.application.automation.execution_policy import (
     wire_enforce_execution_policy as _wiring_enforce_execution_policy,
 )
 from startupai_controller.application.automation.rebalance import (
-    wire_rebalance_wip as _wiring_rebalance_wip,
+    rebalance_wip as _app_rebalance_wip,
 )
 from startupai_controller.application.automation.codex_fail_routing import (
     apply_codex_fail_routing as _app_apply_codex_fail_routing,
+)
+from startupai_controller.application.automation.ready_wiring import (
+    _wrap_board_port,
+    _wrap_review_state_port,
 )
 from startupai_controller.automation_board_state_helpers import (
     transition_issue_status as _helpers_transition_issue_status,
@@ -269,28 +273,62 @@ def rebalance_wip(
 ) -> RebalanceDecision:
     """Rebalance In Progress lanes with stale demotion and dependency blocking."""
     core = _core()
-    return _wiring_rebalance_wip(
-        config,
-        automation_config,
-        project_owner,
-        project_number,
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if board_port is None:
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if pr_port is None:
+        pr_port = core._default_pr_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+
+    in_progress = review_state_port.list_issues_by_status("In Progress")
+    review_state_port = _wrap_review_state_port(
+        review_state_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        status_resolver=status_resolver,
+        comment_exists_fn=core._comment_exists,
+        gh_runner=gh_runner,
+    )
+    board_port = _wrap_board_port(
+        board_port,
+        config=config,
+        project_owner=project_owner,
+        project_number=project_number,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+    return _app_rebalance_wip(
+        config=config,
+        automation_config=automation_config,
+        project_owner=project_owner,
+        project_number=project_number,
+        in_progress_items=in_progress,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        pr_port=pr_port,
+        is_graph_member=core.in_any_critical_path,
+        ready_promotion_evaluator=core.evaluate_ready_promotion,
         this_repo_prefix=this_repo_prefix,
         all_prefixes=all_prefixes,
         cycle_minutes=cycle_minutes,
         dry_run=dry_run,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        pr_port=pr_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        status_resolver=status_resolver,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        default_pr_port_fn=core._default_pr_port,
-        is_graph_member_fn=core.in_any_critical_path,
-        ready_promotion_evaluator_fn=core.evaluate_ready_promotion,
-        comment_exists_fn=core._comment_exists,
     )
 
 
