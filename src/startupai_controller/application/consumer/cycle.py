@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from startupai_controller.domain.models import CycleResult
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.review_state import ReviewStatePort
@@ -17,8 +18,11 @@ from startupai_controller.ports.review_state import ReviewStatePort
 class PreparedCycleDeps:
     """Injected seams for the prepared-cycle orchestration."""
 
-    claim_suppression_state: Callable[[Any], dict[str, Any] | None]
-    next_available_slot: Callable[[Any, int], int | None]
+    claim_suppression_state: Callable[
+        [ConsumerRuntimeStatePort],
+        dict[str, Any] | None,
+    ]
+    next_available_slot: Callable[[ConsumerRuntimeStatePort, int], int | None]
     resolve_launch_context_for_cycle: Callable[
         ..., tuple[Any | None, CycleResult | None]
     ]
@@ -29,7 +33,7 @@ class PreparedCycleDeps:
 
 def run_prepared_cycle(
     config: Any,
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     *,
     prepared: Any,
     deps: PreparedCycleDeps,
