@@ -31,6 +31,7 @@ from startupai_controller.control_plane_runtime import (
     _mark_degraded,
     _record_control_timestamp,
 )
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.domain.repair_policy import parse_pr_url as _parse_pr_url
 from startupai_controller.domain.models import CycleBoardSnapshot, ResolutionEvaluation
 from startupai_controller.domain.resolution_policy import (
@@ -155,7 +156,7 @@ def default_admission_summary(
 
 
 def claim_suppression_state(
-    db: Any,
+    db: ConsumerRuntimeStatePort,
     *,
     now: datetime | None = None,
 ) -> dict[str, str] | None:
@@ -250,7 +251,7 @@ def load_admission_summary(
     return payload
 
 
-def next_available_slot(db: Any, limit: int) -> int | None:
+def next_available_slot(db: ConsumerRuntimeStatePort, limit: int) -> int | None:
     """Return the next available execution slot id, or None if saturated."""
     occupied = db.active_slot_ids()
     for slot_id in range(1, limit + 1):

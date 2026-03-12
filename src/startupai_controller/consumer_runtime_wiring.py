@@ -203,8 +203,11 @@ def _daemon_runtime_wiring_deps(
 
     def _run_worker_cycle(*args: Any, **kwargs: Any) -> Any:
         run_worker_cycle_fn = _support_wiring.run_worker_cycle
+        parameters: tuple[inspect.Parameter, ...]
         try:
-            parameters = inspect.signature(run_worker_cycle_fn).parameters.values()
+            parameters = tuple(
+                inspect.signature(run_worker_cycle_fn).parameters.values()
+            )
         except (TypeError, ValueError):
             parameters = ()
         supports_runtime = any(
@@ -525,8 +528,12 @@ def run_one_cycle_live(
     board_mutator: Callable[..., None] | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
+    runtime: DaemonRuntime | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> Any:
     """Execute one poll-claim-execute cycle through direct runtime deps."""
+    effective_di_kwargs = di_kwargs or {}
+    runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
     return run_one_cycle(
         config=config,
         db=db,
@@ -536,14 +543,18 @@ def run_one_cycle_live(
         launch_context=launch_context,
         slot_id_override=slot_id_override,
         skip_control_plane=skip_control_plane,
-        gh_runner=gh_runner,
-        subprocess_runner=subprocess_runner,
-        file_reader=file_reader,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
+        gh_runner=gh_runner
+        or (runtime.gh_runner.run_gh if runtime and runtime.gh_runner else None),
+        subprocess_runner=subprocess_runner
+        or (runtime.process_runner.run if runtime and runtime.process_runner else None),
+        file_reader=file_reader
+        or (runtime.file_reader if runtime is not None else None),
+        status_resolver=status_resolver or effective_di_kwargs.get("status_resolver"),
+        board_info_resolver=board_info_resolver
+        or effective_di_kwargs.get("board_info_resolver"),
+        board_mutator=board_mutator or effective_di_kwargs.get("board_mutator"),
+        comment_checker=comment_checker or effective_di_kwargs.get("comment_checker"),
+        comment_poster=comment_poster or effective_di_kwargs.get("comment_poster"),
         prepare_cycle=_preflight_wiring.prepare_cycle,
         config_error_type=ConfigError,
         workflow_config_error_type=WorkflowConfigError,

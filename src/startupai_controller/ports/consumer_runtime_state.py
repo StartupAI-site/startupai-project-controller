@@ -10,6 +10,10 @@ from startupai_controller.domain.models import SessionInfo
 class ConsumerRuntimeStatePort(Protocol):
     """Persistence operations consumed by preflight and daemon runtime flows."""
 
+    def set_control_value(self, key: str, value: str | None) -> None:
+        """Persist one control-plane value."""
+        ...
+
     def active_slot_ids(self) -> list[int]:
         """Return currently occupied slot ids."""
         ...
