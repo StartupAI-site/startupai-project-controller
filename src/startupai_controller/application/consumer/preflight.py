@@ -3,30 +3,174 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.application.consumer.preflight_runtime import (
+    CycleRuntimeContext,
+)
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
+    IssueSnapshot,
     ReviewQueueDrainSummary,
 )
 from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+
+class RunDeferredReplayPhaseFn(Protocol):
+    """Replay deferred actions before loading the next board snapshot."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        runtime: CycleRuntimeContext,
+        *,
+        timings_ms: dict[str, int],
+        dry_run: bool,
+    ) -> None:
+        """Run the deferred replay phase."""
+        ...
+
+
+class LoadBoardSnapshotPhaseFn(Protocol):
+    """Load the thin cycle board snapshot."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        runtime: CycleRuntimeContext,
+        *,
+        timings_ms: dict[str, int],
+    ) -> CycleBoardSnapshot:
+        """Return the current board snapshot."""
+        ...
+
+
+class RunExecutorRoutingPhaseFn(Protocol):
+    """Normalize executor routing before launch selection."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        runtime: CycleRuntimeContext,
+        *,
+        board_snapshot: CycleBoardSnapshot,
+        timings_ms: dict[str, int],
+        dry_run: bool,
+    ) -> None:
+        """Run the executor routing phase."""
+        ...
+
+
+class RunReconciliationPhaseFn(Protocol):
+    """Reconcile board truth against local runtime state."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        runtime: CycleRuntimeContext,
+        *,
+        board_snapshot: CycleBoardSnapshot,
+        timings_ms: dict[str, int],
+    ) -> None:
+        """Run the reconciliation phase."""
+        ...
+
+
+class RunReviewQueuePhaseFn(Protocol):
+    """Drain the review queue for the current cycle."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        runtime: CycleRuntimeContext,
+        *,
+        board_snapshot: CycleBoardSnapshot,
+        timings_ms: dict[str, int],
+        dry_run: bool,
+    ) -> tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]:
+        """Run the review queue phase."""
+        ...
+
+
+class RunAdmissionPhaseFn(Protocol):
+    """Admit backlog items after other preflight phases complete."""
+
+    def __call__(
+        self,
+        config: ConsumerConfig,
+        db: ConsumerRuntimeStatePort,
+        runtime: CycleRuntimeContext,
+        *,
+        board_snapshot: CycleBoardSnapshot,
+        timings_ms: dict[str, int],
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        """Run the backlog admission phase."""
+        ...
+
+
+class ReconcileActiveRepairReviewItemsFn(Protocol):
+    """Return active repair items that should move back to In Progress."""
+
+    def __call__(
+        self,
+        consumer_config: ConsumerConfig,
+        critical_path_config: CriticalPathConfig,
+        *,
+        active_repair_issue_refs: set[str],
+        review_state_port: ReviewStatePort,
+        board_port: BoardMutationPort,
+        board_snapshot: CycleBoardSnapshot | None,
+        issue_ref_for_snapshot: Callable[[IssueSnapshot], str | None],
+        dry_run: bool,
+    ) -> list[str]:
+        """Return issue refs moved back to In Progress."""
+        ...
+
+
+class ReconcileStaleInProgressItemsFn(Protocol):
+    """Return stale In Progress issues split by truthful destination lane."""
+
+    def __call__(
+        self,
+        consumer_config: ConsumerConfig,
+        critical_path_config: CriticalPathConfig,
+        automation_config: BoardAutomationConfig,
+        *,
+        store: SessionStorePort,
+        pr_port: PullRequestPort,
+        review_state_port: ReviewStatePort,
+        board_port: BoardMutationPort,
+        board_snapshot: CycleBoardSnapshot | None,
+        issue_ref_for_snapshot: Callable[[IssueSnapshot], str | None],
+        active_issue_refs: set[str],
+        dry_run: bool,
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Return (ready, review, blocked) issue refs."""
+        ...
 
 
 @dataclass(frozen=True)
 class PrepareCyclePhasesDeps:
     """Injected seams for the consumer preflight phase sequence."""
 
-    run_deferred_replay_phase: Callable[..., None]
-    load_board_snapshot_phase: Callable[..., CycleBoardSnapshot]
-    run_executor_routing_phase: Callable[..., None]
-    run_reconciliation_phase: Callable[..., None]
-    run_review_queue_phase: Callable[
-        ..., tuple[ReviewQueueDrainSummary, CycleBoardSnapshot]
-    ]
-    run_admission_phase: Callable[..., dict[str, Any]]
+    run_deferred_replay_phase: RunDeferredReplayPhaseFn
+    load_board_snapshot_phase: LoadBoardSnapshotPhaseFn
+    run_executor_routing_phase: RunExecutorRoutingPhaseFn
+    run_reconciliation_phase: RunReconciliationPhaseFn
+    run_review_queue_phase: RunReviewQueuePhaseFn
+    run_admission_phase: RunAdmissionPhaseFn
 
 
 @dataclass(frozen=True)
@@ -40,10 +184,10 @@ class PrepareCyclePhasesResult:
 
 
 def execute_prepare_cycle_phases(
-    config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
     *,
-    runtime: Any,
+    runtime: CycleRuntimeContext,
     deps: PrepareCyclePhasesDeps,
     dry_run: bool = False,
 ) -> PrepareCyclePhasesResult:
@@ -116,18 +260,16 @@ class ReconciliationResult:
 class ReconciliationDeps:
     """Injected seams for board-truth reconciliation."""
 
-    issue_ref_for_snapshot: Callable[[Any], str | None]
-    reconcile_active_repair_review_items: Callable[..., list[str]]
-    reconcile_stale_in_progress_items: Callable[
-        ..., tuple[list[str], list[str], list[str]]
-    ]
+    issue_ref_for_snapshot: Callable[[IssueSnapshot], str | None]
+    reconcile_active_repair_review_items: ReconcileActiveRepairReviewItemsFn
+    reconcile_stale_in_progress_items: ReconcileStaleInProgressItemsFn
 
 
 def reconcile_board_truth(
-    consumer_config: Any,
-    critical_path_config: Any,
-    automation_config: Any,
-    db: Any,
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    automation_config: BoardAutomationConfig | None,
+    db: ConsumerRuntimeStatePort,
     *,
     deps: ReconciliationDeps,
     session_store: SessionStorePort,

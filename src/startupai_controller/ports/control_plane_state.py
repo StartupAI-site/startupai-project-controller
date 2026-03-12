@@ -1,16 +1,20 @@
-"""ControlPlaneStatePort — local state needed by the control-plane tick."""
+"""Control-plane state ports used by the consumer and control-plane shells."""
 
 from __future__ import annotations
 
 from typing import Protocol
 
 
-class ControlPlaneStatePort(Protocol):
-    """Persistence operations consumed by control-plane orchestration."""
+class ControlValueStorePort(Protocol):
+    """Persistence capability for writing control-plane state values."""
 
     def set_control_value(self, key: str, value: str | None) -> None:
         """Persist one control-plane state value."""
         ...
+
+
+class ControlPlaneStatePort(ControlValueStorePort, Protocol):
+    """Persistence operations consumed by control-plane orchestration."""
 
     def active_lease_issue_refs(self) -> list[str]:
         """Return issue refs currently holding active leases."""
