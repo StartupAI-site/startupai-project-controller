@@ -9,6 +9,8 @@ from startupai_controller.domain.repair_policy import (
     MARKER_PREFIX,
     marker_for as _marker_for,
 )
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     direct_successors,
@@ -25,14 +27,10 @@ def auto_promote_successors(
     project_number: int,
     automation_config,
     dry_run: bool = False,
-    status_resolver=None,
-    board_info_resolver=None,
-    board_mutator=None,
-    gh_runner=None,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
     promote_to_ready: Callable[..., tuple[int, str]],
     controller_owned_resolver: Callable[[str], bool],
-    comment_exists: Callable[..., bool],
-    post_cross_repo_comment: Callable[..., None],
     resolve_issue_parts: Callable[[str, CriticalPathConfig], tuple[str, str, int]],
     new_handoff_job_id: Callable[[str, str], str],
 ) -> PromotionResult:
@@ -53,10 +51,9 @@ def auto_promote_successors(
                 project_owner=project_owner,
                 project_number=project_number,
                 dry_run=dry_run,
-                status_resolver=status_resolver,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
                 controller_owned_resolver=controller_owned_resolver,
+                review_state_port=review_state_port,
+                board_port=board_port,
             )
             if code == 0:
                 result.promoted.append(successor_ref)
@@ -71,7 +68,7 @@ def auto_promote_successors(
             config,
         )
 
-        if comment_exists(succ_owner, succ_repo, succ_number, marker):
+        if review_state_port.comment_exists(f"{succ_owner}/{succ_repo}", succ_number, marker):
             result.skipped.append((successor_ref, "Bridge comment already exists"))
             continue
 
@@ -85,12 +82,10 @@ def auto_promote_successors(
                 "Run from the appropriate repo:\n"
                 f"```\nmake promote-ready ISSUE={successor_ref}\n```"
             )
-            post_cross_repo_comment(
-                succ_owner,
-                succ_repo,
+            board_port.post_issue_comment(
+                f"{succ_owner}/{succ_repo}",
                 succ_number,
                 body,
-                gh_runner=gh_runner,
             )
 
         result.cross_repo_pending.append(successor_ref)

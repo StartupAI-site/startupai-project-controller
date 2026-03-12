@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import inspect
 import logging
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,7 @@ from startupai_controller.application.consumer.cycle import (
     run_prepared_cycle as _run_prepared_cycle_use_case,
 )
 from startupai_controller.application.consumer.daemon import (
+    DaemonRuntime,
     DispatchMultiWorkerLaunchesDeps,
     PrepareMultiWorkerCycleDeps,
     PrepareMultiWorkerLaunchContextDeps,
@@ -65,6 +67,7 @@ from startupai_controller.domain.review_queue_policy import (
 )
 from startupai_controller.runtime.wiring import (
     build_gh_runner_port,
+    build_github_port_bundle,
     build_process_runner_port,
     gh_reason_code,
     open_consumer_db,
@@ -87,6 +90,39 @@ def _drain_requested(path: Path) -> bool:
 def _log_completed_worker_results(active_tasks: dict[Any, Any]) -> None:
     """Log and discard completed worker futures."""
     _log_completed_worker_results_use_case(active_tasks, logger=logger)
+
+
+def _build_daemon_runtime(
+    *,
+    gh_runner: Callable[..., str] | None,
+    subprocess_runner: Callable[..., Any] | None,
+    file_reader: Callable[..., Any] | None,
+) -> DaemonRuntime:
+    """Build the typed runtime bundle used by the daemon application module."""
+    return DaemonRuntime(
+        gh_runner=build_gh_runner_port(gh_runner=gh_runner),
+        process_runner=build_process_runner_port(
+            gh_runner=gh_runner,
+            subprocess_runner=subprocess_runner,
+        ),
+        file_reader=file_reader,
+    )
+
+
+def _effective_daemon_runtime(
+    *,
+    runtime: DaemonRuntime | None,
+    di_kwargs: dict[str, Any] | None,
+) -> DaemonRuntime:
+    """Return the explicit runtime or build it from legacy di kwargs."""
+    if runtime is not None:
+        return runtime
+    effective_di_kwargs = di_kwargs or {}
+    return _build_daemon_runtime(
+        gh_runner=effective_di_kwargs.get("gh_runner"),
+        subprocess_runner=effective_di_kwargs.get("subprocess_runner"),
+        file_reader=effective_di_kwargs.get("file_reader"),
+    )
 
 
 @dataclass(frozen=True)
@@ -138,8 +174,6 @@ class StatusRuntimeWiringDeps:
     current_main_workflows: Callable[..., tuple[dict[str, Any], dict[str, Any], int]]
     read_workflow_snapshot: Callable[[Any], Any | None]
     open_consumer_db: Callable[[Any], Any]
-    load_config: Callable[[Any], Any]
-    list_project_items_by_status: Callable[..., list[Any]]
     parse_issue_ref: Callable[[str], Any]
     load_admission_summary: Callable[[dict[str, str], Any | None], dict[str, Any]]
     control_plane_health_summary: Callable[..., Any]
@@ -157,8 +191,149 @@ class StatusRuntimeWiringDeps:
     control_key_last_successful_github_mutation_at: str
 
 
-def _daemon_runtime_wiring_deps() -> DaemonRuntimeWiringDeps:
+def _daemon_runtime_wiring_deps(
+    *,
+    status_resolver: Callable[..., str] | None = None,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    comment_checker: Callable[..., bool] | None = None,
+    comment_poster: Callable[..., None] | None = None,
+) -> DaemonRuntimeWiringDeps:
     """Build daemon-loop wiring deps without reaching back into compat."""
+    def _run_worker_cycle(*args: Any, **kwargs: Any) -> Any:
+        run_worker_cycle_fn = _support_wiring.run_worker_cycle
+        try:
+            parameters = inspect.signature(run_worker_cycle_fn).parameters.values()
+        except (TypeError, ValueError):
+            parameters = ()
+        supports_runtime = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "runtime"
+            for parameter in parameters
+        )
+        if not supports_runtime and "runtime" in kwargs:
+            kwargs = dict(kwargs)
+            kwargs.pop("runtime", None)
+        return run_worker_cycle_fn(*args, **kwargs)
+
+    def _prepare_launch_candidate(
+        issue_ref: str,
+        *,
+        config: Any,
+        prepared: Any,
+        db: Any,
+        runtime: DaemonRuntime | None = None,
+    ) -> Any:
+        gh_runner_fn = (
+            runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None
+        )
+        github_bundle = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=prepared.cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner_fn,
+        )
+        return _cycle_wiring.prepare_launch_candidate(
+            issue_ref,
+            config=config,
+            prepared=prepared,
+            db=db,
+            subprocess_runner=runtime.process_runner if runtime is not None else None,
+            review_state_port=github_bundle.review_state,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=runtime.gh_runner if runtime is not None else None,
+            pr_port=github_bundle.pull_requests,
+        )
+
+    def _select_candidate_for_cycle(
+        config: Any,
+        db: Any,
+        prepared: Any,
+        *,
+        target_issue: str | None = None,
+        runtime: DaemonRuntime | None = None,
+        excluded_issue_refs: set[str] | None = None,
+    ) -> str | None:
+        gh_runner_fn = (
+            runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None
+        )
+        review_state_port = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=prepared.cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner_fn,
+        ).review_state
+        return _selection_retry_wiring.select_candidate_for_cycle_from_shell(
+            config,
+            db,
+            prepared,
+            target_issue=target_issue,
+            review_state_port=review_state_port,
+            gh_runner=gh_runner_fn,
+            excluded_issue_refs=excluded_issue_refs,
+        )
+
+    def _block_prelaunch_issue(
+        issue_ref: str,
+        blocked_reason: str,
+        *,
+        config: Any,
+        cp_config: Any,
+        db: Any,
+        runtime: DaemonRuntime | None = None,
+    ) -> None:
+        _operational_wiring.block_prelaunch_issue(
+            issue_ref,
+            blocked_reason,
+            config=config,
+            cp_config=cp_config,
+            db=db,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None,
+        )
+
+    def _recover_interrupted_sessions(
+        config: Any,
+        db: Any,
+        *,
+        automation_config: Any | None = None,
+        runtime: DaemonRuntime | None = None,
+    ) -> list[Any]:
+        return _operational_wiring.recover_interrupted_sessions(
+            config,
+            db,
+            automation_config=automation_config,
+            gh_runner=runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+        )
+
+    def _run_one_cycle(
+        config: Any,
+        db: Any,
+        *,
+        dry_run: bool = False,
+        runtime: DaemonRuntime | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        return run_one_cycle_live(
+            config,
+            db,
+            dry_run=dry_run,
+            gh_runner=runtime.gh_runner.run_gh if runtime and runtime.gh_runner is not None else None,
+            subprocess_runner=runtime.process_runner.run if runtime and runtime.process_runner is not None else None,
+            file_reader=runtime.file_reader if runtime is not None else None,
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+            **kwargs,
+        )
+
     return DaemonRuntimeWiringDeps(
         config_error_type=ConfigError,
         workflow_config_error_type=WorkflowConfigError,
@@ -171,13 +346,13 @@ def _daemon_runtime_wiring_deps() -> DaemonRuntimeWiringDeps:
         claim_suppression_state=_support_wiring.claim_suppression_state,
         parse_iso8601_timestamp=_parse_iso8601_timestamp,
         record_metric=_support_wiring.record_metric,
-        prepare_launch_candidate=_cycle_wiring.prepare_launch_candidate,
+        prepare_launch_candidate=_prepare_launch_candidate,
         maybe_activate_claim_suppression=_support_wiring.maybe_activate_claim_suppression,
-        block_prelaunch_issue=_operational_wiring.block_prelaunch_issue,
-        select_candidate_for_cycle=_selection_retry_wiring.select_candidate_for_cycle_from_shell,
+        block_prelaunch_issue=_block_prelaunch_issue,
+        select_candidate_for_cycle=_select_candidate_for_cycle,
         prepare_multi_worker_launch_context=_support_wiring.prepare_multi_worker_launch_context,
         submit_multi_worker_task=_support_wiring.submit_multi_worker_task,
-        run_worker_cycle=_support_wiring.run_worker_cycle,
+        run_worker_cycle=_run_worker_cycle,
         active_worker_task_type=ActiveWorkerTask,
         next_available_slots=_next_available_slots_use_case,
         executor_factory=ThreadPoolExecutor,
@@ -190,9 +365,9 @@ def _daemon_runtime_wiring_deps() -> DaemonRuntimeWiringDeps:
         load_automation_config=load_automation_config,
         apply_automation_runtime=_apply_automation_runtime,
         current_main_workflows=_current_main_workflows,
-        recover_interrupted_sessions=_operational_wiring.recover_interrupted_sessions,
+        recover_interrupted_sessions=_recover_interrupted_sessions,
         run_multi_worker_daemon_loop=run_multi_worker_daemon_loop,
-        run_one_cycle=run_one_cycle_live,
+        run_one_cycle=_run_one_cycle,
     )
 
 
@@ -205,8 +380,6 @@ def _status_runtime_wiring_deps() -> StatusRuntimeWiringDeps:
         current_main_workflows=_current_main_workflows,
         read_workflow_snapshot=read_workflow_snapshot,
         open_consumer_db=open_consumer_db,
-        load_config=load_config,
-        list_project_items_by_status=_list_project_items_by_status,
         parse_issue_ref=parse_issue_ref,
         load_admission_summary=_support_wiring.load_admission_summary,
         control_plane_health_summary=_control_plane_health_summary,
@@ -266,10 +439,6 @@ def run_one_cycle(
                 config,
                 db,
                 dry_run=dry_run,
-                board_info_resolver=board_info_resolver,
-                board_mutator=board_mutator,
-                comment_checker=comment_checker,
-                comment_poster=comment_poster,
                 gh_runner=gh_runner,
             )
     except config_error_type as err:
@@ -284,6 +453,13 @@ def run_one_cycle(
         return cycle_result_factory(action="error", reason=f"control-plane:{err}")
 
     assert prepared is not None
+    github_bundle = build_github_port_bundle(
+        config.project_owner,
+        config.project_number,
+        config=prepared.cp_config,
+        github_memo=prepared.github_memo,
+        gh_runner=gh_runner,
+    )
     gh_port = build_gh_runner_port(gh_runner=gh_runner)
     process_runner = build_process_runner_port(
         gh_runner=gh_runner,
@@ -301,11 +477,9 @@ def run_one_cycle(
         gh_runner=gh_port,
         process_runner=process_runner,
         file_reader=file_reader,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
+        review_state_port=github_bundle.review_state,
+        board_port=github_bundle.board_mutations,
+        pr_port=github_bundle.pull_requests,
     )
 
 
@@ -356,7 +530,13 @@ def run_one_cycle_live(
         build_gh_runner_port=build_gh_runner_port,
         build_process_runner_port=build_process_runner_port,
         run_prepared_cycle=_run_prepared_cycle_use_case,
-        prepared_cycle_deps=_operational_wiring.prepared_cycle_deps(),
+        prepared_cycle_deps=_operational_wiring.prepared_cycle_deps(
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_checker=comment_checker,
+            comment_poster=comment_poster,
+        ),
         logger=logger,
     )
 
@@ -367,16 +547,25 @@ def prepare_multi_worker_cycle(
     *,
     dry_run: bool,
     sleeper: Callable[[float], None],
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> Any | None:
     """Run one bounded preflight pass for the multi-worker daemon."""
-    deps = _daemon_runtime_wiring_deps()
+    effective_di_kwargs = di_kwargs or {}
+    runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
+    deps = _daemon_runtime_wiring_deps(
+        status_resolver=effective_di_kwargs.get("status_resolver"),
+        board_info_resolver=effective_di_kwargs.get("board_info_resolver"),
+        board_mutator=effective_di_kwargs.get("board_mutator"),
+        comment_checker=effective_di_kwargs.get("comment_checker"),
+        comment_poster=effective_di_kwargs.get("comment_poster"),
+    )
     return _prepare_multi_worker_cycle_use_case(
         config,
         db,
         dry_run=dry_run,
         sleeper=sleeper,
-        di_kwargs=di_kwargs,
+        runtime=runtime,
         deps=PrepareMultiWorkerCycleDeps(
             config_error_type=deps.config_error_type,
             workflow_config_error_type=deps.workflow_config_error_type,
@@ -428,17 +617,26 @@ def prepare_multi_worker_launch_context(
     db: Any,
     prepared: Any,
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Any | None, bool]:
     """Prepare launch context for one candidate."""
-    deps = _daemon_runtime_wiring_deps()
+    effective_di_kwargs = di_kwargs or {}
+    runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
+    deps = _daemon_runtime_wiring_deps(
+        status_resolver=effective_di_kwargs.get("status_resolver"),
+        board_info_resolver=effective_di_kwargs.get("board_info_resolver"),
+        board_mutator=effective_di_kwargs.get("board_mutator"),
+        comment_checker=effective_di_kwargs.get("comment_checker"),
+        comment_poster=effective_di_kwargs.get("comment_poster"),
+    )
     return _prepare_multi_worker_launch_context_use_case(
         candidate,
         config=config,
         db=db,
         prepared=prepared,
         dry_run=dry_run,
-        di_kwargs=di_kwargs,
+        runtime=runtime,
         deps=PrepareMultiWorkerLaunchContextDeps(
             gh_query_error_type=deps.gh_query_error_type,
             workflow_config_error_type=deps.workflow_config_error_type,
@@ -463,10 +661,19 @@ def submit_multi_worker_task(
     prepared: Any,
     launch_context: Any | None,
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Submit one prepared candidate to a worker slot."""
-    deps = _daemon_runtime_wiring_deps()
+    effective_di_kwargs = di_kwargs or {}
+    runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
+    deps = _daemon_runtime_wiring_deps(
+        status_resolver=effective_di_kwargs.get("status_resolver"),
+        board_info_resolver=effective_di_kwargs.get("board_info_resolver"),
+        board_mutator=effective_di_kwargs.get("board_mutator"),
+        comment_checker=effective_di_kwargs.get("comment_checker"),
+        comment_poster=effective_di_kwargs.get("comment_poster"),
+    )
     _submit_multi_worker_task_use_case(
         executor,
         active_tasks,
@@ -476,7 +683,7 @@ def submit_multi_worker_task(
         prepared=prepared,
         launch_context=launch_context,
         dry_run=dry_run,
-        di_kwargs=di_kwargs,
+        runtime=runtime,
         run_worker_cycle=deps.run_worker_cycle,
         active_worker_task_type=deps.active_worker_task_type,
     )
@@ -492,10 +699,19 @@ def dispatch_multi_worker_launches(
     active_issue_refs: set[str],
     active_tasks: dict[Any, Any],
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None = None,
+    di_kwargs: dict[str, Any] | None = None,
 ) -> int:
     """Launch as many ready candidates as the current hydration budget allows."""
-    deps = _daemon_runtime_wiring_deps()
+    effective_di_kwargs = di_kwargs or {}
+    runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
+    deps = _daemon_runtime_wiring_deps(
+        status_resolver=effective_di_kwargs.get("status_resolver"),
+        board_info_resolver=effective_di_kwargs.get("board_info_resolver"),
+        board_mutator=effective_di_kwargs.get("board_mutator"),
+        comment_checker=effective_di_kwargs.get("comment_checker"),
+        comment_poster=effective_di_kwargs.get("comment_poster"),
+    )
     return _dispatch_multi_worker_launches_use_case(
         executor,
         config,
@@ -505,7 +721,7 @@ def dispatch_multi_worker_launches(
         active_issue_refs=active_issue_refs,
         active_tasks=active_tasks,
         dry_run=dry_run,
-        di_kwargs=di_kwargs,
+        runtime=runtime,
         deps=DispatchMultiWorkerLaunchesDeps(
             gh_query_error_type=deps.gh_query_error_type,
             select_candidate_for_cycle=deps.select_candidate_for_cycle,
@@ -524,16 +740,25 @@ def run_multi_worker_daemon_loop(
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
+    runtime: DaemonRuntime | None = None,
     di_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Run the daemon loop with multiple concurrent worker slots."""
-    deps = _daemon_runtime_wiring_deps()
+    effective_di_kwargs = di_kwargs or {}
+    runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
+    deps = _daemon_runtime_wiring_deps(
+        status_resolver=effective_di_kwargs.get("status_resolver"),
+        board_info_resolver=effective_di_kwargs.get("board_info_resolver"),
+        board_mutator=effective_di_kwargs.get("board_mutator"),
+        comment_checker=effective_di_kwargs.get("comment_checker"),
+        comment_poster=effective_di_kwargs.get("comment_poster"),
+    )
     _run_multi_worker_daemon_loop_use_case(
         config,
         db,
         dry_run=dry_run,
         sleep_fn=sleep_fn,
-        di_kwargs=di_kwargs,
+        runtime=runtime,
         deps=RunMultiWorkerDaemonLoopDeps(
             executor_factory=deps.executor_factory,
             log_completed_worker_results=deps.log_completed_worker_results,
@@ -553,16 +778,25 @@ def run_daemon_loop(
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
+    runtime: DaemonRuntime | None = None,
     di_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Run continuous poll-claim-execute loop."""
-    deps = _daemon_runtime_wiring_deps()
+    effective_di_kwargs = di_kwargs or {}
+    runtime = _effective_daemon_runtime(runtime=runtime, di_kwargs=effective_di_kwargs)
+    deps = _daemon_runtime_wiring_deps(
+        status_resolver=effective_di_kwargs.get("status_resolver"),
+        board_info_resolver=effective_di_kwargs.get("board_info_resolver"),
+        board_mutator=effective_di_kwargs.get("board_mutator"),
+        comment_checker=effective_di_kwargs.get("comment_checker"),
+        comment_poster=effective_di_kwargs.get("comment_poster"),
+    )
     _run_daemon_loop_use_case(
         config,
         db,
         dry_run=dry_run,
         sleep_fn=sleep_fn,
-        di_kwargs=di_kwargs,
+        runtime=runtime,
         deps=RunDaemonLoopDeps(
             config_error_type=deps.config_error_type,
             load_automation_config=deps.load_automation_config,
@@ -584,34 +818,60 @@ def collect_status_payload(
 ) -> dict[str, Any]:
     """Collect consumer status as a JSON-serializable payload."""
     deps = _status_runtime_wiring_deps()
-    return _collect_status_payload_use_case(
-        config,
-        local_only=local_only,
-        deps=CollectStatusPayloadDeps(
-            config_error_type=deps.config_error_type,
-            load_automation_config=deps.load_automation_config,
-            apply_automation_runtime=deps.apply_automation_runtime,
-            current_main_workflows=deps.current_main_workflows,
-            read_workflow_snapshot=deps.read_workflow_snapshot,
-            open_consumer_db=deps.open_consumer_db,
-            load_config=deps.load_config,
-            list_project_items_by_status=deps.list_project_items_by_status,
-            parse_issue_ref=deps.parse_issue_ref,
-            load_admission_summary=deps.load_admission_summary,
-            control_plane_health_summary=deps.control_plane_health_summary,
-            drain_requested=deps.drain_requested,
-            workflow_status_payload=deps.workflow_status_payload,
-            session_retry_state=deps.session_retry_state,
-            parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
-            control_keys={
-                "degraded": deps.control_key_degraded,
-                "degraded_reason": deps.control_key_degraded_reason,
-                "claim_suppressed_until": deps.control_key_claim_suppressed_until,
-                "claim_suppressed_reason": deps.control_key_claim_suppressed_reason,
-                "claim_suppressed_scope": deps.control_key_claim_suppressed_scope,
-                "last_rate_limit_at": deps.control_key_last_rate_limit_at,
-                "last_successful_board_sync_at": deps.control_key_last_successful_board_sync_at,
-                "last_successful_github_mutation_at": deps.control_key_last_successful_github_mutation_at,
-            },
-        ),
-    )
+    db = deps.open_consumer_db(config.db_path)
+    try:
+        review_state_port = None
+        if not local_only:
+            cp_config = load_config(config.critical_paths_path)
+            github_bundle = build_github_port_bundle(
+                config.project_owner,
+                config.project_number,
+                config=cp_config,
+            )
+            base_review_state_port = github_bundle.review_state
+
+            class _StatusReviewStatePort:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(base_review_state_port, name)
+
+                def list_issues_by_status(self, status: str) -> list[Any]:
+                    return _list_project_items_by_status(
+                        status,
+                        config.project_owner,
+                        config.project_number,
+                        config=cp_config,
+                    )
+
+            review_state_port = _StatusReviewStatePort()
+        return _collect_status_payload_use_case(
+            config,
+            local_only=local_only,
+            db=db,
+            review_state_port=review_state_port,
+            deps=CollectStatusPayloadDeps(
+                config_error_type=deps.config_error_type,
+                load_automation_config=deps.load_automation_config,
+                apply_automation_runtime=deps.apply_automation_runtime,
+                current_main_workflows=deps.current_main_workflows,
+                read_workflow_snapshot=deps.read_workflow_snapshot,
+                parse_issue_ref=deps.parse_issue_ref,
+                load_admission_summary=deps.load_admission_summary,
+                control_plane_health_summary=deps.control_plane_health_summary,
+                drain_requested=deps.drain_requested,
+                workflow_status_payload=deps.workflow_status_payload,
+                session_retry_state=deps.session_retry_state,
+                parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
+                control_keys={
+                    "degraded": deps.control_key_degraded,
+                    "degraded_reason": deps.control_key_degraded_reason,
+                    "claim_suppressed_until": deps.control_key_claim_suppressed_until,
+                    "claim_suppressed_reason": deps.control_key_claim_suppressed_reason,
+                    "claim_suppressed_scope": deps.control_key_claim_suppressed_scope,
+                    "last_rate_limit_at": deps.control_key_last_rate_limit_at,
+                    "last_successful_board_sync_at": deps.control_key_last_successful_board_sync_at,
+                    "last_successful_github_mutation_at": deps.control_key_last_successful_github_mutation_at,
+                },
+            ),
+        )
+    finally:
+        db.close()

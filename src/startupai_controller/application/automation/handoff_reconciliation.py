@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Callable
 
 from startupai_controller.domain.repair_policy import MARKER_PREFIX
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.validate_critical_path_promotion import GhQueryError
 
 
@@ -17,13 +18,8 @@ def reconcile_handoffs(
     ack_timeout_minutes: int = 30,
     max_retries: int = 1,
     dry_run: bool = False,
-    github_bundle=None,
-    review_state_port=None,
-    board_port=None,
-    gh_runner: Callable[..., str] | None = None,
-    # Injected board-automation helpers
-    ensure_github_bundle_fn: Callable[..., object] | None = None,
-    set_blocked_with_reason_fn: Callable[..., None] | None = None,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
 ) -> dict[str, int]:
     """Reconcile handoff jobs. Returns {completed, retried, escalated, pending}."""
     now = datetime.now(timezone.utc)
@@ -34,24 +30,6 @@ def reconcile_handoffs(
         "escalated": 0,
         "pending": 0,
     }
-    if ensure_github_bundle_fn is not None:
-        github_bundle = ensure_github_bundle_fn(
-            github_bundle,
-            project_owner=project_owner,
-            project_number=project_number,
-            config=config,
-            gh_runner=gh_runner,
-        )
-    review_state_port = review_state_port or (
-        github_bundle.review_state if github_bundle is not None else None
-    )
-    board_port = board_port or (
-        github_bundle.board_mutations if github_bundle is not None else None
-    )
-
-    if review_state_port is None:
-        return counters
-
     # Scan all issue prefixes for handoff markers
     for prefix, repo_slug in config.issue_prefixes.items():
         try:
@@ -115,17 +93,13 @@ def reconcile_handoffs(
                     board_port.post_issue_comment(repo_slug, issue_number, body)
                 counters["retried"] += 1
             else:
-                if not dry_run and set_blocked_with_reason_fn is not None:
+                if not dry_run:
                     try:
-                        set_blocked_with_reason_fn(
+                        board_port.set_issue_status(issue_ref, "Blocked")
+                        board_port.set_issue_field(
                             issue_ref,
+                            "Blocked Reason",
                             "handoff-timeout:retries-exhausted",
-                            config,
-                            project_owner,
-                            project_number,
-                            review_state_port=review_state_port,
-                            board_port=board_port,
-                            gh_runner=gh_runner,
                         )
                     except GhQueryError:
                         pass

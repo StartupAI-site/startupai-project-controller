@@ -187,6 +187,7 @@ def enforce_ready_dependency_guard(
     dry_run: bool = False,
     status_resolver: Callable[..., str] | None = None,
     review_state_port: _ReviewStatePort | None = None,
+    board_port: _BoardMutationPort | None = None,
     board_info_resolver: Callable[..., BoardInfo] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -205,9 +206,10 @@ def enforce_ready_dependency_guard(
         board_mutator=board_mutator,
         gh_runner=gh_runner,
         review_state_port=review_state_port,
+        board_port=board_port,
         default_review_state_port_fn=core._default_review_state_port,
+        default_board_mutation_port_fn=core._default_board_mutation_port,
         find_unmet_dependencies_fn=find_unmet_ready_dependencies,
-        set_blocked_with_reason_fn=core._set_blocked_with_reason,
     )
 
 
@@ -225,13 +227,17 @@ def resolve_issues_from_event(
 ) -> list[tuple[str, str, list[str] | None]]:
     """Parse GITHUB_EVENT_PATH -> list of (issue_ref, event_kind, failed_checks)."""
     core = _core()
+    if pr_port is None:
+        pr_port = core._default_pr_port(
+            DEFAULT_PROJECT_OWNER,
+            DEFAULT_PROJECT_NUMBER,
+            config,
+            gh_runner=gh_runner,
+        )
     return _app_resolve_issues_from_event(
         event_path,
         config,
         pr_port=pr_port,
-        gh_runner=gh_runner,
-        query_closing_issues_fn=core.query_closing_issues,
-        query_failed_check_runs_fn=core._query_failed_check_runs,
     )
 
 
@@ -245,13 +251,18 @@ def resolve_pr_to_issues(
 ) -> list[str]:
     """Resolve PR -> linked issue refs using closingIssuesReferences."""
     core = _core()
+    if pr_port is None:
+        pr_port = core._default_pr_port(
+            DEFAULT_PROJECT_OWNER,
+            DEFAULT_PROJECT_NUMBER,
+            config,
+            gh_runner=gh_runner,
+        )
     return _app_resolve_pr_to_issues(
         pr_repo,
         pr_number,
         config,
         pr_port=pr_port,
-        gh_runner=gh_runner,
-        query_closing_issues_fn=core.query_closing_issues,
     )
 
 
@@ -344,15 +355,23 @@ def _review_scope_refs(
 ) -> list[str]:
     """Return linked issue refs currently in Review for a PR."""
     core = _core()
+    pr_port = core._default_pr_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    review_state_port = core._default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
     return _wiring_review_scope_refs(
         pr_repo,
         pr_number,
-        config,
-        project_owner,
-        project_number,
-        gh_runner=gh_runner,
-        query_closing_issues_fn=core.query_closing_issues,
-        query_issue_board_info_fn=core._query_issue_board_info,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
     )
 
 
@@ -366,10 +385,26 @@ def codex_review_gate(
     *,
     dry_run: bool = False,
     apply_fail_routing: bool = True,
+    pr_port: _PullRequestPort | None = None,
+    review_state_port: _ReviewStatePort | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[int, str]:
     """Evaluate strict codex review verdict contract for a PR."""
     core = _core()
+    if pr_port is None:
+        pr_port = core._default_pr_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
     return _wiring_codex_review_gate(
         pr_repo,
         pr_number,
@@ -379,10 +414,8 @@ def codex_review_gate(
         project_number,
         dry_run=dry_run,
         apply_fail_routing=apply_fail_routing,
-        gh_runner=gh_runner,
-        query_closing_issues_fn=core.query_closing_issues,
-        query_issue_board_info_fn=core._query_issue_board_info,
-        query_latest_codex_verdict_fn=core.query_latest_codex_verdict,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
         apply_codex_fail_routing_fn=core._apply_codex_fail_routing,
     )
 
@@ -409,19 +442,25 @@ def _build_review_snapshot(
 ) -> ReviewSnapshot:
     """Project PR review state into one explicit snapshot."""
     core = _core()
+    if pr_port is None:
+        pr_port = core._default_pr_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    review_state_port = core._default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
     return _wiring_build_review_snapshot(
         pr_repo,
         pr_number,
-        config,
         automation_config,
-        project_owner,
-        project_number,
-        dry_run=dry_run,
         pr_port=pr_port,
-        gh_runner=gh_runner,
-        default_pr_port_fn=core._default_pr_port,
-        query_closing_issues_fn=core.query_closing_issues,
-        query_issue_board_info_fn=core._query_issue_board_info,
+        review_state_port=review_state_port,
     )
 
 
@@ -458,8 +497,6 @@ def review_rescue(
         default_pr_port_fn=core._default_pr_port,
         default_review_state_port_fn=core._default_review_state_port,
         default_board_mutation_port_fn=core._default_board_mutation_port,
-        query_closing_issues_fn=core.query_closing_issues,
-        query_issue_board_info_fn=core._query_issue_board_info,
         automerge_review_fn=core.automerge_review,
     )
 

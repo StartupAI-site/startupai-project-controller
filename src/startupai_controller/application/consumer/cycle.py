@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from startupai_controller.domain.models import CycleResult
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
+from startupai_controller.ports.review_state import ReviewStatePort
 
 
 @dataclass(frozen=True)
@@ -35,11 +38,9 @@ def run_prepared_cycle(
     gh_runner: GhRunnerPort | None = None,
     process_runner: ProcessRunnerPort | None = None,
     file_reader: Callable[[Path], str] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    pr_port: PullRequestPort | None = None,
 ) -> CycleResult:
     """Run the prepared claim/execute/finalize cycle."""
     config.poll_interval_seconds = prepared.effective_interval
@@ -67,10 +68,9 @@ def run_prepared_cycle(
         launch_context=launch_context,
         target_issue=target_issue,
         dry_run=dry_run,
-        status_resolver=status_resolver,
+        review_state_port=review_state_port,
+        pr_port=pr_port,
         subprocess_runner=process_runner.run if process_runner is not None else None,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
         gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     if cycle_result is not None:
@@ -83,11 +83,8 @@ def run_prepared_cycle(
         prepared=prepared,
         launch_context=launch_context,
         slot_id=slot_id,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
+        review_state_port=review_state_port,
+        board_port=board_port,
         gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
     if cycle_result is not None:
@@ -100,13 +97,12 @@ def run_prepared_cycle(
         prepared=prepared,
         launch_context=launch_context,
         claimed_context=claimed_context,
-        subprocess_runner=process_runner.run if process_runner is not None else None,
+        gh_runner=gh_runner,
+        process_runner=process_runner,
         file_reader=file_reader,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner.run_gh if gh_runner is not None else None,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        pr_port=pr_port,
     )
 
     return deps.finalize_claimed_session(
@@ -116,8 +112,6 @@ def run_prepared_cycle(
         launch_context=launch_context,
         claimed_context=claimed_context,
         execution_outcome=execution_outcome,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
+        review_state_port=review_state_port,
         gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )

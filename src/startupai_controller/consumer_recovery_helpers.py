@@ -42,6 +42,18 @@ def recover_interrupted_sessions(
         logger.error("Interrupted-session recovery skipped: %s", err)
         return recovered
 
+    bundle = None
+    if pr_port is None or review_state_port is None or board_port is None:
+        bundle = build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=cp_config,
+            gh_runner=gh_runner,
+        )
+    effective_pr_port = pr_port or bundle.pull_requests
+    effective_review_state_port = review_state_port or bundle.review_state
+    effective_board_port = board_port or bundle.board_mutations
+
     return recovery_use_case(
         config,
         db,
@@ -49,7 +61,6 @@ def recover_interrupted_sessions(
         cp_config=cp_config,
         deps=RecoveryDeps(
             gh_query_error_type=gh_query_error_type,
-            build_github_port_bundle=build_github_port_bundle,
             load_automation_config=load_automation_config,
             resolve_issue_coordinates=resolve_issue_coordinates,
             classify_open_pr_candidates=classify_open_pr_candidates,
@@ -58,12 +69,9 @@ def recover_interrupted_sessions(
             set_blocked_with_reason=set_blocked_with_reason,
         ),
         automation_config=automation_config,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
+        pr_port=effective_pr_port,
+        review_state_port=effective_review_state_port,
+        board_port=effective_board_port,
         log_error=lambda issue_ref, err: logger.error(
             "Interrupted-session board recovery failed for %s: %s",
             issue_ref,

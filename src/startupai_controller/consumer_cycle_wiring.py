@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
+import startupai_controller.consumer_board_state_helpers as _board_state_helpers
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
+import startupai_controller.consumer_resolution_helpers as _resolution_helpers
+import startupai_controller.consumer_support_wiring as _support_wiring
+from startupai_controller.control_plane_runtime import (
+    _mark_degraded,
+    _record_successful_github_mutation,
+)
 from startupai_controller.application.consumer.cycle import PreparedCycleDeps
 from startupai_controller.application.consumer.execution import (
     ExecutionDeps,
@@ -30,10 +38,14 @@ from startupai_controller.consumer_types import (
     SessionExecutionOutcome,
 )
 from startupai_controller.runtime.wiring import (
+    build_gh_runner_port,
+    build_process_runner_port,
     build_github_port_bundle,
     build_session_store,
     build_worktree_port,
 )
+
+logger = logging.getLogger("board-consumer")
 
 
 def assemble_prepared_launch_context(
@@ -84,43 +96,135 @@ def prepare_launch_candidate(
     config: Any,
     prepared: Any,
     db: Any,
-    subprocess_runner: Callable[..., Any] | None = None,
+    subprocess_runner: Any | None = None,
+    review_state_port: Any | None = None,
     status_resolver: Callable[..., str] | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
     board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: Any | None = None,
     pr_port: Any | None = None,
     issue_context_port: Any | None = None,
     session_store: Any | None = None,
     worktree_port: Any | None = None,
 ) -> PreparedLaunchContext:
     """Prepare local launch state for an issue before board claim."""
+    process_runner_port = (
+        subprocess_runner
+        if hasattr(subprocess_runner, "run")
+        else build_process_runner_port(
+            gh_runner=gh_runner,
+            subprocess_runner=subprocess_runner,
+        )
+    )
+    gh_port = (
+        gh_runner
+        if hasattr(gh_runner, "run_gh")
+        else build_gh_runner_port(gh_runner=gh_runner)
+    )
+    gh_runner_fn = gh_port.run_gh if gh_port is not None else None
+
+    def _resolve_launch_candidate_metadata(
+        issue_ref: str,
+        *,
+        cp_config: Any,
+        auto_config: Any,
+        board_snapshot: Any,
+        pr_port: Any,
+    ) -> tuple[Any, ...]:
+        return _launch_support_wiring.resolve_launch_candidate_metadata(
+            issue_ref,
+            cp_config=cp_config,
+            auto_config=auto_config,
+            board_snapshot=board_snapshot,
+            pr_port=pr_port,
+            gh_runner=gh_runner_fn,
+        )
+
+    def _resolve_launch_issue_context(
+        issue_ref: str,
+        *,
+        owner: str,
+        repo: str,
+        number: int,
+        snapshot: Any | None,
+        config: Any,
+        db: Any,
+        issue_context_port: Any,
+    ) -> tuple[Any, str]:
+        return _launch_support_wiring.resolve_launch_issue_context(
+            issue_ref,
+            owner=owner,
+            repo=repo,
+            number=number,
+            snapshot=snapshot,
+            config=config,
+            db=db,
+            issue_context_port=issue_context_port,
+            gh_runner=gh_runner_fn,
+        )
+
+    def _setup_launch_worktree(
+        issue_ref: str,
+        title: str,
+        session_kind: str,
+        repair_branch_name: str | None,
+        *,
+        config: Any,
+        cp_config: Any,
+        db: Any,
+        session_store: Any | None = None,
+        worktree_port: Any | None = None,
+        subprocess_runner: Any | None = None,
+    ) -> tuple[str, str, str | None, str | None]:
+        return _launch_support_wiring.setup_launch_worktree(
+            issue_ref,
+            title,
+            session_kind,
+            repair_branch_name,
+            config=config,
+            cp_config=cp_config,
+            db=db,
+            session_store=session_store,
+            worktree_port=worktree_port,
+            subprocess_runner=subprocess_runner,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner_fn,
+        )
+
     return _prepare_launch_candidate_use_case(
         issue_ref,
         config=config,
         prepared=prepared,
         db=db,
         deps=PrepareLaunchDeps(
-            build_session_store=build_session_store,
-            build_github_port_bundle=build_github_port_bundle,
-            build_worktree_port=build_worktree_port,
-            resolve_launch_candidate_metadata=_launch_support_wiring.resolve_launch_candidate_metadata,
-            resolve_launch_issue_context=_launch_support_wiring.resolve_launch_issue_context,
-            setup_launch_worktree=_launch_support_wiring.setup_launch_worktree,
+            resolve_launch_candidate_metadata=_resolve_launch_candidate_metadata,
+            resolve_launch_issue_context=_resolve_launch_issue_context,
+            setup_launch_worktree=_setup_launch_worktree,
             resolve_launch_runtime=_launch_support_wiring.resolve_launch_runtime,
             run_launch_workspace_hooks=_launch_support_wiring.run_launch_workspace_hooks,
             build_dependency_summary=_execution_support_helpers.build_dependency_summary,
             assemble_prepared_launch_context=assemble_prepared_launch_context,
         ),
-        subprocess_runner=subprocess_runner,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        pr_port=pr_port,
+        subprocess_runner=process_runner_port,
+        review_state_port=review_state_port,
+        gh_runner=gh_port,
+        pr_port=pr_port or build_github_port_bundle(
+            config.project_owner,
+            config.project_number,
+            config=prepared.cp_config,
+            github_memo=prepared.github_memo,
+            gh_runner=gh_runner_fn,
+        ).pull_requests,
         issue_context_port=issue_context_port,
-        session_store=session_store,
-        worktree_port=worktree_port,
+        session_store=session_store or build_session_store(db),
+        worktree_port=worktree_port
+        or build_worktree_port(
+            subprocess_runner=(
+                process_runner_port.run if process_runner_port is not None else None
+            ),
+            gh_runner=gh_runner_fn,
+        ),
     )
 
 
@@ -132,32 +236,59 @@ def resolve_launch_context_for_cycle(
     launch_context: Any | None,
     target_issue: str | None,
     dry_run: bool,
+    review_state_port: Any | None,
+    pr_port: Any | None,
     status_resolver: Callable[..., str] | None,
-    subprocess_runner: Callable[..., Any] | None,
+    subprocess_runner: Any | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: Any | None,
     select_launch_candidate_for_cycle: Callable[..., tuple[Any | None, Any | None]],
     prepare_selected_launch_candidate: Callable[..., tuple[Any | None, Any | None]],
     logger: Any,
 ) -> tuple[Any | None, Any | None]:
     """Resolve or prepare launch-ready work for this cycle."""
+    def _select_launch_candidate(*, config: Any, db: Any, prepared: Any, target_issue: str | None) -> tuple[Any | None, Any | None]:
+        return select_launch_candidate_for_cycle(
+            config=config,
+            db=db,
+            prepared=prepared,
+            target_issue=target_issue,
+            status_resolver=status_resolver,
+            gh_runner=gh_runner,
+        )
+
+    def _prepare_selected_launch_candidate(
+        *,
+        selected_candidate: Any,
+        config: Any,
+        db: Any,
+        prepared: Any,
+    ) -> tuple[Any | None, Any | None]:
+        return prepare_selected_launch_candidate(
+            selected_candidate=selected_candidate,
+            config=config,
+            db=db,
+            prepared=prepared,
+            subprocess_runner=subprocess_runner,
+            status_resolver=status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+            pr_port=pr_port,
+        )
+
     return _resolve_launch_context_for_cycle_use_case(
         config=config,
         db=db,
         prepared=prepared,
         deps=ResolveLaunchDeps(
-            select_launch_candidate_for_cycle=select_launch_candidate_for_cycle,
-            prepare_selected_launch_candidate=prepare_selected_launch_candidate,
+            select_launch_candidate_for_cycle=_select_launch_candidate,
+            prepare_selected_launch_candidate=_prepare_selected_launch_candidate,
         ),
         launch_context=launch_context,
         target_issue=target_issue,
         dry_run=dry_run,
-        status_resolver=status_resolver,
-        subprocess_runner=subprocess_runner,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
         log_dry_run=lambda issue_ref: logger.info(
             "[dry-run] Would prepare, claim, and execute: %s",
             issue_ref,
@@ -172,36 +303,104 @@ def claim_launch_context(
     prepared: Any,
     launch_context: Any,
     slot_id: int,
+    review_state_port: Any | None,
+    board_port: Any | None,
     status_resolver: Callable[..., str] | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: Any | None,
     open_pending_claim_session: Callable[..., tuple[Any | None, Any | None]],
     enforce_claim_retry_ceiling: Callable[..., Any | None],
     attempt_launch_context_claim: Callable[..., tuple[Any | None, Any | None]],
     mark_claimed_session_running: Callable[..., Any],
 ) -> tuple[Any | None, Any | None]:
     """Claim board ownership and start a durable running session."""
+    effective_comment_checker = comment_checker or (
+        review_state_port.comment_exists if review_state_port is not None else None
+    )
+    effective_status_resolver = status_resolver or (
+        review_state_port.get_issue_status if review_state_port is not None else None
+    )
+
+    def _enforce_claim_retry_ceiling(
+        *,
+        config: Any,
+        db: Any,
+        launch_context: Any,
+        pending_claim: Any,
+        cp_config: Any,
+    ) -> Any | None:
+        return enforce_claim_retry_ceiling(
+            config=config,
+            db=db,
+            launch_context=launch_context,
+            pending_claim=pending_claim,
+            cp_config=cp_config,
+            board_info_resolver=board_info_resolver,
+            comment_checker=effective_comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
+    def _attempt_launch_context_claim(
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: Any,
+        pending_claim: Any,
+        slot_id: int,
+    ) -> tuple[Any | None, Any | None]:
+        return attempt_launch_context_claim(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            pending_claim=pending_claim,
+            slot_id=slot_id,
+            status_resolver=effective_status_resolver,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_checker=effective_comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
+    def _mark_claimed_session_running(
+        *,
+        config: Any,
+        db: Any,
+        launch_context: Any,
+        pending_claim: Any,
+        slot_id: int,
+        cp_config: Any,
+    ) -> Any:
+        return mark_claimed_session_running(
+            config=config,
+            db=db,
+            launch_context=launch_context,
+            pending_claim=pending_claim,
+            slot_id=slot_id,
+            comment_checker=effective_comment_checker,
+            comment_poster=comment_poster,
+            cp_config=cp_config,
+            gh_runner=gh_runner,
+        )
+
     return _claim_launch_context_use_case(
         config=config,
         db=db,
         prepared=prepared,
         deps=ClaimLaunchDeps(
             open_pending_claim_session=open_pending_claim_session,
-            enforce_claim_retry_ceiling=enforce_claim_retry_ceiling,
-            attempt_launch_context_claim=attempt_launch_context_claim,
-            mark_claimed_session_running=mark_claimed_session_running,
+            enforce_claim_retry_ceiling=_enforce_claim_retry_ceiling,
+            attempt_launch_context_claim=_attempt_launch_context_claim,
+            mark_claimed_session_running=_mark_claimed_session_running,
         ),
         launch_context=launch_context,
         slot_id=slot_id,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
     )
 
 
@@ -214,10 +413,12 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    session_store: Any,
+    review_state_port: Any | None,
+    board_port: Any | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    build_session_store: Callable[[Any], Any],
+    gh_runner: Any | None,
     transition_claimed_session_to_review: Callable[..., None],
     post_claimed_session_verdict_marker: Callable[..., None],
     queue_claimed_session_for_review: Callable[..., Any | None],
@@ -225,25 +426,79 @@ def handoff_execution_to_review(
     record_metric: Callable[..., None],
 ) -> Any:
     """Transition a claimed session into Review and perform immediate rescue."""
+    def _transition_claimed_session_to_review(
+        *,
+        db: Any,
+        issue_ref: str,
+        session_id: str,
+        config: Any,
+        critical_path_config: Any,
+        review_state_port: Any | None,
+        board_port: Any | None,
+    ) -> None:
+        return transition_claimed_session_to_review(
+            db=db,
+            issue_ref=issue_ref,
+            session_id=session_id,
+            config=config,
+            critical_path_config=critical_path_config,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+
+    def _post_claimed_session_verdict_marker(
+        *,
+        db: Any,
+        pr_url: str,
+        session_id: str,
+    ) -> None:
+        return post_claimed_session_verdict_marker(
+            db=db,
+            pr_url=pr_url,
+            session_id=session_id,
+            gh_runner=gh_runner,
+        )
+
+    def _run_immediate_review_handoff(
+        *,
+        config: Any,
+        critical_path_config: Any,
+        automation_config: Any,
+        store: Any,
+        queue_entry: Any,
+        db: Any,
+    ) -> Any:
+        return run_immediate_review_handoff(
+            config=config,
+            critical_path_config=critical_path_config,
+            automation_config=automation_config,
+            store=store,
+            queue_entry=queue_entry,
+            gh_runner=gh_runner,
+            db=db,
+        )
+
     return _handoff_execution_to_review_use_case(
         config=config,
         db=db,
         prepared=prepared,
         deps=ReviewHandoffDeps(
-            build_session_store=build_session_store,
-            transition_claimed_session_to_review=transition_claimed_session_to_review,
-            post_claimed_session_verdict_marker=post_claimed_session_verdict_marker,
+            transition_claimed_session_to_review=_transition_claimed_session_to_review,
+            post_claimed_session_verdict_marker=_post_claimed_session_verdict_marker,
             queue_claimed_session_for_review=queue_claimed_session_for_review,
-            run_immediate_review_handoff=run_immediate_review_handoff,
+            run_immediate_review_handoff=_run_immediate_review_handoff,
             record_metric=record_metric,
         ),
         launch_context=launch_context,
         session_id=session_id,
         pr_url=pr_url,
         session_status=session_status,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
+        session_store=session_store,
+        review_state_port=review_state_port,
+        board_port=board_port,
     )
 
 
@@ -257,12 +512,13 @@ def handle_non_review_execution_outcome(
     session_status: str,
     codex_result: dict[str, Any] | None,
     has_commits: bool,
+    pr_port: Any | None,
+    board_port: Any | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     comment_poster: Callable[..., None] | None,
     subprocess_runner: Callable[..., Any] | None,
-    gh_runner: Callable[..., str] | None,
-    build_github_port_bundle: Callable[..., Any],
+    gh_runner: Any | None,
     verify_resolution_payload: Callable[..., Any],
     apply_resolution_action: Callable[..., str | None],
     return_issue_to_ready: Callable[..., None],
@@ -273,15 +529,77 @@ def handle_non_review_execution_outcome(
     logger: Any,
 ) -> tuple[str, Any | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
+    def _verify_resolution_payload(
+        issue_ref: str,
+        resolution: dict[str, Any] | None,
+        *,
+        config: Any,
+        workflows: dict[str, Any],
+        pr_port: Any | None = None,
+    ) -> Any:
+        return verify_resolution_payload(
+            issue_ref,
+            resolution,
+            config=config,
+            workflows=workflows,
+            pr_port=pr_port,
+            subprocess_runner=subprocess_runner,
+            gh_runner=gh_runner,
+        )
+
+    def _apply_resolution_action(
+        issue_ref: str,
+        resolution_evaluation: Any,
+        *,
+        session_id: str,
+        db: Any,
+        config: Any,
+        critical_path_config: Any,
+        board_port: Any | None = None,
+    ) -> str | None:
+        return apply_resolution_action(
+            issue_ref,
+            resolution_evaluation,
+            session_id=session_id,
+            db=db,
+            config=config,
+            critical_path_config=critical_path_config,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
+    def _return_issue_to_ready(
+        issue_ref: str,
+        config: Any,
+        project_owner: str,
+        project_number: int,
+        *,
+        board_port: Any | None = None,
+        from_statuses: set[str] | None = None,
+    ) -> None:
+        return return_issue_to_ready(
+            issue_ref,
+            config,
+            project_owner,
+            project_number,
+            board_port=board_port,
+            from_statuses=from_statuses,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner,
+        )
+
     return _handle_non_review_execution_outcome_use_case(
         config=config,
         db=db,
         prepared=prepared,
         deps=NonReviewOutcomeDeps(
-            build_github_port_bundle=build_github_port_bundle,
-            verify_resolution_payload=verify_resolution_payload,
-            apply_resolution_action=apply_resolution_action,
-            return_issue_to_ready=return_issue_to_ready,
+            verify_resolution_payload=_verify_resolution_payload,
+            apply_resolution_action=_apply_resolution_action,
+            return_issue_to_ready=_return_issue_to_ready,
             record_successful_github_mutation=record_successful_github_mutation,
             mark_degraded=mark_degraded,
             queue_status_transition=queue_status_transition,
@@ -296,11 +614,9 @@ def handle_non_review_execution_outcome(
         session_status=session_status,
         codex_result=codex_result,
         has_commits=has_commits,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_poster=comment_poster,
-        subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
+        pr_port=pr_port,
+        board_port=board_port,
     )
 
 
@@ -311,13 +627,16 @@ def execute_claimed_session(
     prepared: Any,
     launch_context: Any,
     claimed_context: Any,
-    subprocess_runner: Callable[..., Any] | None,
+    process_runner: Any | None,
     file_reader: Callable[..., Any] | None,
+    review_state_port: Any | None,
+    board_port: Any | None,
+    pr_port: Any | None,
     board_info_resolver: Callable[..., Any] | None,
     board_mutator: Callable[..., None] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: Any | None,
     assemble_codex_prompt: Callable[..., str],
     run_codex_session: Callable[..., int],
     parse_codex_result: Callable[..., dict[str, Any] | None],
@@ -327,6 +646,95 @@ def execute_claimed_session(
     handle_non_review_execution_outcome: Callable[..., tuple[str, Any | None, str | None]],
 ) -> SessionExecutionOutcome:
     """Execute Codex for a claimed session and apply immediate board handoff."""
+    def _create_pr_for_execution_result(
+        *,
+        config: Any,
+        launch_context: Any,
+        claimed_context: Any,
+        codex_result: dict[str, Any] | None,
+        session_status: str,
+        failure_reason: str | None,
+        subprocess_runner: Callable[..., Any] | None,
+        gh_runner: Callable[..., str] | None,
+    ) -> Any:
+        return create_pr_for_execution_result(
+            config=config,
+            launch_context=launch_context,
+            claimed_context=claimed_context,
+            codex_result=codex_result,
+            session_status=session_status,
+            failure_reason=failure_reason,
+            subprocess_runner=subprocess_runner,
+            gh_runner=gh_runner,
+        )
+
+    def _handoff_execution_to_review(
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: Any,
+        session_id: str,
+        pr_url: str,
+        session_status: str,
+        session_store: Any,
+        review_state_port: Any | None,
+        board_port: Any | None,
+    ) -> Any:
+        del session_store
+        effective_gh_runner = (
+            gh_runner.run_gh if hasattr(gh_runner, "run_gh") else gh_runner
+        )
+        return handoff_execution_to_review(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id=session_id,
+            pr_url=pr_url,
+            session_status=session_status,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=effective_gh_runner,
+        )
+
+    def _handle_non_review_execution_outcome(
+        *,
+        config: Any,
+        db: Any,
+        prepared: Any,
+        launch_context: Any,
+        session_id: str,
+        session_status: str,
+        codex_result: dict[str, Any] | None,
+        has_commits: bool,
+        gh_runner: Any | None,
+        pr_port: Any | None,
+        board_port: Any | None,
+    ) -> tuple[str, Any | None, str | None]:
+        effective_gh_runner = (
+            gh_runner.run_gh if hasattr(gh_runner, "run_gh") else gh_runner
+        )
+        return handle_non_review_execution_outcome(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id=session_id,
+            session_status=session_status,
+            codex_result=codex_result,
+            has_commits=has_commits,
+            pr_port=pr_port,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            comment_poster=comment_poster,
+            subprocess_runner=process_runner.run if process_runner is not None else None,
+            gh_runner=effective_gh_runner,
+        )
+
     return _execute_claimed_session_use_case(
         config=config,
         db=db,
@@ -336,20 +744,20 @@ def execute_claimed_session(
             run_codex_session=run_codex_session,
             parse_codex_result=parse_codex_result,
             session_status_from_codex_result=session_status_from_codex_result,
-            create_pr_for_execution_result=create_pr_for_execution_result,
-            handoff_execution_to_review=handoff_execution_to_review,
-            handle_non_review_execution_outcome=handle_non_review_execution_outcome,
+            create_pr_for_execution_result=_create_pr_for_execution_result,
+            handoff_execution_to_review=_handoff_execution_to_review,
+            handle_non_review_execution_outcome=_handle_non_review_execution_outcome,
             build_session_execution_outcome=SessionExecutionOutcome,
         ),
         launch_context=launch_context,
         claimed_context=claimed_context,
-        subprocess_runner=subprocess_runner,
-        file_reader=file_reader,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
+        session_store=build_session_store(db),
         gh_runner=gh_runner,
+        process_runner=process_runner,
+        file_reader=file_reader,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        pr_port=pr_port,
     )
 
 
@@ -361,16 +769,62 @@ def finalize_claimed_session(
     launch_context: Any,
     claimed_context: Any,
     execution_outcome: Any,
+    review_state_port: Any | None,
     board_info_resolver: Callable[..., Any] | None,
     comment_checker: Callable[..., bool] | None,
     comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    gh_runner: Any | None,
     final_phase_for_claimed_session: Callable[..., str],
     persist_claimed_session_completion: Callable[..., None],
     post_claimed_session_result_comment: Callable[..., None],
     maybe_escalate_claimed_session_failure: Callable[..., None],
 ) -> Any:
     """Persist final session state and return the cycle result."""
+    effective_comment_checker = comment_checker or (
+        review_state_port.comment_exists if review_state_port is not None else None
+    )
+
+    def _post_claimed_session_result_comment(
+        *,
+        issue_ref: str,
+        session_id: str,
+        codex_result: dict[str, Any] | None,
+        cp_config: Any,
+    ) -> None:
+        return post_claimed_session_result_comment(
+            issue_ref=issue_ref,
+            session_id=session_id,
+            codex_result=codex_result,
+            cp_config=cp_config,
+            comment_checker=effective_comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
+    def _maybe_escalate_claimed_session_failure(
+        *,
+        config: Any,
+        db: Any,
+        issue_ref: str,
+        effective_max_retries: int,
+        session_status: str,
+        codex_result: dict[str, Any] | None,
+        cp_config: Any,
+    ) -> None:
+        return maybe_escalate_claimed_session_failure(
+            config=config,
+            db=db,
+            issue_ref=issue_ref,
+            effective_max_retries=effective_max_retries,
+            session_status=session_status,
+            codex_result=codex_result,
+            cp_config=cp_config,
+            board_info_resolver=board_info_resolver,
+            comment_checker=effective_comment_checker,
+            comment_poster=comment_poster,
+            gh_runner=gh_runner,
+        )
+
     return _finalize_claimed_session_use_case(
         config=config,
         db=db,
@@ -378,16 +832,13 @@ def finalize_claimed_session(
         deps=FinalizeClaimedSessionDeps(
             final_phase_for_claimed_session=final_phase_for_claimed_session,
             persist_claimed_session_completion=persist_claimed_session_completion,
-            post_claimed_session_result_comment=post_claimed_session_result_comment,
-            maybe_escalate_claimed_session_failure=maybe_escalate_claimed_session_failure,
+            post_claimed_session_result_comment=_post_claimed_session_result_comment,
+            maybe_escalate_claimed_session_failure=_maybe_escalate_claimed_session_failure,
         ),
         launch_context=launch_context,
         claimed_context=claimed_context,
         execution_outcome=execution_outcome,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        review_state_port=review_state_port,
     )
 
 

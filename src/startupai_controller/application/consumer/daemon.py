@@ -7,6 +7,17 @@ from datetime import datetime, timezone
 import time
 from typing import Any, Callable
 
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
+
+
+@dataclass(frozen=True)
+class DaemonRuntime:
+    """Typed runtime capabilities needed by the daemon application flow."""
+
+    gh_runner: GhRunnerPort | None = None
+    process_runner: ProcessRunnerPort | None = None
+    file_reader: Callable[..., Any] | None = None
+
 
 @dataclass(frozen=True)
 class PrepareMultiWorkerCycleDeps:
@@ -78,37 +89,6 @@ class RunDaemonLoopDeps:
     logger: Any
 
 
-def run_worker_cycle(
-    config: Any,
-    *,
-    target_issue: str,
-    slot_id: int,
-    prepared: Any,
-    launch_context: Any | None = None,
-    dry_run: bool = False,
-    di_kwargs: dict[str, Any] | None = None,
-    open_consumer_db: Callable[[Any], Any],
-    run_one_cycle: Callable[..., Any],
-) -> Any:
-    """Execute one issue in an isolated worker DB connection."""
-    worker_db = open_consumer_db(config.db_path)
-    worker_config = replace(config)
-    try:
-        return run_one_cycle(
-            worker_config,
-            worker_db,
-            dry_run=dry_run,
-            target_issue=target_issue,
-            prepared=prepared,
-            launch_context=launch_context,
-            slot_id_override=slot_id,
-            skip_control_plane=True,
-            **(di_kwargs or {}),
-        )
-    finally:
-        worker_db.close()
-
-
 def next_available_slots(
     db: Any,
     limit: int,
@@ -154,7 +134,7 @@ def prepare_multi_worker_cycle(
     *,
     dry_run: bool,
     sleeper: Callable[[float], None],
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None,
     deps: PrepareMultiWorkerCycleDeps,
 ) -> Any | None:
     """Run one bounded preflight pass for the multi-worker daemon."""
@@ -163,11 +143,7 @@ def prepare_multi_worker_cycle(
             config,
             db,
             dry_run=dry_run,
-            board_info_resolver=di_kwargs.get("board_info_resolver"),
-            board_mutator=di_kwargs.get("board_mutator"),
-            comment_checker=di_kwargs.get("comment_checker"),
-            comment_poster=di_kwargs.get("comment_poster"),
-            gh_runner=di_kwargs.get("gh_runner"),
+            gh_runner=runtime.gh_runner if runtime is not None else None,
         )
     except deps.config_error_type:
         deps.logger.exception("Config error during multi-worker cycle")
@@ -230,7 +206,7 @@ def prepare_multi_worker_launch_context(
     db: Any,
     prepared: Any,
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None,
     deps: PrepareMultiWorkerLaunchContextDeps,
 ) -> tuple[Any | None, bool]:
     """Prepare launch context for one candidate.
@@ -247,11 +223,7 @@ def prepare_multi_worker_launch_context(
                 config=config,
                 prepared=prepared,
                 db=db,
-                subprocess_runner=di_kwargs.get("subprocess_runner"),
-                status_resolver=di_kwargs.get("status_resolver"),
-                board_info_resolver=di_kwargs.get("board_info_resolver"),
-                board_mutator=di_kwargs.get("board_mutator"),
-                gh_runner=di_kwargs.get("gh_runner"),
+                runtime=runtime,
             ),
             False,
         )
@@ -278,9 +250,7 @@ def prepare_multi_worker_launch_context(
             config=config,
             cp_config=prepared.cp_config,
             db=db,
-            board_info_resolver=di_kwargs.get("board_info_resolver"),
-            board_mutator=di_kwargs.get("board_mutator"),
-            gh_runner=di_kwargs.get("gh_runner"),
+            runtime=runtime,
         )
         deps.record_metric(
             db,
@@ -306,9 +276,7 @@ def prepare_multi_worker_launch_context(
             config=config,
             cp_config=prepared.cp_config,
             db=db,
-            board_info_resolver=di_kwargs.get("board_info_resolver"),
-            board_mutator=di_kwargs.get("board_mutator"),
-            gh_runner=di_kwargs.get("gh_runner"),
+            runtime=runtime,
         )
         deps.record_metric(
             db,
@@ -330,7 +298,7 @@ def submit_multi_worker_task(
     prepared: Any,
     launch_context: Any | None,
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None,
     run_worker_cycle: Callable[..., Any],
     active_worker_task_type: type[Any],
 ) -> None:
@@ -343,7 +311,7 @@ def submit_multi_worker_task(
         prepared=prepared,
         launch_context=launch_context,
         dry_run=dry_run,
-        di_kwargs=di_kwargs,
+        runtime=runtime,
     )
     active_tasks[future] = active_worker_task_type(
         issue_ref=candidate,
@@ -362,7 +330,7 @@ def dispatch_multi_worker_launches(
     active_issue_refs: set[str],
     active_tasks: dict[Any, Any],
     dry_run: bool,
-    di_kwargs: dict[str, Any],
+    runtime: DaemonRuntime | None,
     deps: DispatchMultiWorkerLaunchesDeps,
 ) -> int:
     """Launch as many ready candidates as the current hydration budget allows."""
@@ -376,8 +344,7 @@ def dispatch_multi_worker_launches(
                 config,
                 db,
                 prepared,
-                status_resolver=di_kwargs.get("status_resolver"),
-                gh_runner=di_kwargs.get("gh_runner"),
+                runtime=runtime,
                 excluded_issue_refs=active_issue_refs,
             )
         except deps.gh_query_error_type as err:
@@ -394,7 +361,7 @@ def dispatch_multi_worker_launches(
             db=db,
             prepared=prepared,
             dry_run=dry_run,
-            di_kwargs=di_kwargs,
+            runtime=runtime,
         )
         if stop_dispatch:
             break
@@ -408,7 +375,7 @@ def dispatch_multi_worker_launches(
             prepared=prepared,
             launch_context=launch_context,
             dry_run=dry_run,
-            di_kwargs=di_kwargs,
+            runtime=runtime,
         )
         launched += 1
     return launched
@@ -420,7 +387,7 @@ def run_multi_worker_daemon_loop(
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
-    di_kwargs: dict[str, Any] | None = None,
+    runtime: DaemonRuntime | None = None,
     deps: RunMultiWorkerDaemonLoopDeps,
 ) -> None:
     """Run the daemon loop with multiple concurrent worker slots."""
@@ -445,7 +412,7 @@ def run_multi_worker_daemon_loop(
                 db,
                 dry_run=dry_run,
                 sleeper=sleeper,
-                di_kwargs=di_kwargs or {},
+                runtime=runtime,
             )
             if prepared is None:
                 continue
@@ -471,7 +438,7 @@ def run_multi_worker_daemon_loop(
                 active_issue_refs=active_issue_refs,
                 active_tasks=active_tasks,
                 dry_run=dry_run,
-                di_kwargs=di_kwargs or {},
+                runtime=runtime,
             )
 
             sleeper(1.0 if active_tasks or launched else config.poll_interval_seconds)
@@ -483,12 +450,11 @@ def run_daemon_loop(
     *,
     dry_run: bool = False,
     sleep_fn: Callable[[float], None] | None = None,
-    di_kwargs: dict[str, Any] | None = None,
+    runtime: DaemonRuntime | None = None,
     deps: RunDaemonLoopDeps,
 ) -> None:
     """Run the continuous consumer daemon loop."""
     sleeper = sleep_fn or time.sleep
-    effective_di_kwargs = di_kwargs or {}
     try:
         auto_config = deps.load_automation_config(config.automation_config_path)
     except deps.config_error_type:
@@ -525,9 +491,7 @@ def run_daemon_loop(
             config,
             db,
             automation_config=auto_config,
-            board_info_resolver=effective_di_kwargs.get("board_info_resolver"),
-            board_mutator=effective_di_kwargs.get("board_mutator"),
-            gh_runner=effective_di_kwargs.get("gh_runner"),
+            runtime=runtime,
         )
         if recovered:
             deps.logger.info(
@@ -543,7 +507,7 @@ def run_daemon_loop(
             db,
             dry_run=dry_run,
             sleep_fn=sleep_fn,
-            **effective_di_kwargs,
+            runtime=runtime,
         )
         return
 
@@ -555,7 +519,7 @@ def run_daemon_loop(
             )
             return
         try:
-            result = deps.run_one_cycle(config, db, dry_run=dry_run, **effective_di_kwargs)
+            result = deps.run_one_cycle(config, db, dry_run=dry_run, runtime=runtime)
             deps.logger.info("Cycle result: %s", result)
         except Exception:
             deps.logger.exception("Unhandled error in cycle")

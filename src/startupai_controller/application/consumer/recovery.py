@@ -11,7 +11,6 @@ class RecoveryDeps:
     """Injected seams for interrupted-session recovery."""
 
     gh_query_error_type: type[Exception]
-    build_github_port_bundle: Callable[..., Any]
     load_automation_config: Callable[[Any], Any]
     resolve_issue_coordinates: Callable[..., tuple[str, str, int]]
     classify_open_pr_candidates: Callable[..., tuple[str, Any | None, str]]
@@ -28,29 +27,15 @@ def recover_interrupted_sessions(
     cp_config: Any,
     deps: RecoveryDeps,
     automation_config: Any | None = None,
-    pr_port: Any | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    pr_port: Any,
+    review_state_port: Any,
+    board_port: Any,
     log_error: Callable[[str, Exception], None] | None = None,
 ) -> list[Any]:
     """Recover leases left behind by a previous interrupted daemon process."""
     recovered_leases = recovered if recovered is not None else db.recover_interrupted_leases()
     if not recovered_leases:
         return []
-
-    effective_pr_port = pr_port
-    if effective_pr_port is None:
-        effective_pr_port = deps.build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=cp_config,
-            gh_runner=gh_runner,
-        ).pull_requests
-    effective_review_state_port = review_state_port or effective_pr_port
-    effective_board_port = board_port or effective_pr_port
 
     for lease in recovered_leases:
         try:
@@ -66,8 +51,7 @@ def recover_interrupted_sessions(
                     number,
                     effective_automation_config,
                     expected_branch=lease.branch_name,
-                    pr_port=effective_pr_port,
-                    gh_runner=gh_runner,
+                    pr_port=pr_port,
                 )
             except deps.gh_query_error_type:
                 classification, pr_match = ("none", None)
@@ -80,11 +64,8 @@ def recover_interrupted_sessions(
                     config.project_owner,
                     config.project_number,
                     from_statuses={"In Progress", "Review"},
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
+                    review_state_port=review_state_port,
+                    board_port=board_port,
                 )
             elif pr_url or classification == "adoptable":
                 deps.transition_issue_to_review(
@@ -92,11 +73,8 @@ def recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
+                    review_state_port=review_state_port,
+                    board_port=board_port,
                 )
             elif classification == "none":
                 deps.return_issue_to_ready(
@@ -104,11 +82,8 @@ def recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    board_info_resolver=board_info_resolver,
-                    board_mutator=board_mutator,
-                    gh_runner=gh_runner,
+                    review_state_port=review_state_port,
+                    board_port=board_port,
                 )
             else:
                 deps.set_blocked_with_reason(
@@ -117,9 +92,8 @@ def recover_interrupted_sessions(
                     cp_config,
                     config.project_owner,
                     config.project_number,
-                    review_state_port=effective_review_state_port,
-                    board_port=effective_board_port,
-                    gh_runner=gh_runner,
+                    review_state_port=review_state_port,
+                    board_port=board_port,
                 )
         except Exception as err:
             if log_error is not None:

@@ -15,6 +15,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.process_runner import GhRunnerPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
+
 
 # ---------------------------------------------------------------------------
 # Cycle runtime context (moved from board_consumer.py)
@@ -35,8 +40,10 @@ class CycleRuntimeContext:
     global_limit: int
     github_memo: Any  # CycleGitHubMemo
     ready_flow_port: Any  # ReadyFlowPort
-    pr_port: Any  # PullRequestPort
-    review_state_port: Any  # ReviewStatePort
+    pr_port: PullRequestPort
+    review_state_port: ReviewStatePort
+    board_port: BoardMutationPort
+    gh_port: GhRunnerPort | None
 
 
 # ---------------------------------------------------------------------------
@@ -48,14 +55,9 @@ class CycleRuntimeContext:
 class InitializeCycleRuntimeDeps:
     """Injected seams for building cycle-scoped runtime context."""
 
-    build_session_store: Callable[[Any], Any]
-    load_config: Callable[[Any], Any]
     load_automation_config: Callable[[Any], Any]
     apply_automation_runtime: Callable[..., None]
     current_main_workflows: Callable[..., tuple[dict, dict, int]]
-    build_github_port_bundle: Callable[..., Any]
-    build_ready_flow_port: Callable[..., Any]
-    cycle_github_memo_factory: Callable[[], Any]
     config_error_type: type[Exception]
     logger: Any
 
@@ -79,7 +81,7 @@ class PhaseHelperDeps:
 class PrepareCycleDeps:
     """Injected seams for the top-level _prepare_cycle orchestrator."""
 
-    initialize_cycle_runtime_deps: InitializeCycleRuntimeDeps
+    initialize_cycle_runtime: Callable[..., CycleRuntimeContext]
     phase_helper_deps: PhaseHelperDeps
     begin_runtime_request_stats: Callable[[], Any]
     end_runtime_request_stats: Callable[[Any], Any]
@@ -98,15 +100,18 @@ class PrepareCycleDeps:
 
 def initialize_cycle_runtime(
     config: Any,
-    db: Any,
     *,
     deps: InitializeCycleRuntimeDeps,
-    gh_runner: Callable[..., str] | None = None,
+    session_store: Any,
+    cp_config: Any,
+    github_memo: Any,
+    ready_flow_port: Any,
+    pr_port: PullRequestPort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    gh_port: GhRunnerPort | None = None,
 ) -> CycleRuntimeContext:
     """Build cycle-scoped runtime wiring and effective config."""
-    session_store = deps.build_session_store(db)
-
-    cp_config = deps.load_config(config.critical_paths_path)
     try:
         auto_config = deps.load_automation_config(config.automation_config_path)
     except deps.config_error_type as err:
@@ -123,14 +128,6 @@ def initialize_cycle_runtime(
         if workflow_statuses[repo_prefix].available
     )
     config.poll_interval_seconds = effective_interval
-    github_memo = deps.cycle_github_memo_factory()
-    github_ports = deps.build_github_port_bundle(
-        config.project_owner,
-        config.project_number,
-        config=cp_config,
-        github_memo=github_memo,
-        gh_runner=gh_runner,
-    )
     global_limit = (
         auto_config.global_concurrency
         if auto_config is not None
@@ -147,9 +144,11 @@ def initialize_cycle_runtime(
         effective_interval=effective_interval,
         global_limit=global_limit,
         github_memo=github_memo,
-        ready_flow_port=deps.build_ready_flow_port(),
-        pr_port=github_ports.pull_requests,
-        review_state_port=github_ports.review_state,
+        ready_flow_port=ready_flow_port,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        gh_port=gh_port,
     )
 
 
@@ -160,11 +159,6 @@ def run_deferred_replay_phase(
     *,
     deps: PhaseHelperDeps,
     timings_ms: dict[str, int],
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
 ) -> None:
     """Replay deferred actions for the cycle when enabled."""
@@ -176,13 +170,9 @@ def run_deferred_replay_phase(
         config,
         runtime.cp_config,
         pr_port=runtime.pr_port,
-        review_state_port=runtime.pr_port,
-        board_port=runtime.pr_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
+        review_state_port=runtime.review_state_port,
+        board_port=runtime.board_port,
+        gh_runner=runtime.gh_port.run_gh if runtime.gh_port is not None else None,
     )
     timings_ms["deferred_replay"] = int((time.monotonic() - phase_started) * 1000)
     if replayed_actions:
@@ -194,7 +184,6 @@ def load_board_snapshot_phase(
     runtime: CycleRuntimeContext,
     *,
     timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
 ) -> Any:
     """Load the cycle board snapshot."""
     phase_started = time.monotonic()
@@ -211,7 +200,6 @@ def run_executor_routing_phase(
     deps: PhaseHelperDeps,
     board_snapshot: Any,
     timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
 ) -> None:
     """Normalize executor routing for the protected queue."""
@@ -223,7 +211,7 @@ def run_executor_routing_phase(
         config.project_number,
         dry_run=dry_run,
         board_snapshot=board_snapshot,
-        gh_runner=gh_runner,
+        gh_runner=runtime.gh_port.run_gh if runtime.gh_port is not None else None,
     )
     timings_ms["executor_routing"] = int((time.monotonic() - phase_started) * 1000)
     if routing_decision.routed:
@@ -243,9 +231,6 @@ def run_reconciliation_phase(
     deps: PhaseHelperDeps,
     board_snapshot: Any,
     timings_ms: dict[str, int],
-    board_info_resolver: Callable | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
 ) -> None:
     """Run truthful board reconciliation for the cycle."""
     phase_started = time.monotonic()
@@ -256,12 +241,10 @@ def run_reconciliation_phase(
         db,
         session_store=runtime.session_store,
         pr_port=runtime.pr_port,
-        review_state_port=runtime.pr_port,
-        board_port=runtime.pr_port,
+        review_state_port=runtime.review_state_port,
+        board_port=runtime.board_port,
         board_snapshot=board_snapshot,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
+        gh_runner=runtime.gh_port.run_gh if runtime.gh_port is not None else None,
     )
     timings_ms["reconciliation"] = int((time.monotonic() - phase_started) * 1000)
     deps.record_successful_board_sync(db)
@@ -283,7 +266,6 @@ def run_review_queue_phase(
     deps: PhaseHelperDeps,
     board_snapshot: Any,
     timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
 ) -> tuple[Any, Any]:
     """Drain the review queue for the current cycle."""
@@ -298,7 +280,7 @@ def run_review_queue_phase(
         board_snapshot=board_snapshot,
         dry_run=dry_run,
         github_memo=runtime.github_memo,
-        gh_runner=gh_runner,
+        gh_runner=runtime.gh_port.run_gh if runtime.gh_port is not None else None,
     )
     timings_ms["review_queue"] = int((time.monotonic() - phase_started) * 1000)
     if review_queue_summary.error:
@@ -330,7 +312,6 @@ def run_admission_phase(
     deps: PhaseHelperDeps,
     board_snapshot: Any,
     timings_ms: dict[str, int],
-    gh_runner: Callable[..., str] | None,
     dry_run: bool,
 ) -> dict[str, Any]:
     """Run backlog admission for the current cycle."""
@@ -345,7 +326,7 @@ def run_admission_phase(
         dry_run=dry_run,
         board_snapshot=board_snapshot,
         github_memo=runtime.github_memo,
-        gh_runner=gh_runner,
+        gh_runner=runtime.gh_port.run_gh if runtime.gh_port is not None else None,
     )
     timings_ms["admission"] = int((time.monotonic() - phase_started) * 1000)
     admission_summary = runtime.ready_flow_port.admission_summary_payload(
@@ -377,11 +358,7 @@ def prepare_cycle(
     deps: PrepareCycleDeps,
     prepared_cycle_context_factory: Callable[..., Any],
     dry_run: bool = False,
-    board_info_resolver: Callable | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GhRunnerPort | None = None,
 ) -> Any:
     """Run control-plane preflight once for a daemon tick."""
     request_stats_token = deps.begin_runtime_request_stats()
@@ -389,10 +366,9 @@ def prepare_cycle(
     if expired:
         deps.phase_helper_deps.logger.info("Expired stale leases: %s", expired)
 
-    runtime = initialize_cycle_runtime(
+    runtime = deps.initialize_cycle_runtime(
         config,
         db,
-        deps=deps.initialize_cycle_runtime_deps,
         gh_runner=gh_runner,
     )
 
@@ -400,52 +376,42 @@ def prepare_cycle(
 
     # Build the preflight phases deps using the phase functions from this module,
     # wrapped to inject the PhaseHelperDeps.
-    def _deferred_replay_phase(config, db, runtime, *, timings_ms, board_info_resolver,
-                                board_mutator, comment_checker, comment_poster,
-                                gh_runner, dry_run):
+    def _deferred_replay_phase(config, db, runtime, *, timings_ms, dry_run):
         return run_deferred_replay_phase(
             config, db, runtime, deps=phase_deps,
-            timings_ms=timings_ms, board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator, comment_checker=comment_checker,
-            comment_poster=comment_poster, gh_runner=gh_runner, dry_run=dry_run,
+            timings_ms=timings_ms, dry_run=dry_run,
         )
 
-    def _board_snapshot_phase(config, runtime, *, timings_ms, gh_runner):
+    def _board_snapshot_phase(config, runtime, *, timings_ms):
         return load_board_snapshot_phase(
-            config, runtime, timings_ms=timings_ms, gh_runner=gh_runner,
+            config, runtime, timings_ms=timings_ms,
         )
 
-    def _executor_routing_phase(config, db, runtime, *, board_snapshot, timings_ms,
-                                 gh_runner, dry_run):
+    def _executor_routing_phase(config, db, runtime, *, board_snapshot, timings_ms, dry_run):
         return run_executor_routing_phase(
             config, db, runtime, deps=phase_deps,
             board_snapshot=board_snapshot, timings_ms=timings_ms,
-            gh_runner=gh_runner, dry_run=dry_run,
+            dry_run=dry_run,
         )
 
-    def _reconciliation_phase(config, db, runtime, *, board_snapshot, timings_ms,
-                               board_info_resolver, board_mutator, gh_runner):
+    def _reconciliation_phase(config, db, runtime, *, board_snapshot, timings_ms):
         return run_reconciliation_phase(
             config, db, runtime, deps=phase_deps,
             board_snapshot=board_snapshot, timings_ms=timings_ms,
-            board_info_resolver=board_info_resolver, board_mutator=board_mutator,
-            gh_runner=gh_runner,
         )
 
-    def _review_queue_phase(config, db, runtime, *, board_snapshot, timings_ms,
-                             gh_runner, dry_run):
+    def _review_queue_phase(config, db, runtime, *, board_snapshot, timings_ms, dry_run):
         return run_review_queue_phase(
             config, db, runtime, deps=phase_deps,
             board_snapshot=board_snapshot, timings_ms=timings_ms,
-            gh_runner=gh_runner, dry_run=dry_run,
+            dry_run=dry_run,
         )
 
-    def _admission_phase(config, db, runtime, *, board_snapshot, timings_ms,
-                          gh_runner, dry_run):
+    def _admission_phase(config, db, runtime, *, board_snapshot, timings_ms, dry_run):
         return run_admission_phase(
             config, db, runtime, deps=phase_deps,
             board_snapshot=board_snapshot, timings_ms=timings_ms,
-            gh_runner=gh_runner, dry_run=dry_run,
+            dry_run=dry_run,
         )
 
     prepare_phases_deps = deps.prepare_cycle_phases_deps_factory(
@@ -463,11 +429,6 @@ def prepare_cycle(
         runtime=runtime,
         deps=prepare_phases_deps,
         dry_run=dry_run,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
     )
 
     board_snapshot = result.board_snapshot

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable
 
 from startupai_controller.domain.models import LinkedIssue
+from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     parse_issue_ref,
@@ -17,10 +17,7 @@ def resolve_issues_from_event(
     event_path: str,
     config,
     *,
-    pr_port=None,
-    gh_runner: Callable[..., str] | None = None,
-    query_closing_issues_fn: Callable[..., tuple] | None = None,
-    query_failed_check_runs_fn: Callable[..., list[str]] | None = None,
+    pr_port: PullRequestPort,
 ) -> list[tuple[str, str, list[str] | None]]:
     """Parse GITHUB_EVENT_PATH -> list of (issue_ref, event_kind, failed_checks).
 
@@ -54,8 +51,6 @@ def resolve_issues_from_event(
         linked = _resolve_linked_issues(
             owner, repo, pr_number, config,
             pr_port=pr_port,
-            gh_runner=gh_runner,
-            query_closing_issues_fn=query_closing_issues_fn,
         )
 
         if action in ("opened", "reopened", "synchronize"):
@@ -89,8 +84,6 @@ def resolve_issues_from_event(
         linked = _resolve_linked_issues(
             owner, repo, pr_number, config,
             pr_port=pr_port,
-            gh_runner=gh_runner,
-            query_closing_issues_fn=query_closing_issues_fn,
         )
 
         if review_state == "changes_requested":
@@ -122,8 +115,6 @@ def resolve_issues_from_event(
             linked = _resolve_linked_issues(
                 owner, repo, pr_number, config,
                 pr_port=pr_port,
-                gh_runner=gh_runner,
-                query_closing_issues_fn=query_closing_issues_fn,
             )
 
             if conclusion == "failure":
@@ -136,14 +127,8 @@ def resolve_issues_from_event(
             # For failure events, query the actual failed check run names
             failed_names: list[str] | None = None
             if event_kind == "checks_failed" and head_sha:
-                if query_failed_check_runs_fn is not None:
-                    failed_names = query_failed_check_runs_fn(
-                        owner,
-                        repo,
-                        head_sha,
-                        pr_port=pr_port,
-                        gh_runner=gh_runner,
-                    )
+                failed = pr_port.failed_check_runs(f"{owner}/{repo}", head_sha)
+                failed_names = list(failed) if failed is not None else None
 
             for issue in linked:
                 results.append((issue.ref, event_kind, failed_names))
@@ -156,22 +141,13 @@ def resolve_pr_to_issues(
     pr_number: int,
     config,
     *,
-    pr_port=None,
-    gh_runner: Callable[..., str] | None = None,
-    query_closing_issues_fn: Callable[..., tuple] | None = None,
+    pr_port: PullRequestPort,
 ) -> list[str]:
     """Resolve PR -> linked issue refs using closingIssuesReferences."""
     if "/" not in pr_repo:
         raise ConfigError(f"pr_repo must be 'owner/repo', got '{pr_repo}'.")
-    owner, repo = pr_repo.split("/", maxsplit=1)
-    if pr_port is not None:
-        return list(pr_port.linked_issue_refs(pr_repo, pr_number))
-    if query_closing_issues_fn is None:
-        raise ConfigError("query_closing_issues_fn is required when pr_port is None")
-    linked = query_closing_issues_fn(
-        owner, repo, pr_number, config, gh_runner=gh_runner
-    )
-    return [issue.ref for issue in linked]
+    del config
+    return list(pr_port.linked_issue_refs(pr_repo, pr_number))
 
 
 # ---------------------------------------------------------------------------
@@ -185,23 +161,16 @@ def _resolve_linked_issues(
     pr_number: int,
     config,
     *,
-    pr_port=None,
-    gh_runner: Callable[..., str] | None = None,
-    query_closing_issues_fn: Callable[..., tuple] | None = None,
+    pr_port: PullRequestPort,
 ) -> tuple:
     """Resolve linked issues via port or fallback query function."""
-    if pr_port is not None:
-        return tuple(
-            LinkedIssue(
-                owner=owner,
-                repo=repo,
-                number=parse_issue_ref(issue_ref).number,
-                ref=issue_ref,
-            )
-            for issue_ref in pr_port.linked_issue_refs(f"{owner}/{repo}", pr_number)
+    del config
+    return tuple(
+        LinkedIssue(
+            owner=owner,
+            repo=repo,
+            number=parse_issue_ref(issue_ref).number,
+            ref=issue_ref,
         )
-    if query_closing_issues_fn is not None:
-        return query_closing_issues_fn(
-            owner, repo, pr_number, config, gh_runner=gh_runner
-        )
-    return ()
+        for issue_ref in pr_port.linked_issue_refs(f"{owner}/{repo}", pr_number)
+    )

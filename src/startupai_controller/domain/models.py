@@ -367,6 +367,7 @@ class OpenPullRequest:
     is_draft: bool
     body: str = ""
     author: str = ""
+    state: str = ""
 
 
 @dataclass(frozen=True)

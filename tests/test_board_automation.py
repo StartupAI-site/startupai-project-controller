@@ -133,6 +133,7 @@ def _automation_config() -> automation.BoardAutomationConfig:
 def _fake_pr_port(**overrides):
     defaults = {
         "list_open_prs": lambda repo: [],
+        "list_open_prs_for_issue": lambda repo, issue_number: [],
         "get_pull_request": lambda repo, number: None,
         "linked_issue_refs": lambda pr_repo, pr_number: (),
         "has_copilot_review_signal": lambda pr_repo, pr_number: False,
@@ -152,6 +153,7 @@ def _fake_pr_port(**overrides):
         "enable_automerge": lambda pr_repo, pr_number, delete_branch=False: "confirmed",
         "rerun_failed_check": lambda pr_repo, check_name, run_id: True,
         "update_branch": lambda pr_repo, pr_number: None,
+        "pull_request_updated_at": lambda pr_repo, pr_number: None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -165,6 +167,10 @@ def _fake_review_state_port(
     search_results: dict[tuple[str, str], tuple[int, ...]] | None = None,
     comment_bodies_by_issue: dict[tuple[str, int], tuple[str, ...]] | None = None,
     latest_comment_timestamps: dict[tuple[str, int], datetime | None] | None = None,
+    latest_non_automation_timestamps: dict[tuple[str, int], datetime | None] | None = None,
+    assignees_by_issue: dict[tuple[str, int], tuple[str, ...]] | None = None,
+    comment_exists_by_issue: dict[tuple[str, int, str], bool] | None = None,
+    updated_at_by_issue: dict[tuple[str, int], datetime | None] | None = None,
 ):
     statuses = status_by_issue or {}
     snapshots = snapshots_by_status or {}
@@ -172,12 +178,31 @@ def _fake_review_state_port(
     searches = search_results or {}
     comment_bodies = comment_bodies_by_issue or {}
     latest_timestamps = latest_comment_timestamps or {}
+    latest_non_automation = latest_non_automation_timestamps or {}
+    assignees = assignees_by_issue or {}
+    existing_comments = comment_exists_by_issue or {}
+    updated_timestamps = updated_at_by_issue or {}
 
     def _field(issue_ref: str, name: str, default: str) -> str:
         return getattr(fields.get(issue_ref, SimpleNamespace()), name, default)
 
     return SimpleNamespace(
         get_issue_status=lambda issue_ref: statuses.get(issue_ref),
+        project_field_value=lambda issue_ref, field_name: getattr(
+            fields.get(issue_ref, SimpleNamespace()),
+            field_name.lower(),
+            getattr(fields.get(issue_ref, SimpleNamespace()), field_name, ""),
+        ),
+        issue_assignees=lambda repo, issue_number: tuple(
+            assignees.get((repo, issue_number), ())
+        ),
+        comment_exists=lambda repo, issue_number, marker: existing_comments.get(
+            (repo, issue_number, marker),
+            False,
+        ),
+        issue_updated_at=lambda repo, issue_number: updated_timestamps.get(
+            (repo, issue_number)
+        ),
         list_issues_by_status=lambda status: list(snapshots.get(status, [])),
         get_issue_fields=lambda issue_ref: SimpleNamespace(
             issue_ref=issue_ref,
@@ -198,6 +223,9 @@ def _fake_review_state_port(
         latest_matching_comment_timestamp=lambda repo, issue_number, markers: latest_timestamps.get(
             (repo, issue_number)
         ),
+        latest_non_automation_comment_timestamp=lambda repo, issue_number: latest_non_automation.get(
+            (repo, issue_number)
+        ),
     )
 
 
@@ -208,9 +236,42 @@ def _fake_board_port(calls: list[tuple[str, str]] | None = None):
         set_issue_field=lambda issue_ref, field_name, value: bucket.append(
             (issue_ref, f"{field_name}={value}")
         ),
+        set_project_single_select=lambda project_id, item_id, field_name, option_name: bucket.append(
+            (f"{project_id}:{item_id}", f"{field_name}={option_name}")
+        ),
+        set_project_text_field=lambda project_id, item_id, field_name, value: bucket.append(
+            (f"{project_id}:{item_id}", f"{field_name}={value}")
+        ),
+        set_issue_assignees=lambda repo, issue_number, assignees: bucket.append(
+            (f"{repo}#{issue_number}", f"assignees={tuple(assignees)}")
+        ),
         post_issue_comment=lambda repo, issue_number, body: bucket.append(
             (f"{repo}#{issue_number}", body)
         ),
+        close_issue=lambda repo, issue_number: bucket.append((f"{repo}#{issue_number}", "close")),
+    )
+
+
+def _fake_issue_context_port(
+    bodies_by_issue: dict[tuple[str, str, int], str] | None = None,
+):
+    bodies = bodies_by_issue or {}
+    return SimpleNamespace(
+        get_issue_context=lambda owner, repo, number: SimpleNamespace(
+            title="",
+            body=bodies.get((owner, repo, number), ""),
+            labels=(),
+            updated_at="",
+        )
+    )
+
+
+def _fake_github_memo():
+    return SimpleNamespace(
+        issue_bodies={},
+        open_pull_requests={},
+        issue_comment_bodies={},
+        dependency_ready={},
     )
 
 
@@ -814,7 +875,7 @@ def test_reconcile_escalates_after_retry(tmp_path: Path) -> None:
     """Still no ACK after retry -> Status=Blocked + reason."""
     config = _load(tmp_path)
     now = datetime.now(timezone.utc)
-    blocked: list[str] = []
+    board_calls: list[tuple[str, str]] = []
     review_state_port = _fake_review_state_port(
         status_by_issue={"crew#84": "Backlog"},
         search_results={
@@ -829,22 +890,20 @@ def test_reconcile_escalates_after_retry(tmp_path: Path) -> None:
             ("StartupAI-site/startupai-crew", 84): now - timedelta(minutes=31)
         },
     )
-    with patch.object(
-        automation,
-        "_set_blocked_with_reason",
-        lambda issue_ref, *_a, **_k: blocked.append(issue_ref),
-    ):
-        counts = reconcile_handoffs(
-            config,
-            "StartupAI-site",
-            1,
-            ack_timeout_minutes=30,
-            max_retries=0,
-            review_state_port=review_state_port,
-            board_port=_fake_board_port(),
-        )
+    counts = reconcile_handoffs(
+        config,
+        "StartupAI-site",
+        1,
+        ack_timeout_minutes=30,
+        max_retries=0,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+    )
     assert counts["escalated"] == 1
-    assert blocked == ["crew#84"]
+    assert board_calls == [
+        ("crew#84", "Blocked"),
+        ("crew#84", "Blocked Reason=handoff-timeout:retries-exhausted"),
+    ]
 
 
 def test_reconcile_idempotent_on_escalated(tmp_path: Path) -> None:
@@ -1044,40 +1103,25 @@ def test_admit_backlog_items_promotes_governed_backlog(
     ]
     field_calls: list[tuple[str, str, str, str]] = []
     text_calls: list[tuple[str, str, str, str]] = []
-
-    monkeypatch.setattr(
-        automation,
-        "_list_project_items",
-        lambda *_args, **_kwargs: items,
-    )
-    monkeypatch.setattr(
-        automation,
-        "query_open_pull_requests",
-        lambda *_args, **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        automation,
-        "list_issue_comment_bodies",
-        lambda *_args, **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        automation,
-        "evaluate_ready_promotion",
-        lambda **_kwargs: (0, ""),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_set_single_select_field",
-        lambda project_id, item_id, field_name, option_name, **_kwargs: field_calls.append(
+    board_port = SimpleNamespace(
+        set_project_single_select=lambda project_id, item_id, field_name, option_name: field_calls.append(
             (project_id, item_id, field_name, option_name)
         ),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_set_text_field",
-        lambda project_id, item_id, field_name, value, **_kwargs: text_calls.append(
+        set_project_text_field=lambda project_id, item_id, field_name, value: text_calls.append(
             (project_id, item_id, field_name, value)
         ),
+        set_issue_status=lambda issue_ref, status: None,
+        set_issue_field=lambda issue_ref, field_name, value: None,
+        post_issue_comment=lambda repo, issue_number, body: None,
+        close_issue=lambda repo, issue_number: None,
+        set_issue_assignees=lambda repo, issue_number, assignees: None,
+    )
+    github_bundle = SimpleNamespace(
+        review_state=_fake_review_state_port(),
+        pull_requests=_fake_pr_port(list_open_prs=lambda repo: []),
+        board_mutations=board_port,
+        issue_context=_fake_issue_context_port(),
+        github_memo=_fake_github_memo(),
     )
 
     decision = automation.admit_backlog_items(
@@ -1086,6 +1130,8 @@ def test_admit_backlog_items_promotes_governed_backlog(
         "StartupAI-site",
         1,
         dispatchable_repo_prefixes=("crew",),
+        board_snapshot=SimpleNamespace(items=tuple(items)),
+        github_bundle=github_bundle,
     )
 
     assert decision.admitted == ("crew#19", "crew#27")
@@ -1121,20 +1167,12 @@ def test_admit_backlog_items_skips_missing_acceptance_criteria(
         ),
     ]
 
-    monkeypatch.setattr(
-        automation,
-        "_list_project_items",
-        lambda *_args, **_kwargs: items,
-    )
-    monkeypatch.setattr(
-        automation,
-        "query_open_pull_requests",
-        lambda *_args, **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        automation,
-        "list_issue_comment_bodies",
-        lambda *_args, **_kwargs: [],
+    github_bundle = SimpleNamespace(
+        review_state=_fake_review_state_port(),
+        pull_requests=_fake_pr_port(list_open_prs=lambda repo: []),
+        board_mutations=_fake_board_port([]),
+        issue_context=_fake_issue_context_port(),
+        github_memo=_fake_github_memo(),
     )
 
     decision = automation.admit_backlog_items(
@@ -1144,6 +1182,8 @@ def test_admit_backlog_items_skips_missing_acceptance_criteria(
         1,
         dispatchable_repo_prefixes=("crew",),
         dry_run=True,
+        board_snapshot=SimpleNamespace(items=tuple(items)),
+        github_bundle=github_bundle,
     )
 
     assert decision.admitted == ()
@@ -1179,41 +1219,44 @@ def test_admit_backlog_items_closes_prior_resolved_issue(
     marked: list[str] = []
     closed: list[tuple[str, str, int]] = []
 
-    monkeypatch.setattr(automation, "_list_project_items", lambda *_args, **_kwargs: items)
-    monkeypatch.setattr(automation, "query_open_pull_requests", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        automation,
-        "list_issue_comment_bodies",
-        lambda *_args, **_kwargs: [
-            "\n".join(
-                [
-                    "<!-- startupai-board-bot:consumer-resolution:crew#19 -->",
-                    "```json",
-                    json.dumps(
-                        {
-                            "issue_ref": "crew#19",
-                            "session_id": "abc123",
-                            "resolution_kind": "already_on_main",
-                            "summary": "Already implemented on main.",
-                            "verification_class": "strong",
-                            "final_action": "closed_as_already_resolved",
-                            "evidence": {"pr_urls": ["https://github.com/O/R/pull/1"]},
-                        }
+    board_port = SimpleNamespace(
+        set_project_single_select=lambda *args, **kwargs: None,
+        set_project_text_field=lambda *args, **kwargs: None,
+        set_issue_status=lambda issue_ref, status: marked.append(issue_ref) if status == "Done" else None,
+        set_issue_field=lambda issue_ref, field_name, value: None,
+        post_issue_comment=lambda repo, issue_number, body: None,
+        close_issue=lambda repo, issue_number: closed.append(tuple(repo.split("/", 1)) + (issue_number,)),
+        set_issue_assignees=lambda repo, issue_number, assignees: None,
+    )
+    github_bundle = SimpleNamespace(
+        review_state=_fake_review_state_port(
+            comment_bodies_by_issue={
+                ("StartupAI-site/startupai-crew", 19): (
+                    "\n".join(
+                        [
+                            "<!-- startupai-board-bot:consumer-resolution:crew#19 -->",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "issue_ref": "crew#19",
+                                    "session_id": "abc123",
+                                    "resolution_kind": "already_on_main",
+                                    "summary": "Already implemented on main.",
+                                    "verification_class": "strong",
+                                    "final_action": "closed_as_already_resolved",
+                                    "evidence": {"pr_urls": ["https://github.com/O/R/pull/1"]},
+                                }
+                            ),
+                            "```",
+                        ]
                     ),
-                    "```",
-                ]
-            )
-        ],
-    )
-    monkeypatch.setattr(
-        automation,
-        "mark_issues_done",
-        lambda issues, *_args, **_kwargs: marked.extend(issue.ref for issue in issues) or marked,
-    )
-    monkeypatch.setattr(
-        automation,
-        "close_issue",
-        lambda owner, repo, number, **_kwargs: closed.append((owner, repo, number)),
+                )
+            }
+        ),
+        pull_requests=_fake_pr_port(list_open_prs=lambda repo: []),
+        board_mutations=board_port,
+        issue_context=_fake_issue_context_port(),
+        github_memo=_fake_github_memo(),
     )
 
     decision = automation.admit_backlog_items(
@@ -1222,6 +1265,8 @@ def test_admit_backlog_items_closes_prior_resolved_issue(
         "StartupAI-site",
         1,
         dispatchable_repo_prefixes=("crew",),
+        board_snapshot=SimpleNamespace(items=tuple(items)),
+        github_bundle=github_bundle,
     )
 
     assert decision.resolved == ("crew#19",)
@@ -1259,57 +1304,51 @@ def test_admit_backlog_items_blocks_prior_ambiguous_resolution_issue(
     blocked: list[tuple[str, str]] = []
     handoffs: list[str] = []
 
-    monkeypatch.setattr(automation, "_list_project_items", lambda *_args, **_kwargs: items)
-    monkeypatch.setattr(automation, "query_open_pull_requests", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        automation,
-        "list_issue_comment_bodies",
-        lambda *_args, **_kwargs: [
-            "\n".join(
-                [
-                    "<!-- startupai-board-bot:consumer-resolution:crew#27 -->",
-                    "```json",
-                    json.dumps(
-                        {
-                            "issue_ref": "crew#27",
-                            "session_id": "abc123",
-                            "resolution_kind": "duplicate",
-                            "summary": "Looks duplicated.",
-                            "verification_class": "weak",
-                            "final_action": "blocked_for_resolution_review",
-                            "evidence": {},
-                        }
+    board_port = SimpleNamespace(
+        set_project_single_select=lambda *args, **kwargs: None,
+        set_project_text_field=lambda *args, **kwargs: None,
+        set_issue_status=lambda issue_ref, status: None,
+        set_issue_field=lambda issue_ref, field_name, value: (
+            blocked.append((issue_ref, value))
+            if field_name == "Blocked Reason"
+            else handoffs.append(value)
+            if field_name == "Handoff To"
+            else None
+        ),
+        post_issue_comment=lambda repo, issue_number, body: None,
+        close_issue=lambda repo, issue_number: None,
+        set_issue_assignees=lambda repo, issue_number, assignees: None,
+    )
+    github_bundle = SimpleNamespace(
+        review_state=_fake_review_state_port(
+            status_by_issue={"crew#27": "Backlog"},
+            comment_bodies_by_issue={
+                ("StartupAI-site/startupai-crew", 27): (
+                    "\n".join(
+                        [
+                            "<!-- startupai-board-bot:consumer-resolution:crew#27 -->",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "issue_ref": "crew#27",
+                                    "session_id": "abc123",
+                                    "resolution_kind": "duplicate",
+                                    "summary": "Looks duplicated.",
+                                    "verification_class": "weak",
+                                    "final_action": "blocked_for_resolution_review",
+                                    "evidence": {},
+                                }
+                            ),
+                            "```",
+                        ]
                     ),
-                    "```",
-                ]
-            )
-        ],
-    )
-    monkeypatch.setattr(
-        automation,
-        "_set_blocked_with_reason",
-        lambda issue_ref, reason, *_args, **_kwargs: blocked.append((issue_ref, reason)),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_default_board_mutation_port",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            set_issue_status=lambda issue_ref, status: None,
-            set_issue_field=lambda issue_ref, field_name, value: (
-                handoffs.append(value)
-                if field_name == "Handoff To"
-                else None
-            ),
-            post_issue_comment=lambda repo, issue_number, body: None,
-            close_issue=lambda repo, issue_number: None,
+                )
+            },
         ),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_default_review_state_port",
-        lambda *_args, **_kwargs: _fake_review_state_port(
-            status_by_issue={"crew#27": "Backlog"}
-        ),
+        pull_requests=_fake_pr_port(list_open_prs=lambda repo: []),
+        board_mutations=board_port,
+        issue_context=_fake_issue_context_port(),
+        github_memo=_fake_github_memo(),
     )
 
     decision = automation.admit_backlog_items(
@@ -1318,6 +1357,8 @@ def test_admit_backlog_items_blocks_prior_ambiguous_resolution_issue(
         "StartupAI-site",
         1,
         dispatchable_repo_prefixes=("crew",),
+        board_snapshot=SimpleNamespace(items=tuple(items)),
+        github_bundle=github_bundle,
     )
 
     assert decision.blocked == ("crew#27",)
@@ -1366,26 +1407,14 @@ def test_admit_backlog_items_fast_path_skips_deep_reads_when_ready_floor_met(
             issue_number=11,
         ),
     ]
-    monkeypatch.setattr(automation, "_list_project_items", lambda *_args, **_kwargs: items)
-    monkeypatch.setattr(
-        automation,
-        "query_open_pull_requests",
-        lambda *_args, **_kwargs: pytest.fail("should not list PRs when admission is full"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "list_issue_comment_bodies",
-        lambda *_args, **_kwargs: pytest.fail("should not fetch comments when admission is full"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "memoized_query_issue_body",
-        lambda *_args, **_kwargs: pytest.fail("should not fetch bodies when admission is full"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "evaluate_ready_promotion",
-        lambda *_args, **_kwargs: pytest.fail("should not validate dependencies when admission is full"),
+    github_bundle = SimpleNamespace(
+        review_state=_fake_review_state_port(),
+        pull_requests=_fake_pr_port(
+            list_open_prs=lambda repo: pytest.fail("should not list PRs when admission is full")
+        ),
+        board_mutations=_fake_board_port([]),
+        issue_context=_fake_issue_context_port(),
+        github_memo=_fake_github_memo(),
     )
 
     decision = automation.admit_backlog_items(
@@ -1394,6 +1423,8 @@ def test_admit_backlog_items_fast_path_skips_deep_reads_when_ready_floor_met(
         "StartupAI-site",
         1,
         dispatchable_repo_prefixes=("crew",),
+        board_snapshot=SimpleNamespace(items=tuple(items)),
+        github_bundle=github_bundle,
     )
 
     assert decision.needed == 0
@@ -1807,44 +1838,51 @@ def test_claim_ready_rejects_dependency_unmet(tmp_path: Path) -> None:
 def test_audit_in_progress_escalates_stale_without_pr(tmp_path: Path) -> None:
     """Stale In Progress with no PR field should escalate via comment."""
     config = _load(tmp_path)
-    snapshot = automation._ProjectItemSnapshot(
-        issue_ref="StartupAI-site/startupai-crew#88",
-        status="In Progress",
-        executor="codex",
-        handoff_to="none",
-    )
+    board_calls: list[tuple[str, str]] = []
+    review_state_port = _fake_review_state_port(
+        snapshots_by_status={
+            "In Progress": [
+                SimpleNamespace(
+                    issue_ref="crew#88",
+                    status="In Progress",
+                    executor="codex",
+                    handoff_to="none",
+                    priority="P1",
+                    title="Issue 88",
+                    item_id="item-88",
+                    project_id="proj-1",
+                )
+            ]
+        },
+        status_by_issue={"crew#88": "In Progress"},
+        updated_at_by_issue={
+            ("StartupAI-site/startupai-crew", 88): automation.datetime(
+                2000, 1, 1, tzinfo=automation.timezone.utc
+            )
+        },
+        comment_exists_by_issue={
+                (
+                    "StartupAI-site/startupai-crew",
+                    88,
+                    _marker_for("stale-in-progress", "crew#88"),
+                ): False
+            },
+        )
 
-    with patch.object(automation, "_set_single_select_field") as handoff_set:
-        with patch.object(
-            automation,
-            "_list_project_items_by_status",
-            return_value=[snapshot],
-        ):
-            with patch.object(
-                automation,
-                "_query_project_item_field",
-                return_value="n/a",
-            ):
-                with patch.object(
-                    automation,
-                    "_query_issue_updated_at",
-                    return_value=automation.datetime(2000, 1, 1, tzinfo=automation.timezone.utc),
-                ):
-                    with patch.object(automation, "_comment_exists", return_value=False):
-                        poster = MagicMock()
-                        result = audit_in_progress(
-                            config,
-                            "StartupAI-site",
-                            1,
-                            all_prefixes=True,
-                            max_age_hours=24,
-                            board_info_resolver=lambda *_: _make_info("In Progress"),
-                            comment_checker=automation._comment_exists,
-                            comment_poster=poster,
-                        )
+    result = audit_in_progress(
+        config,
+        "StartupAI-site",
+        1,
+        all_prefixes=True,
+        max_age_hours=24,
+        review_state_port=review_state_port,
+        board_port=_fake_board_port(board_calls),
+        pr_port=_fake_pr_port(),
+    )
     assert result == ["crew#88"]
-    handoff_set.assert_called_once()
-    poster.assert_called_once()
+    assert board_calls[0] == ("crew#88", "Handoff To=claude")
+    assert board_calls[1][0] == "StartupAI-site/startupai-crew#88"
+    assert "Stale `In Progress`" in board_calls[1][1]
 
 
 def test_audit_in_progress_uses_ports_for_handoff_and_comment(
@@ -1868,14 +1906,19 @@ def test_audit_in_progress_uses_ports_for_handoff_and_comment(
             ]
         },
         status_by_issue={"crew#88": "In Progress"},
+        updated_at_by_issue={
+            ("StartupAI-site/startupai-crew", 88): automation.datetime(
+                2000, 1, 1, tzinfo=automation.timezone.utc
+            )
+        },
+        comment_exists_by_issue={
+            (
+                "StartupAI-site/startupai-crew",
+                88,
+                _marker_for("stale-in-progress", "crew#88"),
+            ): False
+        },
     )
-    monkeypatch.setattr(automation, "_query_project_item_field", lambda *a, **k: "n/a")
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_updated_at",
-        lambda *a, **k: automation.datetime(2000, 1, 1, tzinfo=automation.timezone.utc),
-    )
-    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
 
     result = audit_in_progress(
         config,
@@ -1885,6 +1928,7 @@ def test_audit_in_progress_uses_ports_for_handoff_and_comment(
         max_age_hours=24,
         review_state_port=review_state_port,
         board_port=_fake_board_port(board_calls),
+        pr_port=_fake_pr_port(),
     )
 
     assert result == ["crew#88"]
@@ -2814,28 +2858,27 @@ def test_codex_review_gate_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     """Pass verdict in Review returns exit 0."""
     config = _load(tmp_path)
     policy = _automation_config()
-    monkeypatch.setattr(
-        automation,
-        "query_closing_issues",
-        lambda *a, **k: [LinkedIssue("StartupAI-site", "app.startupai-site", 110, "app#110")],
+    pr_port = _fake_pr_port(
+        linked_issue_refs=lambda pr_repo, pr_number: ("app#110",),
+        review_snapshots=lambda refs, trusted_codex_actors: {
+            ("StartupAI-site/app.startupai-site", 158): replace(
+                _make_review_snapshot(
+                    pr_repo="StartupAI-site/app.startupai-site",
+                    pr_number=158,
+                    review_refs=("app#110",),
+                ),
+                codex_verdict=CodexReviewVerdict(
+                    decision="pass",
+                    route="none",
+                    source="comment",
+                    timestamp="2026-03-05T11:00:00Z",
+                    actor="codex-bot",
+                    checklist=[],
+                ),
+            )
+        },
     )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("Review"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "query_latest_codex_verdict",
-        lambda *a, **k: CodexReviewVerdict(
-            decision="pass",
-            route="none",
-            source="comment",
-            timestamp="2026-03-05T11:00:00Z",
-            actor="codex-bot",
-            checklist=[],
-        ),
-    )
+    review_state_port = _fake_review_state_port(status_by_issue={"app#110": "Review"})
     code, msg = codex_review_gate(
         "StartupAI-site/app.startupai-site",
         158,
@@ -2843,6 +2886,8 @@ def test_codex_review_gate_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         policy,
         "StartupAI-site",
         1,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
     )
     assert code == 0
     assert "codex-review=pass" in msg
@@ -2852,28 +2897,27 @@ def test_codex_review_gate_fail_routes_back(tmp_path: Path, monkeypatch: pytest.
     """Fail verdict routes issue back via _apply_codex_fail_routing."""
     config = _load(tmp_path)
     policy = _automation_config()
-    monkeypatch.setattr(
-        automation,
-        "query_closing_issues",
-        lambda *a, **k: [LinkedIssue("StartupAI-site", "app.startupai-site", 110, "app#110")],
+    pr_port = _fake_pr_port(
+        linked_issue_refs=lambda pr_repo, pr_number: ("app#110",),
+        review_snapshots=lambda refs, trusted_codex_actors: {
+            ("StartupAI-site/app.startupai-site", 158): replace(
+                _make_review_snapshot(
+                    pr_repo="StartupAI-site/app.startupai-site",
+                    pr_number=158,
+                    review_refs=("app#110",),
+                ),
+                codex_verdict=CodexReviewVerdict(
+                    decision="fail",
+                    route="codex",
+                    source="review",
+                    timestamp="2026-03-05T11:00:00Z",
+                    actor="codex-bot",
+                    checklist=["Fix failing tests"],
+                ),
+            )
+        },
     )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_board_info",
-        lambda *a, **k: _make_info("Review"),
-    )
-    monkeypatch.setattr(
-        automation,
-        "query_latest_codex_verdict",
-        lambda *a, **k: CodexReviewVerdict(
-            decision="fail",
-            route="codex",
-            source="review",
-            timestamp="2026-03-05T11:00:00Z",
-            actor="codex-bot",
-            checklist=["Fix failing tests"],
-        ),
-    )
+    review_state_port = _fake_review_state_port(status_by_issue={"app#110": "Review"})
     routed: list[str] = []
     monkeypatch.setattr(
         automation,
@@ -2887,6 +2931,8 @@ def test_codex_review_gate_fail_routes_back(tmp_path: Path, monkeypatch: pytest.
         policy,
         "StartupAI-site",
         1,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
     )
     assert code == 2
     assert "codex-review=fail" in msg
@@ -3711,17 +3757,16 @@ def test_enforce_execution_policy_skips_non_copilot_actor(
 ) -> None:
     """Execution policy should no-op when PR actor is not Copilot coding agent."""
     config = _load(tmp_path)
-
-    def fake_gh(args):
-        if args[:3] == ["pr", "view", "42"]:
-            return json.dumps(
-                {
-                    "author": {"login": "chris00walker"},
-                    "state": "OPEN",
-                    "url": "https://github.com/StartupAI-site/startupai-crew/pull/42",
-                }
-            )
-        raise AssertionError(f"Unexpected gh call: {args}")
+    pr_port = _fake_pr_port(
+        get_pull_request=lambda repo, number: OpenPullRequest(
+            number=number,
+            url=f"https://github.com/{repo}/pull/{number}",
+            head_ref_name="feature/test",
+            is_draft=False,
+            author="chris00walker",
+            state="OPEN",
+        )
+    )
 
     decision = automation.enforce_execution_policy(
         pr_repo="StartupAI-site/startupai-crew",
@@ -3729,7 +3774,9 @@ def test_enforce_execution_policy_skips_non_copilot_actor(
         config=config,
         project_owner="StartupAI-site",
         project_number=1,
-        gh_runner=fake_gh,
+        pr_port=pr_port,
+        review_state_port=_fake_review_state_port(),
+        board_port=_fake_board_port(),
     )
     assert decision.skipped_reason == "actor=chris00walker"
     assert decision.enforced_pr is False
@@ -3741,58 +3788,29 @@ def test_enforce_execution_policy_closes_copilot_pr_and_requeues(
 ) -> None:
     """Copilot coding-agent PR should be closed and linked issue re-queued."""
     config = _load(tmp_path)
-
-    gh_calls: list[list[str]] = []
-
-    def fake_gh(args):
-        gh_calls.append(args)
-        if args[:3] == ["pr", "view", "119"]:
-            return json.dumps(
-                {
-                    "author": {"login": "app/copilot-swe-agent"},
-                    "state": "OPEN",
-                    "url": "https://github.com/StartupAI-site/startupai-crew/pull/119",
-                }
-            )
-        if args[:3] == ["pr", "close", "119"]:
-            return ""
-        raise AssertionError(f"Unexpected gh call: {args}")
-
-    monkeypatch.setattr(
-        automation,
-        "query_closing_issues",
-        lambda *a, **k: [
-            LinkedIssue(
-                owner="StartupAI-site",
-                repo="startupai-crew",
-                number=18,
-                ref="crew#18",
-            )
-        ],
+    closed: list[tuple[str, int, str | None]] = []
+    board_calls: list[tuple[str, str]] = []
+    pr_port = _fake_pr_port(
+        get_pull_request=lambda repo, number: OpenPullRequest(
+            number=number,
+            url=f"https://github.com/{repo}/pull/{number}",
+            head_ref_name="feature/test",
+            is_draft=False,
+            author="app/copilot-swe-agent",
+            state="OPEN",
+        ),
+        linked_issue_refs=lambda pr_repo, pr_number: ("crew#18",),
+        close_pull_request=lambda pr_repo, pr_number, comment=None: closed.append(
+            (pr_repo, pr_number, comment)
+        ),
     )
-    monkeypatch.setattr(
-        automation,
-        "_set_status_if_changed",
-        lambda *a, **k: (True, "In Progress"),
+    review_state_port = _fake_review_state_port(
+        status_by_issue={"crew#18": "In Progress"},
+        assignees_by_issue={
+            ("StartupAI-site/startupai-crew", 18): ("chris00walker", "Copilot")
+        },
     )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_assignees",
-        lambda *a, **k: ["chris00walker", "Copilot"],
-    )
-    updated_assignees: list[list[str]] = []
-    monkeypatch.setattr(
-        automation,
-        "_set_issue_assignees",
-        lambda _o, _r, _n, assignees, **_k: updated_assignees.append(assignees),
-    )
-    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
-    posted: list[str] = []
-    monkeypatch.setattr(
-        automation,
-        "_post_comment",
-        lambda _o, _r, _n, body, **_k: posted.append(body),
-    )
+    board_port = _fake_board_port(board_calls)
 
     decision = automation.enforce_execution_policy(
         pr_repo="StartupAI-site/startupai-crew",
@@ -3800,16 +3818,22 @@ def test_enforce_execution_policy_closes_copilot_pr_and_requeues(
         config=config,
         project_owner="StartupAI-site",
         project_number=1,
-        gh_runner=fake_gh,
+        pr_port=pr_port,
+        review_state_port=review_state_port,
+        board_port=board_port,
     )
 
     assert decision.enforced_pr is True
     assert decision.pr_closed is True
     assert decision.requeued == ["crew#18"]
     assert decision.copilot_unassigned == ["crew#18"]
-    assert updated_assignees == [["chris00walker"]]
-    assert any(args[:3] == ["pr", "close", "119"] for args in gh_calls)
-    assert posted
+    assert ("StartupAI-site/startupai-crew#18", "assignees=('chris00walker',)") in board_calls
+    assert closed and closed[0][0:2] == ("StartupAI-site/startupai-crew", 119)
+    assert any(
+        target == "StartupAI-site/startupai-crew#18"
+        and "Execution policy found a non-local coding PR" in body
+        for target, body in board_calls
+    )
 
 
 def test_rebalance_wip_marks_stale_then_demotes(
@@ -3818,6 +3842,7 @@ def test_rebalance_wip_marks_stale_then_demotes(
     """First stale cycle marks candidate; second eligible cycle demotes."""
     config = _load(tmp_path)
     policy = _automation_config()
+    now = datetime.now(timezone.utc)
     review_state_port = _fake_review_state_port(
         snapshots_by_status={
             "In Progress": [
@@ -3833,22 +3858,12 @@ def test_rebalance_wip_marks_stale_then_demotes(
             ]
         },
         status_by_issue={"crew#88": "In Progress"},
+        latest_non_automation_timestamps={
+            ("StartupAI-site/startupai-crew", 88): now - timedelta(hours=48)
+        },
     )
     monkeypatch.setattr(automation, "in_any_critical_path", lambda *a, **k: False)
-    now = datetime(2026, 3, 5, 12, 0, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(
-        automation,
-        "_query_latest_wip_activity_timestamp",
-        lambda *a, **k: now - timedelta(hours=48),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_project_item_field",
-        lambda *a, **k: "codex" if a[1] == "Executor" else "",
-    )
-    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
     board_calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(automation, "_query_latest_marker_timestamp", lambda *a, **k: None)
 
     decision_1 = automation.rebalance_wip(
         config=config,
@@ -3863,10 +3878,27 @@ def test_rebalance_wip_marks_stale_then_demotes(
     assert "crew#88" in decision_1.marked_stale
 
     marker_time = now - timedelta(minutes=31)
-    monkeypatch.setattr(
-        automation,
-        "_query_latest_marker_timestamp",
-        lambda *a, **k: marker_time,
+    review_state_port_with_marker = _fake_review_state_port(
+        snapshots_by_status={
+            "In Progress": [
+                SimpleNamespace(
+                    issue_ref="crew#88",
+                    status="In Progress",
+                    executor="codex",
+                    priority="P1",
+                    title="Issue 88",
+                    item_id="item-88",
+                    project_id="proj-1",
+                )
+            ]
+        },
+        status_by_issue={"crew#88": "In Progress"},
+        latest_non_automation_timestamps={
+            ("StartupAI-site/startupai-crew", 88): now - timedelta(hours=48)
+        },
+        latest_comment_timestamps={
+            ("StartupAI-site/startupai-crew", 88): marker_time
+        },
     )
     decision_2 = automation.rebalance_wip(
         config=config,
@@ -3875,7 +3907,7 @@ def test_rebalance_wip_marks_stale_then_demotes(
         project_number=1,
         all_prefixes=True,
         dry_run=False,
-        review_state_port=review_state_port,
+        review_state_port=review_state_port_with_marker,
         board_port=_fake_board_port(board_calls),
     )
     assert "crew#88" in decision_2.moved_ready
@@ -3914,20 +3946,12 @@ def test_rebalance_wip_uses_ports_for_ready_demote_and_comment(
             ]
         },
         status_by_issue={"crew#88": "In Progress", "crew#89": "In Progress"},
+        latest_non_automation_timestamps={
+            ("StartupAI-site/startupai-crew", 88): now - automation.timedelta(hours=1),
+            ("StartupAI-site/startupai-crew", 89): now - automation.timedelta(hours=2),
+        },
     )
-    monkeypatch.setattr(automation, "_query_project_item_field", lambda *a, **k: "n/a")
-    monkeypatch.setattr(automation, "_query_open_pr_updated_at", lambda *a, **k: None)
     monkeypatch.setattr(automation, "in_any_critical_path", lambda *a, **k: False)
-    monkeypatch.setattr(
-        automation,
-        "_query_latest_wip_activity_timestamp",
-        lambda ref, *a, **k: (
-            now - automation.timedelta(hours=1)
-            if ref == "crew#88"
-            else now - automation.timedelta(hours=2)
-        ),
-    )
-    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
 
     decision = automation.rebalance_wip(
         config,
@@ -3952,6 +3976,7 @@ def test_rebalance_wip_ignores_issue_updated_at_for_freshness(
     """Issue.updated_at must not keep WIP alive once execution activity is stale."""
     config = _load(tmp_path)
     policy = _automation_config()
+    now = datetime.now(timezone.utc)
     review_state_port = _fake_review_state_port(
         snapshots_by_status={
             "In Progress": [
@@ -3967,27 +3992,15 @@ def test_rebalance_wip_ignores_issue_updated_at_for_freshness(
             ]
         },
         status_by_issue={"crew#88": "In Progress"},
+        latest_non_automation_timestamps={
+            ("StartupAI-site/startupai-crew", 88): now - timedelta(hours=48)
+        },
+        updated_at_by_issue={
+            ("StartupAI-site/startupai-crew", 88): now
+        },
     )
     monkeypatch.setattr(automation, "in_any_critical_path", lambda *a, **k: False)
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(
-        automation,
-        "_query_latest_wip_activity_timestamp",
-        lambda *a, **k: now - timedelta(hours=48),
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_issue_updated_at",
-        lambda *a, **k: now,
-    )
-    monkeypatch.setattr(
-        automation,
-        "_query_project_item_field",
-        lambda *a, **k: "codex" if a[1] == "Executor" else "",
-    )
-    monkeypatch.setattr(automation, "_comment_exists", lambda *a, **k: False)
     board_calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(automation, "_query_latest_marker_timestamp", lambda *a, **k: None)
 
     decision = automation.rebalance_wip(
         config=config,

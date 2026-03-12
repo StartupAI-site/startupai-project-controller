@@ -23,6 +23,36 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 
 
+class _CompatReviewStatePort:
+    """Delegate snapshot reads while overriding status lookup for compatibility."""
+
+    def __init__(
+        self,
+        base: Any,
+        *,
+        config: Any,
+        project_owner: str,
+        project_number: int,
+        status_resolver: Callable[..., str],
+    ) -> None:
+        self._base = base
+        self._config = config
+        self._project_owner = project_owner
+        self._project_number = project_number
+        self._status_resolver = status_resolver
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def get_issue_status(self, issue_ref: str) -> str:
+        return self._status_resolver(
+            issue_ref,
+            self._config,
+            self._project_owner,
+            self._project_number,
+        )
+
+
 def effective_retry_backoff(
     config: Any,
     workflow: Any | None,
@@ -151,6 +181,7 @@ def select_best_candidate(
     executor: str = "codex",
     this_repo_prefix: str | None = None,
     repo_prefixes: tuple[str, ...] = ("crew",),
+    review_state_port: Any | None = None,
     status_resolver: Callable[..., str] | None = None,
     ready_items: tuple[Any, ...] | None = None,
     github_memo: Any | None = None,
@@ -165,6 +196,21 @@ def select_best_candidate(
     ready_snapshot_rank: Callable[[Any, Any], Any],
 ) -> str | None:
     """Select the highest-ranked ready issue for the executor."""
+    if status_resolver is not None:
+        base_review_state_port = review_state_port or build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            github_memo=github_memo,
+            gh_runner=gh_runner,
+        ).review_state
+        review_state_port = _CompatReviewStatePort(
+            base_review_state_port,
+            config=config,
+            project_owner=project_owner,
+            project_number=project_number,
+            status_resolver=status_resolver,
+        )
     return _selection_helpers.select_best_candidate(
         config,
         project_owner,
@@ -172,7 +218,7 @@ def select_best_candidate(
         executor=executor,
         this_repo_prefix=this_repo_prefix,
         repo_prefixes=repo_prefixes,
-        status_resolver=status_resolver,
+        review_state_port=review_state_port,
         ready_items=ready_items,
         github_memo=github_memo,
         gh_runner=gh_runner,
@@ -213,6 +259,7 @@ def select_candidate_for_cycle(
     prepared: Any,
     *,
     target_issue: str | None = None,
+    review_state_port: Any | None = None,
     status_resolver: Callable[..., str] | None = None,
     gh_runner: Callable[..., str] | None = None,
     excluded_issue_refs: set[str] | None = None,
@@ -227,6 +274,7 @@ def select_candidate_for_cycle(
         db,
         prepared,
         target_issue=target_issue,
+        review_state_port=review_state_port,
         status_resolver=status_resolver,
         gh_runner=gh_runner,
         excluded_issue_refs=excluded_issue_refs,
@@ -243,6 +291,7 @@ def select_launch_candidate_for_cycle(
     db: Any,
     prepared: Any,
     target_issue: str | None,
+    review_state_port: Any | None,
     status_resolver: Callable[..., str] | None,
     gh_runner: Callable[..., str] | None,
     cycle_result_factory: Callable[..., Any],
@@ -263,6 +312,7 @@ def select_launch_candidate_for_cycle(
         db=db,
         prepared=prepared,
         target_issue=target_issue,
+        review_state_port=review_state_port,
         status_resolver=status_resolver,
         gh_runner=gh_runner,
         cycle_result_factory=cycle_result_factory,
@@ -288,6 +338,7 @@ def select_best_candidate_from_shell(
     this_repo_prefix: str | None = None,
     repo_prefixes: tuple[str, ...] = ("crew",),
     automation_config: Any | None = None,
+    review_state_port: Any | None = None,
     status_resolver: Callable[..., str] | None = None,
     ready_items: tuple[Any, ...] | None = None,
     github_memo: Any | None = None,
@@ -303,6 +354,7 @@ def select_best_candidate_from_shell(
         executor=executor,
         this_repo_prefix=this_repo_prefix,
         repo_prefixes=repo_prefixes,
+        review_state_port=review_state_port,
         status_resolver=status_resolver,
         ready_items=ready_items,
         github_memo=github_memo,
@@ -324,6 +376,7 @@ def select_candidate_for_cycle_from_shell(
     prepared: Any,
     *,
     target_issue: str | None = None,
+    review_state_port: Any | None = None,
     status_resolver: Callable[..., str] | None = None,
     gh_runner: Callable[..., str] | None = None,
     excluded_issue_refs: set[str] | None = None,
@@ -334,6 +387,7 @@ def select_candidate_for_cycle_from_shell(
         db,
         prepared,
         target_issue=target_issue,
+        review_state_port=review_state_port,
         status_resolver=status_resolver,
         gh_runner=gh_runner,
         excluded_issue_refs=excluded_issue_refs,

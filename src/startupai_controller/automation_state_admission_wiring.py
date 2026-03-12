@@ -8,14 +8,17 @@ A lazy ``_core()`` import avoids circular dependency since
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from startupai_controller.ports.board_mutations import BoardMutationPort as _BoardMutationPort
+    from startupai_controller.ports.issue_context import IssueContextPort as _IssueContextPort
     from startupai_controller.ports.pull_requests import PullRequestPort as _PullRequestPort
     from startupai_controller.ports.review_state import ReviewStatePort as _ReviewStatePort
 else:
     _BoardMutationPort = None
+    _IssueContextPort = None
     _PullRequestPort = None
     _ReviewStatePort = None
 
@@ -409,6 +412,42 @@ def propagate_blocker(
 ) -> list[str]:
     """Propagate blocker info to successors. Returns list of commented refs."""
     core = _core()
+    review_state_port = review_state_port or core._default_review_state_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+    board_port = board_port or core._default_board_mutation_port(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+
+    if comment_checker is not None:
+        review_state_port = SimpleNamespace(
+            comment_exists=lambda repo, issue_number, marker: comment_checker(
+                repo.split("/", 1)[0],
+                repo.split("/", 1)[1],
+                issue_number,
+                marker,
+                gh_runner=gh_runner,
+            ),
+            list_issues_by_status=review_state_port.list_issues_by_status,
+            get_issue_fields=review_state_port.get_issue_fields,
+        )
+    if comment_poster is not None:
+        board_port = SimpleNamespace(
+            post_issue_comment=lambda repo, issue_number, body: comment_poster(
+                repo.split("/", 1)[0],
+                repo.split("/", 1)[1],
+                issue_number,
+                body,
+                gh_runner=gh_runner,
+            )
+        )
+
     return _app_propagate_blocker(
         issue_ref,
         config,
@@ -420,18 +459,6 @@ def propagate_blocker(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        board_info_resolver=board_info_resolver,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        list_project_items_by_status_fn=core._list_project_items_by_status,
-        snapshot_to_issue_ref_fn=core._snapshot_to_issue_ref,
-        query_project_item_field_fn=core._query_project_item_field,
-        comment_exists_fn=core._comment_exists,
-        post_comment_fn=core._post_comment,
-        issue_ref_to_repo_parts_fn=core._issue_ref_to_repo_parts,
     )
 
 
@@ -450,6 +477,17 @@ def reconcile_handoffs(
 ) -> dict[str, int]:
     """Reconcile handoff jobs. Returns {completed, retried, escalated, pending}."""
     core = _core()
+    if review_state_port is None or board_port is None:
+        github_bundle = core._ensure_github_bundle(
+            github_bundle,
+            project_owner=project_owner,
+            project_number=project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
+        review_state_port = review_state_port or github_bundle.review_state
+        board_port = board_port or github_bundle.board_mutations
+
     return _app_reconcile_handoffs(
         config,
         project_owner,
@@ -457,12 +495,8 @@ def reconcile_handoffs(
         ack_timeout_minutes=ack_timeout_minutes,
         max_retries=max_retries,
         dry_run=dry_run,
-        github_bundle=github_bundle,
         review_state_port=review_state_port,
         board_port=board_port,
-        gh_runner=gh_runner,
-        ensure_github_bundle_fn=core._ensure_github_bundle,
-        set_blocked_with_reason_fn=core._set_blocked_with_reason,
     )
 
 
@@ -491,6 +525,43 @@ def route_protected_queue_executors(
 ) -> ExecutorRoutingDecision:
     """Normalize protected Backlog/Ready queue items onto the local executor lane."""
     core = _core()
+    def _list_status_items(status: str) -> list[_ProjectItemSnapshot]:
+        return list(
+            core._list_project_items_by_status(
+                status,
+                project_owner,
+                project_number,
+                gh_runner=gh_runner,
+            )
+        )
+
+    def _build_snapshot() -> CycleBoardSnapshot:
+        items: list[_ProjectItemSnapshot] = []
+        by_status: dict[str, tuple[_ProjectItemSnapshot, ...]] = {}
+        for status in statuses:
+            status_items = tuple(_list_status_items(status))
+            items.extend(status_items)
+            by_status[status] = status_items
+        return CycleBoardSnapshot(items=tuple(items), by_status=by_status)
+
+    review_state_port = SimpleNamespace(
+        list_issues_by_status=_list_status_items,
+        build_board_snapshot=_build_snapshot,
+    )
+    board_port = None
+    if not dry_run:
+        board_port = SimpleNamespace(
+            set_project_single_select=lambda project_id, item_id, field_name, option_name: core._set_single_select_field(
+                project_id,
+                item_id,
+                field_name,
+                option_name,
+                project_owner=project_owner,
+                project_number=project_number,
+                config=config,
+                gh_runner=gh_runner,
+            )
+        )
     return _app_route_protected_queue_executors(
         config,
         automation_config,
@@ -499,11 +570,8 @@ def route_protected_queue_executors(
         statuses=statuses,
         dry_run=dry_run,
         board_snapshot=board_snapshot,
-        gh_runner=gh_runner,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        list_project_items_by_status_fn=core._list_project_items_by_status,
-        query_issue_board_info_fn=core._query_issue_board_info,
-        set_single_select_field_fn=core._set_single_select_field,
+        review_state_port=review_state_port,
+        board_port=board_port,
     )
 
 
@@ -521,6 +589,20 @@ def _set_handoff_target(
 ) -> None:
     """Set the board Handoff To field for an issue."""
     core = _core()
+    if review_state_port is None:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    if board_port is None:
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
     _app_set_handoff_target(
         issue_ref,
         target,
@@ -530,9 +612,6 @@ def _set_handoff_target(
         dry_run=dry_run,
         review_state_port=review_state_port,
         board_port=board_port,
-        gh_runner=gh_runner,
-        default_review_state_port_fn=core._default_review_state_port,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
     )
 
 
@@ -541,21 +620,19 @@ def _set_handoff_target(
 # ---------------------------------------------------------------------------
 
 
-def _build_admission_pipeline_deps() -> _AdmissionPipelineDeps:
+def _build_admission_pipeline_deps(
+    *,
+    review_state_port: _ReviewStatePort,
+    pr_port: _PullRequestPort,
+    board_port: _BoardMutationPort,
+    issue_context_port: _IssueContextPort,
+) -> _AdmissionPipelineDeps:
     """Build the wiring deps for the admission pipeline."""
-    core = _core()
     return _wiring_build_admission_pipeline_deps(
-        query_open_pull_requests_fn=core.query_open_pull_requests,
-        list_issue_comment_bodies_fn=core.list_issue_comment_bodies,
-        memoized_query_issue_body_fn=core.memoized_query_issue_body,
-        mark_issues_done_fn=core.mark_issues_done,
-        close_issue_fn=core.close_issue,
-        set_blocked_with_reason_fn=core._set_blocked_with_reason,
-        set_handoff_target_fn=core._set_handoff_target,
-        default_board_mutation_port_fn=core._default_board_mutation_port,
-        set_single_select_field_fn=core._set_single_select_field,
-        set_text_field_fn=core._set_text_field,
-        list_project_items_fn=core._list_project_items,
+        review_state_port=review_state_port,
+        pr_port=pr_port,
+        board_port=board_port,
+        issue_context_port=issue_context_port,
     )
 
 
@@ -572,13 +649,21 @@ def _load_admission_source_items(
     automation_config: BoardAutomationConfig,
     *,
     review_state_port: _ReviewStatePort | None,
+    pr_port: _PullRequestPort | None,
+    board_port: _BoardMutationPort | None,
+    issue_context_port: _IssueContextPort | None,
     board_snapshot: CycleBoardSnapshot | None,
     gh_runner: Callable[..., str] | None,
 ) -> list[_ProjectItemSnapshot]:
     """Load backlog/ready items needed for one admission pass."""
     return _wiring_load_admission_source_items(
         automation_config,
-        deps=_build_admission_pipeline_deps(),
+        deps=_build_admission_pipeline_deps(
+            review_state_port=review_state_port,
+            pr_port=pr_port,
+            board_port=board_port,
+            issue_context_port=issue_context_port,
+        ),
         review_state_port=review_state_port,
         board_snapshot=board_snapshot,
         gh_runner=gh_runner,
@@ -634,6 +719,7 @@ def _evaluate_admission_candidates(
     review_state_port: _ReviewStatePort | None,
     board_port: _BoardMutationPort | None,
     gh_runner: Callable[..., str] | None,
+    issue_context_port: _IssueContextPort | None,
 ) -> tuple[
     list[AdmissionCandidate],
     list[str],
@@ -645,7 +731,12 @@ def _evaluate_admission_candidates(
     """Run the expensive admission checks needed to choose candidates."""
     return _wiring_evaluate_admission_candidates(
         provisional_candidates,
-        deps=_build_admission_pipeline_deps(),
+        deps=_build_admission_pipeline_deps(
+            review_state_port=review_state_port,
+            pr_port=pr_port,
+            board_port=board_port,
+            issue_context_port=issue_context_port,
+        ),
         config=config,
         automation_config=automation_config,
         project_owner=project_owner,
@@ -667,6 +758,9 @@ def _apply_admitted_backlog_candidates(
     executor: str,
     assignment_owner: str,
     board_port: _BoardMutationPort | None,
+    review_state_port: _ReviewStatePort | None,
+    pr_port: _PullRequestPort | None,
+    issue_context_port: _IssueContextPort | None,
     project_owner: str,
     project_number: int,
     config: CriticalPathConfig,
@@ -676,7 +770,12 @@ def _apply_admitted_backlog_candidates(
     """Apply backlog-to-ready mutations for the selected candidates."""
     return _wiring_apply_admitted_backlog_candidates(
         selected,
-        deps=_build_admission_pipeline_deps(),
+        deps=_build_admission_pipeline_deps(
+            review_state_port=review_state_port,
+            pr_port=pr_port,
+            board_port=board_port,
+            issue_context_port=issue_context_port,
+        ),
         executor=executor,
         assignment_owner=assignment_owner,
         board_port=board_port,
@@ -704,6 +803,37 @@ def admit_backlog_items(
 ) -> AdmissionDecision:
     """Autonomously admit governed Backlog items into Ready."""
     core = _core()
+    if github_bundle is not None:
+        review_state_port = github_bundle.review_state
+        pr_port = github_bundle.pull_requests
+        board_port = github_bundle.board_mutations
+        issue_context_port = github_bundle.issue_context
+    else:
+        review_state_port = core._default_review_state_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        pr_port = core._default_pr_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        board_port = core._default_board_mutation_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+        issue_context_port = core._default_issue_context_port(
+            project_owner,
+            project_number,
+            config,
+            github_memo=github_memo,
+            gh_runner=gh_runner,
+        )
     return _wiring_admit_backlog_items(
         config,
         automation_config,
@@ -717,11 +847,36 @@ def admit_backlog_items(
         github_memo=github_memo,
         gh_runner=gh_runner,
         protected_queue_executor_target_fn=core._protected_queue_executor_target,
-        load_admission_source_items_fn=core._load_admission_source_items,
+        load_admission_source_items_fn=lambda *args, **kwargs: core._load_admission_source_items(
+            *args,
+            review_state_port=(
+                kwargs.pop("review_state_port", None) or review_state_port
+            ),
+            pr_port=pr_port,
+            board_port=board_port,
+            issue_context_port=issue_context_port,
+            **kwargs,
+        ),
         partition_admission_source_items_fn=core._partition_admission_source_items,
         build_provisional_candidates_fn=core._build_provisional_admission_candidates,
-        evaluate_candidates_fn=core._evaluate_admission_candidates,
-        apply_candidates_fn=core._apply_admitted_backlog_candidates,
+        evaluate_candidates_fn=lambda *args, **kwargs: core._evaluate_admission_candidates(
+            *args,
+            pr_port=(kwargs.pop("pr_port", None) or pr_port),
+            review_state_port=(
+                kwargs.pop("review_state_port", None) or review_state_port
+            ),
+            board_port=(kwargs.pop("board_port", None) or board_port),
+            issue_context_port=issue_context_port,
+            **kwargs,
+        ),
+        apply_candidates_fn=lambda *args, **kwargs: core._apply_admitted_backlog_candidates(
+            *args,
+            board_port=(kwargs.pop("board_port", None) or board_port),
+            review_state_port=review_state_port,
+            pr_port=pr_port,
+            issue_context_port=issue_context_port,
+            **kwargs,
+        ),
         CycleGitHubMemo=CycleGitHubMemo,
     )
 

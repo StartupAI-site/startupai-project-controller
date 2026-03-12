@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from startupai_controller.domain.models import CycleResult
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.ports.worktrees import WorktreePort
 
 
 @dataclass(frozen=True)
@@ -20,9 +27,6 @@ class ResolveLaunchDeps:
 class PrepareLaunchDeps:
     """Injected seams for launch preparation."""
 
-    build_session_store: Callable[[Any], Any]
-    build_github_port_bundle: Callable[..., Any]
-    build_worktree_port: Callable[..., Any]
     resolve_launch_candidate_metadata: Callable[..., tuple[Any, ...]]
     resolve_launch_issue_context: Callable[..., tuple[Any, str]]
     setup_launch_worktree: Callable[..., tuple[str, str, str | None, str | None]]
@@ -41,11 +45,6 @@ def resolve_launch_context_for_cycle(
     launch_context: Any | None,
     target_issue: str | None,
     dry_run: bool,
-    status_resolver: Callable[..., str] | None,
-    subprocess_runner: Callable[..., Any] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
     log_dry_run: Callable[[str], None] | None = None,
 ) -> tuple[Any | None, CycleResult | None]:
     """Resolve or prepare launch-ready work for this cycle."""
@@ -57,8 +56,6 @@ def resolve_launch_context_for_cycle(
         db=db,
         prepared=prepared,
         target_issue=target_issue,
-        status_resolver=status_resolver,
-        gh_runner=gh_runner,
     )
     if cycle_result is not None:
         return None, cycle_result
@@ -78,11 +75,6 @@ def resolve_launch_context_for_cycle(
         config=config,
         db=db,
         prepared=prepared,
-        subprocess_runner=subprocess_runner,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
     )
 
 
@@ -93,34 +85,21 @@ def prepare_launch_candidate(
     prepared: Any,
     db: Any,
     deps: PrepareLaunchDeps,
-    subprocess_runner: Callable[..., Any] | None = None,
-    status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-    pr_port: Any | None = None,
-    issue_context_port: Any | None = None,
-    session_store: Any | None = None,
-    worktree_port: Any | None = None,
+    subprocess_runner: ProcessRunnerPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    gh_runner: GhRunnerPort | None = None,
+    pr_port: PullRequestPort,
+    issue_context_port: IssueContextPort | None = None,
+    session_store: SessionStorePort,
+    worktree_port: WorktreePort,
 ) -> Any:
     """Prepare local launch state for an issue before board claim."""
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
-    store = session_store or deps.build_session_store(db)
+    store = session_store
     effective_pr_port = pr_port
-    if effective_pr_port is None:
-        effective_pr_port = deps.build_github_port_bundle(
-            config.project_owner,
-            config.project_number,
-            config=cp_config,
-            github_memo=prepared.github_memo,
-            gh_runner=gh_runner,
-        ).pull_requests
     effective_issue_context_port = issue_context_port or effective_pr_port
-    effective_worktree_port = worktree_port or deps.build_worktree_port(
-        subprocess_runner=subprocess_runner,
-        gh_runner=gh_runner,
-    )
+    effective_worktree_port = worktree_port
 
     (
         candidate_prefix,
@@ -137,7 +116,6 @@ def prepare_launch_candidate(
         auto_config=auto_config,
         board_snapshot=prepared.board_snapshot,
         pr_port=effective_pr_port,
-        gh_runner=gh_runner,
     )
     context, title = deps.resolve_launch_issue_context(
         issue_ref,
@@ -148,7 +126,6 @@ def prepare_launch_candidate(
         config=config,
         db=db,
         issue_context_port=effective_issue_context_port,
-        gh_runner=gh_runner,
     )
     worktree_path, branch_name, branch_reconcile_state, branch_reconcile_error = (
         deps.setup_launch_worktree(
@@ -161,10 +138,9 @@ def prepare_launch_candidate(
             db=db,
             session_store=store,
             worktree_port=effective_worktree_port,
-            subprocess_runner=subprocess_runner,
-            board_info_resolver=board_info_resolver,
-            board_mutator=board_mutator,
-            gh_runner=gh_runner,
+            subprocess_runner=(
+                subprocess_runner.run if subprocess_runner is not None else None
+            ),
         )
     )
 
@@ -180,7 +156,9 @@ def prepare_launch_candidate(
         issue_ref=issue_ref,
         branch_name=branch_name,
         worktree_port=effective_worktree_port,
-        subprocess_runner=subprocess_runner,
+        subprocess_runner=(
+            subprocess_runner.run if subprocess_runner is not None else None
+        ),
     )
 
     dependency_summary = deps.build_dependency_summary(
@@ -188,7 +166,6 @@ def prepare_launch_candidate(
         cp_config,
         config.project_owner,
         config.project_number,
-        status_resolver=status_resolver,
     )
     return deps.assemble_prepared_launch_context(
         issue_ref,
@@ -229,12 +206,6 @@ def claim_launch_context(
     deps: ClaimLaunchDeps,
     launch_context: Any,
     slot_id: int,
-    status_resolver: Callable[..., str] | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
 ) -> tuple[Any | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
     pending_claim, cycle_result = deps.open_pending_claim_session(
@@ -253,10 +224,6 @@ def claim_launch_context(
         launch_context=launch_context,
         pending_claim=pending_claim,
         cp_config=prepared.cp_config,
-        board_info_resolver=board_info_resolver,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
     )
     if retry_ceiling_result is not None:
         return None, retry_ceiling_result
@@ -268,12 +235,6 @@ def claim_launch_context(
         launch_context=launch_context,
         pending_claim=pending_claim,
         slot_id=slot_id,
-        status_resolver=status_resolver,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
     )
     if cycle_result is not None:
         return None, cycle_result
@@ -285,10 +246,7 @@ def claim_launch_context(
             launch_context=launch_context,
             pending_claim=pending_claim,
             slot_id=slot_id,
-            comment_checker=comment_checker,
-            comment_poster=comment_poster,
             cp_config=prepared.cp_config,
-            gh_runner=gh_runner,
         ),
         None,
     )

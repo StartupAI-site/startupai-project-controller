@@ -13,7 +13,7 @@ def select_best_candidate(
     executor: str = "codex",
     this_repo_prefix: str | None = None,
     repo_prefixes: tuple[str, ...] = ("crew",),
-    status_resolver: Callable[..., str] | None = None,
+    review_state_port: Any | None = None,
     ready_items: tuple[Any, ...] | None = None,
     github_memo: Any | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -29,14 +29,17 @@ def select_best_candidate(
     """Select the highest-ranked ready issue for the executor."""
     if this_repo_prefix is not None:
         repo_prefixes = (this_repo_prefix,)
-    ready_items = ready_items or tuple(
-        build_github_port_bundle(
+    effective_review_state_port = review_state_port
+    if ready_items is None or effective_review_state_port is None:
+        effective_review_state_port = effective_review_state_port or build_github_port_bundle(
             project_owner,
             project_number,
             config=config,
             github_memo=github_memo,
             gh_runner=gh_runner,
-        ).review_state.list_issues_by_status("Ready")
+        ).review_state
+    ready_items = ready_items or tuple(
+        effective_review_state_port.list_issues_by_status("Ready")
     )
     eligible: list[Any] = []
     for snapshot in ready_items:
@@ -64,7 +67,9 @@ def select_best_candidate(
                     config=config,
                     project_owner=project_owner,
                     project_number=project_number,
-                    status_resolver=status_resolver,
+                    status_resolver=lambda candidate_ref, *_args, **_kwargs: effective_review_state_port.get_issue_status(
+                        candidate_ref
+                    ),
                     require_in_graph=True,
                 )
                 is_ready = val_code == 0

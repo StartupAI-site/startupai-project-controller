@@ -99,7 +99,6 @@ def build_dependency_summary(
     project_owner: str,
     project_number: int,
     *,
-    status_resolver: Callable[..., str] | None = None,
     in_any_critical_path: Callable[[Any, str], bool] = _in_any_critical_path,
 ) -> str:
     """Build a human-readable dependency summary for the codex prompt."""
