@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
 import startupai_controller.consumer_comment_pr_wiring as _comment_pr_wiring
-import startupai_controller.consumer_review_queue_helpers as _review_queue_helpers
+import startupai_controller.consumer_review_queue_processing as _review_queue_processing
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.consumer_workflow import render_workflow_prompt
 from startupai_controller.domain.launch_policy import (
@@ -405,7 +405,7 @@ def backfill_review_verdicts_from_snapshots(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Backfill missing verdict markers using already-fetched PR comment payloads."""
-    return _review_queue_helpers.backfill_review_verdicts_from_snapshots(
+    return _review_queue_processing.backfill_review_verdicts_from_snapshots(
         store,
         entries,
         snapshots,
@@ -432,7 +432,7 @@ def pre_backfill_verdicts_for_due_prs(
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, ...]:
     """Post missing verdicts before snapshot build for due PRs."""
-    return _review_queue_helpers.pre_backfill_verdicts_for_due_prs(
+    return _review_queue_processing.pre_backfill_verdicts_for_due_prs(
         store,
         due_items,
         post_pr_codex_verdict=post_pr_codex_verdict,

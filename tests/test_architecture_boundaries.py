@@ -229,6 +229,16 @@ def test_board_control_plane_imports_stay_within_control_plane_stack() -> None:
     )
 
 
+def test_control_plane_rescue_routes_review_queue_through_wiring_module() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "control_plane_rescue.py")
+    assert (
+        "startupai_controller.consumer_review_queue_helpers" not in imported
+    ), "control_plane_rescue.py still imports review-queue helpers directly"
+    assert (
+        "startupai_controller.consumer_review_queue_wiring" in imported
+    ), "control_plane_rescue.py should depend on review-queue wiring"
+
+
 def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks() -> (
     None
 ):

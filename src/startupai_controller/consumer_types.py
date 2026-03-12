@@ -15,6 +15,7 @@ from startupai_controller.domain.models import (
     ResolutionEvaluation,
     ReviewQueueDrainSummary,
     ReviewQueueEntry,
+    ReviewSnapshot,
 )
 from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.runtime.wiring import GitHubRuntimeMemo
@@ -153,7 +154,7 @@ class PreparedDueReviewProcessing:
 
     due_items: tuple[ReviewQueueEntry, ...]
     due_pr_groups: tuple[tuple[tuple[str, int], tuple[ReviewQueueEntry, ...]], ...]
-    snapshots: dict[tuple[str, int], Any]
+    snapshots: dict[tuple[str, int], ReviewSnapshot]
     verdict_backfilled: tuple[str, ...]
     partial_failure: bool
     error: str | None
