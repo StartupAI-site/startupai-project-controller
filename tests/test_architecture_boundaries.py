@@ -50,7 +50,7 @@ HOTSPOT_MODULES = {
     "startupai_controller.project_field_sync": SRC_ROOT / "project_field_sync.py",
 }
 
-SHIM_MODULES = {
+REMOVED_COMPAT_IMPORTS = {
     "startupai_controller.board_io",
     "startupai_controller.consumer_db",
     "startupai_controller.github_http",
@@ -180,7 +180,7 @@ def test_orchestrators_use_canonical_runtime_boundaries() -> None:
         offending = sorted(
             module
             for module in imported
-            if module in SHIM_MODULES or module.startswith(ADAPTER_PREFIX)
+            if module in REMOVED_COMPAT_IMPORTS or module.startswith(ADAPTER_PREFIX)
         )
         assert (
             offending == []
@@ -203,7 +203,7 @@ def test_board_graph_has_no_adapter_or_shim_imports() -> None:
     offending = sorted(
         module
         for module in imported
-        if module in SHIM_MODULES or module.startswith(ADAPTER_PREFIX)
+        if module in REMOVED_COMPAT_IMPORTS or module.startswith(ADAPTER_PREFIX)
     )
     assert offending == [], f"board_graph.py leaks outer dependencies: {offending}"
 
@@ -214,7 +214,7 @@ def test_domain_has_no_port_adapter_or_shim_imports() -> None:
         offending = sorted(
             module
             for module in imported
-            if module in SHIM_MODULES
+            if module in REMOVED_COMPAT_IMPORTS
             or module.startswith(ADAPTER_PREFIX)
             or module.startswith(PORTS_PREFIX)
         )
@@ -227,7 +227,7 @@ def test_application_has_no_entrypoint_adapter_or_shim_imports() -> None:
         offending = sorted(
             module
             for module in imported
-            if module in SHIM_MODULES
+            if module in REMOVED_COMPAT_IMPORTS
             or module.startswith(ADAPTER_PREFIX)
             or module.startswith(RUNTIME_PREFIX)
             or module in ENTRYPOINT_MODULES
@@ -1046,71 +1046,19 @@ def test_official_hotspot_set_has_no_import_cycles() -> None:
         _walk(module_name, ())
 
 
-# --- Shim governance tests ---
-
-# Frozen allowlist: only these files may import shim modules at runtime.
-# When a PR removes a shim caller, remove it from this dict in the same PR.
-KNOWN_SHIM_IMPORTERS = {}
-
-# Baselines: current line counts for each shim file.
-# When a PR shrinks a shim, update the baseline downward in the same PR.
-SHIM_SIZE_BASELINES = {}
-
-SHIM_FILENAMES = {m.rsplit(".", 1)[-1] + ".py" for m in SHIM_MODULES}
+def test_deleted_compatibility_shim_files_are_absent() -> None:
+    for filename in ("board_io.py", "consumer_db.py", "github_http.py"):
+        assert not (SRC_ROOT / filename).exists()
 
 
-def test_no_new_shim_importers() -> None:
-    """No file outside the frozen allowlist may import a shim module at runtime."""
-    violations: dict[str, set[str]] = {}
-    for path in sorted(SRC_ROOT.rglob("*.py")):
-        if path.name in SHIM_FILENAMES or path.name == "__init__.py":
-            continue
-        imported = _runtime_imported_modules(path)
-        shim_hits = imported & SHIM_MODULES
-        if not shim_hits:
-            continue
-        allowed = KNOWN_SHIM_IMPORTERS.get(path.name, set())
-        unexpected = shim_hits - allowed
-        if unexpected:
-            violations[path.name] = unexpected
-    assert violations == {}, (
-        "New shim importers detected (not in KNOWN_SHIM_IMPORTERS allowlist). "
-        "Migrate to ports/adapters instead of adding shim dependencies: "
-        f"{violations}"
-    )
-
-
-def test_shim_size_ratchet() -> None:
-    """Shim files may not grow beyond their recorded baselines."""
-    for filename, baseline in SHIM_SIZE_BASELINES.items():
-        path = SRC_ROOT / filename
-        actual = len(path.read_text(encoding="utf-8").splitlines())
-        assert actual <= baseline, (
-            f"{filename} has {actual} lines, exceeding baseline of {baseline}. "
-            "Shims must shrink monotonically. If you shrank it, update "
-            "SHIM_SIZE_BASELINES in this test."
-        )
-
-
-def test_deleted_shim_files_are_absent() -> None:
-    assert not (SRC_ROOT / "board_io.py").exists()
-    assert not (SRC_ROOT / "consumer_db.py").exists()
-    assert not (SRC_ROOT / "github_http.py").exists()
-
-
-def test_no_runtime_or_test_imports_deleted_shims() -> None:
-    forbidden = {
-        "startupai_controller.board_io",
-        "startupai_controller.consumer_db",
-        "startupai_controller.github_http",
-    }
+def test_no_runtime_or_test_imports_deleted_compatibility_shims() -> None:
     violations: dict[str, set[str]] = {}
     for root in (SRC_ROOT, REPO_ROOT / "tests"):
         for path in sorted(root.rglob("*.py")):
             imported = _runtime_imported_modules(path)
-            hits = imported & forbidden
+            hits = imported & REMOVED_COMPAT_IMPORTS
             if hits:
                 violations[str(path.relative_to(REPO_ROOT))] = hits
     assert violations == {}, (
-        "deleted shim imports remain after deletion: " f"{violations}"
+        "Deleted compatibility imports reappeared in runtime/tests: " f"{violations}"
     )

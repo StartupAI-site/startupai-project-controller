@@ -154,8 +154,8 @@ choosing concrete adapters inline.
 **Capability adapters**: GitHub runtime access is split across adapter modules
 by responsibility (`pull_requests`, `review_state`, `board_mutation`,
 transport/types) instead of routing through a single giant shim.
-`SqliteSessionStore` (delegates to `ConsumerDB`) implements the persistence
-boundary.
+`SqliteSessionStore` delegates to `adapters.consumer_db_store.ConsumerDB` for
+the persistence boundary.
 
 **Wired use cases** (runtime-owned composition, no adapter imports from entry shells):
 
@@ -164,16 +164,16 @@ boundary.
 - `application/automation/*` -- extracted ready/review/execution flows
 - `board_graph.py` -- typed input only, no adapter/shim reads
 
-**Transitional state**: Runtime orchestrators no longer import `board_io.py`,
-`consumer_db.py`, `github_http.py`, or adapter helpers directly. The entry
-shells are materially thinner than the original extraction baseline:
+**Current state**: Runtime orchestrators no longer import the deleted top-level
+compatibility modules `board_io.py`, `consumer_db.py`, or `github_http.py`.
+Those audited import paths were removed after fixed-scope verification and
+their responsibilities now live in canonical adapter modules:
 
-- `GitHubCliAdapter` remains as a compatibility facade while runtime ownership
-  is split across capability adapters (smaller than before, not yet deleted).
-- `board_io.py` is now a compatibility shell -- not imported by runtime
-  orchestrators, but legacy callers/tests still rely on it.
-- `consumer_db.py` remains the underlying persistence host behind
-  `SqliteSessionStore`; not yet fully decomposed by capability.
+- `GitHubCliAdapter` remains as an adapter-level compatibility surface while
+  runtime ownership is split across capability adapters.
+- Persistence ownership lives in `adapters.consumer_db_store`.
+- Direct GitHub HTTP transport ownership lives in
+  `adapters.github_http_transport`.
 - Adapter-internal types (`CodexReviewVerdict`, `PullRequestViewPayload`,
   `MetricEvent`, `RecoveredLease`) remain owned by adapter/mechanism modules.
 - `board_consumer.py` no longer imports `board_automation.py`; consumer launch,
@@ -184,12 +184,13 @@ shells are materially thinner than the original extraction baseline:
   and CLI/parser glue; ready/review/execution/state/admission/CLI lanes now live
   in `automation_*_wiring.py`, `automation_cli_handlers.py`, and
   `application/automation/*`.
-- Remaining shell weight is concentrated in compatibility wrappers kept for
-  stable monkeypatch/test surfaces and port-factory seams.
+- Remaining shell weight is concentrated in adapter-level compatibility helpers
+  and port-factory seams, not in top-level shim files.
 
-**Deferred work**: Remaining port-factory cleanup, compatibility shell removal,
-and deeper persistence decomposition (`consumer_db.py` behind
-`SqliteSessionStore`) are tracked as follow-up work.
+**Deferred work**: Continued reduction of adapter-level compatibility surfaces
+(for example `GitHubCliAdapter`) and any future persistence decomposition
+beyond `adapters.consumer_db_store` remain follow-up work, not architectural
+blockers.
 
 ### 4. Cross-Repo Relationship
 
@@ -247,6 +248,7 @@ and deeper persistence decomposition (`consumer_db.py` behind
 - Provenance remains mandatory for protected coding PRs.
 - Missing or invalid repo workflows disable dispatch for that repo.
 - Ambiguous PR states bias toward `Blocked` (safer but noisier).
-- Compatibility shells (`board_io.py`, `GitHubCliAdapter`) and test-oriented
-  wrapper seams remain until legacy callers and monkeypatch paths are retired.
+- Adapter-level compatibility surfaces (for example `GitHubCliAdapter`) and
+  test-oriented wrapper seams remain where they still buy stable monkeypatch
+  boundaries, even though the top-level shim files are gone.
 - The future long-lived runner remains deferred behind an interface boundary.

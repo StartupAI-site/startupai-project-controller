@@ -1,8 +1,9 @@
 """GitHub HTTP adapter facade for the canonical transport implementation.
 
 Thin re-export layer for the canonical adapter implementation in
-``github_http_transport.py``. The legacy top-level ``github_http.py`` module is
-now only a deprecated compatibility facade.
+``github_http_transport.py``. The former top-level ``github_http.py`` shim has
+been deleted, so adapter consumers should import this module or
+``github_http_transport.py`` directly.
 """
 
 from __future__ import annotations
