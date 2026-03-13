@@ -34,6 +34,8 @@ HOTSPOT_MODULES = {
     / "consumer_prepared_cycle_wiring.py",
     "startupai_controller.consumer_launch_claim_wiring": SRC_ROOT
     / "consumer_launch_claim_wiring.py",
+    "startupai_controller.consumer_launch_preparation_wiring": SRC_ROOT
+    / "consumer_launch_preparation_wiring.py",
     "startupai_controller.consumer_claimed_session_wiring": SRC_ROOT
     / "consumer_claimed_session_wiring.py",
     "startupai_controller.consumer_review_queue_preparation_processing": SRC_ROOT
@@ -562,6 +564,32 @@ def test_consumer_prepared_cycle_wiring_routes_launch_claim_through_module() -> 
     assert found == [], (
         "consumer_prepared_cycle_wiring.py still defines the inline launch/claim "
         f"surface: {found}"
+    )
+
+
+def test_consumer_launch_claim_wiring_routes_launch_preparation_through_module() -> (
+    None
+):
+    imported = _controller_runtime_imports(SRC_ROOT / "consumer_launch_claim_wiring.py")
+    assert "startupai_controller.consumer_launch_preparation_wiring" in imported, (
+        "consumer_launch_claim_wiring.py should depend on "
+        "consumer_launch_preparation_wiring"
+    )
+    source = _source_text(SRC_ROOT / "consumer_launch_claim_wiring.py")
+    forbidden_defs = [
+        "def block_prelaunch_issue(",
+        "def select_launch_candidate_for_cycle(",
+        "def prepare_selected_launch_candidate(",
+        "def handle_selected_launch_query_error(",
+        "def handle_selected_launch_workflow_config_error(",
+        "def handle_selected_launch_worktree_error(",
+        "def handle_selected_launch_runtime_error(",
+        "def resolve_launch_context_for_cycle(",
+    ]
+    offending = [token for token in forbidden_defs if token in source]
+    assert offending == [], (
+        "consumer_launch_claim_wiring.py still defines launch-preparation "
+        f"helpers inline: {offending}"
     )
 
 

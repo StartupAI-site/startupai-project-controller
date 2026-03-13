@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-55`
-- Active branch: `refactor/controller-10-10-phase-55`
-- Fresh-main baseline already includes merged work through `origin/main` commit `48ed4f5`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-56`
+- Active branch: `refactor/controller-10-10-phase-56`
+- Fresh-main baseline already includes merged work through `origin/main` commit `17ab3aa`
 
-Do not resume from the main checkout. Continue from the phase-55 worktree.
+Do not resume from the main checkout. Continue from the phase-56 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -87,40 +87,42 @@ Recent merged phases:
 - `PR #94` `refactor: split review queue group cluster`
 - `PR #95` `refactor: type launch resolution support cluster`
 - `PR #96` `refactor: split field sync shell cluster`
+- `PR #97` `refactor: split review queue group processing cluster`
 
-Current unmerged phase-55 batch:
+Current unmerged phase-56 batch:
 
-- `src/startupai_controller/consumer_review_queue_processing.py`
-- `src/startupai_controller/consumer_review_queue_group_processing.py`
+- `src/startupai_controller/consumer_launch_claim_wiring.py`
+- `src/startupai_controller/consumer_launch_preparation_wiring.py`
 - `tests/test_architecture_boundaries.py`
 - `docs/runbooks/codex-resume-hardening.md`
 
-Phase-55 batch summary:
+Phase-56 batch summary:
 
-- extracts the due-group rescue/apply/summarize cluster from `consumer_review_queue_processing.py` into the new `consumer_review_queue_group_processing.py` module
-- reduces `consumer_review_queue_processing.py` from `596` to `339` lines while keeping the public helper surface stable through aliases
-- adds architecture ratchets so the review-queue processing shell must route group rescue processing through the dedicated module
+- extracts the launch-selection/preparation/error-handling cluster from `consumer_launch_claim_wiring.py` into the new `consumer_launch_preparation_wiring.py` module
+- reduces `consumer_launch_claim_wiring.py` from `622` to `364` lines while keeping the outer launch/claim helper surface stable through aliases
+- adds architecture ratchets so the launch/claim shell must route launch preparation through the dedicated module
 
-Latest successful validation on the current phase-55 worktree:
+Latest successful validation on the current phase-56 worktree:
 
-- `python3 -m py_compile` on `consumer_review_queue_processing.py`, `consumer_review_queue_group_processing.py`, and `tests/test_architecture_boundaries.py`: passed
-- targeted `mypy --follow-imports=silent` on `consumer_review_queue_processing.py` and `consumer_review_queue_group_processing.py`: passed
-- targeted `pytest` on architecture-boundary and board-consumer slices: `183 passed`
-- `uv run black --target-version py312` on `consumer_review_queue_processing.py`, `consumer_review_queue_group_processing.py`, and `tests/test_architecture_boundaries.py`: passed
-- full suite: `889 passed`
+- `python3 -m py_compile` on `consumer_launch_claim_wiring.py`, `consumer_launch_preparation_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
+- targeted `mypy --follow-imports=silent` on `consumer_launch_claim_wiring.py` and `consumer_launch_preparation_wiring.py`: passed
+- targeted `pytest` on architecture-boundary and board-consumer slices: `184 passed`
+- `uv run black --target-version py312` on `consumer_launch_claim_wiring.py`, `consumer_launch_preparation_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
+- full suite: `890 passed`
 
-No PR is open yet for phase 55. No poller should be running until the next PR
+No PR is open yet for phase 56. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining structural hotspots after the phase-55 review-queue group-processing split:
+Remaining structural hotspots after the phase-56 launch-preparation split:
 
-- `622` lines in `src/startupai_controller/consumer_launch_claim_wiring.py`
 - `502` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
 - `475` lines in `src/startupai_controller/consumer_operational_wiring.py`
 - `426` lines in `src/startupai_controller/project_field_sync_operations.py`
+- `364` lines in `src/startupai_controller/consumer_launch_claim_wiring.py`
 - `339` lines in `src/startupai_controller/consumer_review_queue_processing.py`
+- `326` lines in `src/startupai_controller/consumer_launch_preparation_wiring.py`
 - `291` lines in `src/startupai_controller/project_field_sync.py`
 - `289` lines in `src/startupai_controller/consumer_review_queue_group_processing.py`
 - `17` lines in `src/startupai_controller/project_field_sync.py::_run_single_sync`
@@ -137,17 +139,16 @@ Bounded-context completion estimate at handoff time:
 
 ## Recommended Next Batch
 
-If phase 55 is not yet merged, finish shipping the review-queue group-processing
-split:
+If phase 56 is not yet merged, finish shipping the launch-preparation split:
 
-- `src/startupai_controller/consumer_review_queue_processing.py`
-- `src/startupai_controller/consumer_review_queue_group_processing.py`
+- `src/startupai_controller/consumer_launch_claim_wiring.py`
+- `src/startupai_controller/consumer_launch_preparation_wiring.py`
 - `tests/test_architecture_boundaries.py`
 
-If phase 55 is already merged, the strongest remaining targets are:
+If phase 56 is already merged, the strongest remaining targets are:
 
-- finishing the remaining launch/claim shell ratchet inside `src/startupai_controller/consumer_launch_claim_wiring.py`
-- finishing any final review-queue shell ratchet inside `src/startupai_controller/consumer_review_queue_wiring.py` if the top-level orchestration still needs another decomposition pass
+- finishing the remaining top-level review-queue shell ratchet inside `src/startupai_controller/consumer_review_queue_wiring.py`
+- finishing any last operational-shell ratchet inside `src/startupai_controller/consumer_operational_wiring.py` if the launch/claim and review-queue shells still leave mixed orchestration there
 
 ## Fresh-Session Prompt
 
@@ -158,8 +159,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-55
-- active branch: refactor/controller-10-10-phase-55
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-56
+- active branch: refactor/controller-10-10-phase-56
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -178,8 +179,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66 through #96
-- no PR is open yet for phase 55
-- latest full local validation on phase 55 was 889 passed
-- current batch is the review-queue group-processing split; next batch after merge is the remaining launch/claim shell ratchet
+- latest merged PRs: #66 through #97
+- no PR is open yet for phase 56
+- latest full local validation on phase 56 was 890 passed
+- current batch is the launch-preparation split; next batch after merge is the remaining top-level review-queue or operational shell ratchet
 ```
