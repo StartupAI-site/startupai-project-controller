@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-54`
-- Active branch: `refactor/controller-10-10-phase-54`
-- Fresh-main baseline already includes merged work through `origin/main` commit `fd8081c`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-55`
+- Active branch: `refactor/controller-10-10-phase-55`
+- Fresh-main baseline already includes merged work through `origin/main` commit `48ed4f5`
 
-Do not resume from the main checkout. Continue from the phase-54 worktree.
+Do not resume from the main checkout. Continue from the phase-55 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -86,41 +86,43 @@ Recent merged phases:
 - `PR #93` `refactor: split prepared launch claim cluster`
 - `PR #94` `refactor: split review queue group cluster`
 - `PR #95` `refactor: type launch resolution support cluster`
+- `PR #96` `refactor: split field sync shell cluster`
 
-Current unmerged phase-54 batch:
+Current unmerged phase-55 batch:
 
-- `src/startupai_controller/project_field_sync.py`
-- `src/startupai_controller/project_field_sync_operations.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
+- `src/startupai_controller/consumer_review_queue_group_processing.py`
 - `tests/test_architecture_boundaries.py`
 - `docs/runbooks/codex-resume-hardening.md`
 
-Phase-54 batch summary:
+Phase-55 batch summary:
 
-- routes field-sync single-run orchestration through `project_field_sync_operations.py` instead of keeping the audit/sync-all workflow duplicated inline in `project_field_sync.py`
-- reduces `project_field_sync._run_single_sync()` to a 17-line shell delegator while preserving the public CLI and fixture-backed JSON output contracts
-- adds architecture ratchets so `project_field_sync.py` must keep routing orchestration through the operations module and `_run_single_sync()` cannot regrow past the refined size ceiling
+- extracts the due-group rescue/apply/summarize cluster from `consumer_review_queue_processing.py` into the new `consumer_review_queue_group_processing.py` module
+- reduces `consumer_review_queue_processing.py` from `596` to `339` lines while keeping the public helper surface stable through aliases
+- adds architecture ratchets so the review-queue processing shell must route group rescue processing through the dedicated module
 
-Latest successful validation on the current phase-54 worktree:
+Latest successful validation on the current phase-55 worktree:
 
-- `python3 -m py_compile` on `project_field_sync.py`, `project_field_sync_operations.py`, and `tests/test_architecture_boundaries.py`: passed
-- targeted `mypy --follow-imports=silent` on `project_field_sync.py` and `project_field_sync_operations.py`: passed
-- targeted `pytest` on field-sync, contract-output, and architecture-boundary slices: `67 passed`
-- `uv run black --target-version py312` on `project_field_sync.py`, `project_field_sync_operations.py`, and `tests/test_architecture_boundaries.py`: passed
-- full suite: `888 passed`
+- `python3 -m py_compile` on `consumer_review_queue_processing.py`, `consumer_review_queue_group_processing.py`, and `tests/test_architecture_boundaries.py`: passed
+- targeted `mypy --follow-imports=silent` on `consumer_review_queue_processing.py` and `consumer_review_queue_group_processing.py`: passed
+- targeted `pytest` on architecture-boundary and board-consumer slices: `183 passed`
+- `uv run black --target-version py312` on `consumer_review_queue_processing.py`, `consumer_review_queue_group_processing.py`, and `tests/test_architecture_boundaries.py`: passed
+- full suite: `889 passed`
 
-No PR is open yet for phase 54. No poller should be running until the next PR
+No PR is open yet for phase 55. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining structural hotspots after the phase-54 field-sync shell ratchet:
+Remaining structural hotspots after the phase-55 review-queue group-processing split:
 
 - `622` lines in `src/startupai_controller/consumer_launch_claim_wiring.py`
 - `502` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
-- `596` lines in `src/startupai_controller/consumer_review_queue_processing.py`
 - `475` lines in `src/startupai_controller/consumer_operational_wiring.py`
 - `426` lines in `src/startupai_controller/project_field_sync_operations.py`
+- `339` lines in `src/startupai_controller/consumer_review_queue_processing.py`
 - `291` lines in `src/startupai_controller/project_field_sync.py`
+- `289` lines in `src/startupai_controller/consumer_review_queue_group_processing.py`
 - `17` lines in `src/startupai_controller/project_field_sync.py::_run_single_sync`
 - `0` `Any` usages in `src/startupai_controller/consumer_context_helpers.py`
 - `0` `Any` usages in `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
@@ -129,22 +131,23 @@ Remaining structural hotspots after the phase-54 field-sync shell ratchet:
 Bounded-context completion estimate at handoff time:
 
 - consumer/control-plane: about 99%
-- automation/review: about 99%
+- automation/review: about 99.5%
 - field sync: about 90-95%
 - overall program: about 99%
 
 ## Recommended Next Batch
 
-If phase 54 is not yet merged, finish shipping the field-sync shell ratchet:
+If phase 55 is not yet merged, finish shipping the review-queue group-processing
+split:
 
-- `src/startupai_controller/project_field_sync.py`
-- `src/startupai_controller/project_field_sync_operations.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
+- `src/startupai_controller/consumer_review_queue_group_processing.py`
 - `tests/test_architecture_boundaries.py`
 
-If phase 54 is already merged, the strongest remaining targets are:
+If phase 55 is already merged, the strongest remaining targets are:
 
-- finishing the remaining review-queue orchestration split inside `src/startupai_controller/consumer_review_queue_processing.py`
 - finishing the remaining launch/claim shell ratchet inside `src/startupai_controller/consumer_launch_claim_wiring.py`
+- finishing any final review-queue shell ratchet inside `src/startupai_controller/consumer_review_queue_wiring.py` if the top-level orchestration still needs another decomposition pass
 
 ## Fresh-Session Prompt
 
@@ -155,8 +158,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-54
-- active branch: refactor/controller-10-10-phase-54
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-55
+- active branch: refactor/controller-10-10-phase-55
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -175,8 +178,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66 through #95
-- no PR is open yet for phase 54
-- latest full local validation on phase 54 was 888 passed
-- current batch is the field-sync shell ratchet; next batch after merge is the remaining review-queue or launch/claim shell ratchet
+- latest merged PRs: #66 through #96
+- no PR is open yet for phase 55
+- latest full local validation on phase 55 was 889 passed
+- current batch is the review-queue group-processing split; next batch after merge is the remaining launch/claim shell ratchet
 ```
