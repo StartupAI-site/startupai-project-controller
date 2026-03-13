@@ -1,0 +1,194 @@
+# Limited Live Test Runbook
+
+Supervised one-hour burn-in for the refactored controller plus a first-pass
+GitHub transport assessment.
+
+## Purpose
+
+Use this harness when you want to:
+
+- run the real consumer against the normal live `Ready` queue for one hour
+- collect structured baseline, timeline, and final diagnostics
+- request a graceful drain at the hour mark
+- leave the controller stopped and drained for review
+- assess whether the current GitHub transport is good enough for live use
+
+This is a proving exercise, not a transport migration. It uses the current
+controller exactly as shipped. It does not switch to GitHub MCP.
+
+## Safety Model
+
+- Real board and PR actions are allowed.
+- The harness runs the consumer as a supervised child process, not under
+  `systemd`.
+- "Drain the board" means graceful consumer drain only:
+  stop new claims, let active work finish, then stop.
+- It does **not** mass-mutate `Ready` or `In Progress` cards into terminal
+  states.
+
+## Required Safety Checks
+
+1. Verify no other machine is running a consumer.
+   This repository does not provide a distributed exclusivity lock. The
+   cross-machine single-consumer check is therefore procedural and must be
+   performed by the operator before starting the test.
+
+2. Verify the local systemd service is not active.
+
+   ```bash
+   systemctl --user status startupai-consumer
+   ```
+
+3. Verify GitHub auth is healthy.
+
+   ```bash
+   gh auth status
+   ```
+
+4. Verify a live board read succeeds.
+
+   ```bash
+   uv run python -m startupai_controller.board_consumer status --json
+   uv run python -m startupai_controller.board_consumer one-shot --dry-run
+   ```
+
+## Run Command
+
+```bash
+uv run python tools/limited_live_test.py \
+  --confirm-single-consumer \
+  --confirmation-note "verified all other consumer hosts are stopped"
+```
+
+Optional overrides:
+
+- `--db-path <path>`
+- `--consumer-interval-seconds <seconds>`
+- `--duration-seconds <seconds>`
+- `--local-snapshot-seconds <seconds>`
+- `--full-snapshot-seconds <seconds>`
+
+Default behavior:
+
+- live run duration: `3600` seconds
+- local-only status snapshots every `300` seconds
+- full status/SLO/tick snapshots every `900` seconds
+- drain poll cadence: every `30` seconds
+- maximum graceful drain window: `900` seconds
+
+## Artifact Layout
+
+Artifacts are written under:
+
+`~/.local/share/startupai/test-runs/<UTC timestamp>/`
+
+Expected contents:
+
+- `run_meta.json`
+- `summary.json`
+- `summary.md`
+- `artifacts/backups/state-root/`
+- `artifacts/baseline/`
+- `artifacts/timeline/`
+- `artifacts/final/`
+- `artifacts/logs/consumer-run.log`
+
+`run_meta.json` records:
+
+- git commit
+- hostname
+- state/config paths
+- child command line
+- the operator's procedural single-consumer confirmation
+
+## What the Harness Captures
+
+### Baseline and Final
+
+- `board_consumer status --json`
+- `board_consumer status --json --local-only`
+- `board_consumer report-slo --json`
+- `board_consumer report-slo --json --local-only`
+- `board_control_plane tick --json --dry-run`
+- `board_consumer one-shot --dry-run`
+
+Final diagnostics also include:
+
+- `board_consumer reconcile --dry-run`
+
+### Timeline
+
+Every 5 minutes:
+
+- `board_consumer status --json --local-only`
+
+Every 15 minutes:
+
+- `board_consumer status --json`
+- `board_consumer report-slo --json`
+- `board_control_plane tick --json --dry-run`
+
+Immediate extra snapshot bundle when first observed:
+
+- `degraded=true`
+- `claim_suppressed_until` becomes non-empty
+- the consumer exits unexpectedly
+
+## Shutdown Behavior
+
+At the one-hour mark the harness runs:
+
+```bash
+uv run python -m startupai_controller.board_consumer drain
+```
+
+Then it polls local status every 30 seconds and waits for the consumer to stop
+on its own.
+
+If the consumer does not exit within the drain window:
+
+1. send `SIGINT`
+2. wait 60 seconds
+3. send `SIGTERM` if still alive
+
+The harness does **not** call `resume`. The controller stays drained and
+stopped after the test.
+
+## Report Interpretation
+
+The summary separates:
+
+- **consumer-loop evidence**
+  - degraded periods and reasons
+  - claim-suppression windows and reasons
+  - rate-limit and mutation timestamps
+  - SLO output
+  - transport-related log highlights from `consumer-run.log`
+- **control-plane proxy evidence**
+  - `github_request_counts`
+  - control-plane health transitions
+
+Important caveat:
+
+`github_request_counts` come from periodic
+`board_control_plane tick --json --dry-run` snapshots. They are a proxy for
+GitHub activity visibility, not a direct measurement of every live
+consumer-loop request.
+
+The report ends with exactly one conclusion:
+
+- `current transport acceptable for live use`
+- `current transport acceptable but needs deeper instrumentation`
+- `current transport needs a narrow GitHub MCP comparison spike before broader use`
+- `test inconclusive due to insufficient board activity`
+
+## After the Run
+
+1. Confirm the controller is still stopped and drained.
+2. Review `summary.md`, `summary.json`, and `consumer-run.log`.
+3. Compare baseline vs final status and SLO payloads.
+4. Decide whether the next step is:
+   - no transport change
+   - deeper transport instrumentation
+   - a narrow GitHub MCP comparison spike
+   - another burn-in during a busier workload window
