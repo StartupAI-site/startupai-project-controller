@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-44`
-- Active branch: `refactor/controller-10-10-phase-44`
-- Fresh-main baseline already includes merged work through `origin/main` commit `a07c55b`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-45`
+- Active branch: `refactor/controller-10-10-phase-45`
+- Fresh-main baseline already includes merged work through `origin/main` commit `a5b457e`
 
-Do not resume from the main checkout. Continue from the phase-44 worktree.
+Do not resume from the main checkout. Continue from the phase-45 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -76,29 +76,30 @@ Recent merged phases:
 - `PR #83` `refactor: split pr support helper cluster`
 - `PR #84` `refactor: type codex context wiring cluster`
 - `PR #85` `refactor: type launch worktree helper cluster`
+- `PR #86` `refactor: split runtime support helper cluster`
 
-Current unmerged phase-44 batch:
+Current unmerged phase-45 batch:
 
-- `src/startupai_controller/consumer_runtime_support_wiring.py`
+- `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 - `src/startupai_controller/consumer_support_wiring.py`
 - `tests/test_architecture_boundaries.py`
 
-Phase-44 batch summary:
+Phase-45 batch summary:
 
-- extracts the runtime/control helper cluster from `consumer_support_wiring.py` into the new `consumer_runtime_support_wiring.py` module
-- preserves the existing `consumer_support_wiring.py` surface as a thin compatibility layer for metrics, claim suppression, deferred replay queueing, admission summary loading, slot selection, retry metadata, and terminal session completion
-- adds architecture-boundary coverage to keep `consumer_support_wiring.py` routed through the new helper module
-- reduces `consumer_support_wiring.py` from `634` to `386` lines and cuts its literal `Any` count from `70` to `49`
+- extracts the remaining launch/runtime-support helper cluster from `consumer_support_wiring.py` into the new `consumer_launch_runtime_support_wiring.py` module
+- preserves the existing `consumer_support_wiring.py` surface as a thin compatibility layer for resolution verification plus re-exported launch/runtime support seams
+- extends architecture-boundary coverage so `consumer_support_wiring.py` must route both runtime/control and launch/runtime support through dedicated modules
+- reduces `consumer_support_wiring.py` from `402` to `157` lines and cuts its literal `Any` count from `55` to `18`
 
-Latest successful validation on the current phase-44 worktree:
+Latest successful validation on the current phase-45 worktree:
 
-- `python3 -m py_compile` on `consumer_runtime_support_wiring.py`, `consumer_support_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
-- targeted `mypy --follow-imports=silent` on `consumer_runtime_support_wiring.py`: passed
+- `python3 -m py_compile` on `consumer_launch_runtime_support_wiring.py`, `consumer_support_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
+- targeted `mypy --follow-imports=silent` on `consumer_launch_runtime_support_wiring.py` and `consumer_support_wiring.py`: passed
 - targeted `pytest` on architecture-boundary, board-consumer, characterization-hot-path, and contract-output slices: `210 passed`
-- `uv run black --check` on `consumer_runtime_support_wiring.py`, `consumer_support_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
+- `uv run black --check` on `consumer_launch_runtime_support_wiring.py`, `consumer_support_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
 - full suite: `882 passed`
 
-No PR is open yet for phase 44. No poller should be running until the next PR
+No PR is open yet for phase 45. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
@@ -113,15 +114,16 @@ Remaining structural hotspots after the phase-42 codex/context typing split:
 - `466` lines in `src/startupai_controller/application/consumer/launch.py`
 - `438` lines in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `433` lines in `src/startupai_controller/consumer_review_queue_drain_processing.py`
-- `386` lines in `src/startupai_controller/consumer_support_wiring.py`
-- `379` lines in `src/startupai_controller/consumer_codex_helpers.py`
 - `372` lines in `src/startupai_controller/consumer_runtime_support_wiring.py`
+- `379` lines in `src/startupai_controller/consumer_codex_helpers.py`
+- `274` lines in `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 - `375` lines in `src/startupai_controller/adapters/pull_request_query_helpers.py`
 - `367` lines in `src/startupai_controller/adapters/pull_request_board_helpers.py`
 - `339` lines in `src/startupai_controller/adapters/pull_request_batch_queries.py`
 - `291` lines in `src/startupai_controller/consumer_launch_support_wiring.py`
 - `311` lines in `src/startupai_controller/consumer_launch_helpers.py`
 - `183` lines in `src/startupai_controller/consumer_worktree_helpers.py`
+- `157` lines in `src/startupai_controller/consumer_support_wiring.py`
 - `168` lines in `src/startupai_controller/consumer_codex_runtime_wiring.py`
 - `0` `Any` usages in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `0` `Any` usages in `src/startupai_controller/consumer_codex_runtime_wiring.py`
@@ -133,7 +135,7 @@ Remaining structural hotspots after the phase-42 codex/context typing split:
 - `0` `Any` usages in `src/startupai_controller/consumer_launch_support_wiring.py`
 - `0` `Any` usages in `src/startupai_controller/consumer_worktree_helpers.py`
 - `0` `Any` usages in `src/startupai_controller/consumer_runtime_support_wiring.py`
-- remaining `Any` pockets are still concentrated in `consumer_support_wiring.py`, `consumer_context_helpers.py`, and field-sync support modules
+- remaining `Any` pockets are still concentrated in `consumer_launch_runtime_support_wiring.py`, `consumer_support_wiring.py`, `consumer_context_helpers.py`, and field-sync support modules
 
 Bounded-context completion estimate at handoff time:
 
@@ -144,14 +146,14 @@ Bounded-context completion estimate at handoff time:
 
 ## Recommended Next Batch
 
-If phase 44 is not yet merged, finish shipping the runtime/control support split:
+If phase 45 is not yet merged, finish shipping the launch/runtime support split:
 
-- `src/startupai_controller/consumer_runtime_support_wiring.py`
+- `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 - `src/startupai_controller/consumer_support_wiring.py`
 - `tests/test_architecture_boundaries.py`
 
-Once phase 44 is merged, the strongest next target is still the remaining
-support-shell and operational cluster:
+Once phase 45 is merged, the strongest next target is still the remaining
+resolution-support and operational cluster:
 
 - `src/startupai_controller/consumer_support_wiring.py`
 - `src/startupai_controller/consumer_operational_wiring.py`
@@ -160,7 +162,8 @@ support-shell and operational cluster:
 After that, the biggest structural work still pending is:
 
 - finishing the remaining payload/probe split inside `src/startupai_controller/adapters/pull_requests.py`
-- finishing the remaining runtime/issue-context cleanup inside `src/startupai_controller/consumer_support_wiring.py`
+- finishing the remaining resolution-verification cleanup inside `src/startupai_controller/consumer_support_wiring.py`
+- finishing the remaining typing cleanup inside `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 - finishing the remaining claim/reconciliation shell split inside `src/startupai_controller/consumer_operational_wiring.py`
 - any final field-sync follow-up if the operations/query modules still need another ratchet
 
@@ -173,8 +176,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-44
-- active branch: refactor/controller-10-10-phase-44
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-45
+- active branch: refactor/controller-10-10-phase-45
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -193,8 +196,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66, #67, #68, #69, #70, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81, #82, #83, #84, and #85
-- no PR is open yet for phase 44
-- latest full local validation on phase 44 was 882 passed
-- current batch is the runtime/control support split; next batch after merge is still the remaining support-shell and operational cluster
+- latest merged PRs: #66, #67, #68, #69, #70, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81, #82, #83, #84, #85, and #86
+- no PR is open yet for phase 45
+- latest full local validation on phase 45 was 882 passed
+- current batch is the launch/runtime support split; next batch after merge is still the remaining resolution-support and operational cluster
 ```
