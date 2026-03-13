@@ -12,6 +12,7 @@ from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ExecutorRoutingDecision,
 )
+from startupai_controller.payload_types import AdmissionSummaryPayload
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
@@ -91,7 +92,7 @@ class ReadyFlowPort(Protocol):
         decision: AdmissionDecision,
         *,
         enabled: bool,
-    ) -> dict[str, object]:
+    ) -> AdmissionSummaryPayload:
         """Convert admission results into a JSON-friendly payload."""
         ...
 

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypedDict
+from typing import Literal, TypedDict
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
-from startupai_controller.consumer_workflow import WorkflowDefinition
+from startupai_controller.consumer_workflow import (
+    WorkflowDefinition,
+    WorkflowRepoStatus,
+)
 from startupai_controller.domain.resolution_policy import ResolutionPayload
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
@@ -18,6 +21,7 @@ from startupai_controller.domain.models import (
     ReviewQueueEntry,
     ReviewSnapshot,
 )
+from startupai_controller.payload_types import AdmissionSummaryPayload
 from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.runtime.wiring import GitHubRuntimeMemo
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
@@ -55,14 +59,14 @@ class PreparedCycleContext:
     cp_config: CriticalPathConfig
     auto_config: BoardAutomationConfig | None
     main_workflows: dict[str, WorkflowDefinition]
-    workflow_statuses: dict[str, Any]
+    workflow_statuses: dict[str, WorkflowRepoStatus]
     dispatchable_repo_prefixes: tuple[str, ...]
     effective_interval: int
     global_limit: int
     board_snapshot: CycleBoardSnapshot
     github_memo: GitHubRuntimeMemo
     ready_flow_port: ReadyFlowPort
-    admission_summary: dict[str, Any]
+    admission_summary: AdmissionSummaryPayload
     review_queue_summary: ReviewQueueDrainSummary = field(
         default_factory=ReviewQueueDrainSummary
     )

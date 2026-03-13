@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import time
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
@@ -15,6 +16,10 @@ from startupai_controller.consumer_workflow import (
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
+)
+from startupai_controller.payload_types import (
+    AdmissionSummaryPayload,
+    ControlPlaneHealthPayload,
 )
 from startupai_controller.ports.control_plane_state import ControlPlaneStatePort
 from startupai_controller.ports.ready_flow import ReadyFlowPort
@@ -46,15 +51,15 @@ class ControlPlaneHealthSummaryFn(Protocol):
         deferred_action_count: int,
         oldest_deferred_action_age_seconds: float | None,
         poll_interval_seconds: int,
-    ) -> dict[str, str]: ...
+    ) -> ControlPlaneHealthPayload: ...
 
 
 @dataclass(frozen=True)
 class TickDeps:
     """Injected seams for control-plane tick orchestration."""
 
-    load_config: Callable[[Any], CriticalPathConfig]
-    load_automation_config: Callable[[Any], BoardAutomationConfig]
+    load_config: Callable[[Path], CriticalPathConfig]
+    load_automation_config: Callable[[Path], BoardAutomationConfig]
     apply_automation_runtime: Callable[
         [ConsumerConfig, BoardAutomationConfig | None], None
     ]
@@ -69,7 +74,10 @@ class TickDeps:
         ...,
         tuple[ReviewQueueDrainSummary, CycleBoardSnapshot],
     ]
-    persist_admission_summary: Callable[[ControlPlaneStatePort, dict[str, Any]], None]
+    persist_admission_summary: Callable[
+        [ControlPlaneStatePort, AdmissionSummaryPayload],
+        None,
+    ]
     record_successful_github_mutation: Callable[[ControlPlaneStatePort], None]
     record_successful_board_sync: Callable[[ControlPlaneStatePort], None]
     clear_degraded: Callable[[ControlPlaneStatePort], None]

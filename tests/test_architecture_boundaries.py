@@ -110,6 +110,31 @@ def _controller_runtime_imports(path: Path) -> set[str]:
     }
 
 
+def _has_literal_any_usage(path: Path) -> bool:
+    tree = ast.parse(_source_text(path))
+    typing_module_aliases: set[str] = set()
+    imported_any = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "typing":
+                    typing_module_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "typing":
+            if any(alias.name == "Any" for alias in node.names):
+                imported_any = True
+    if imported_any:
+        return True
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in typing_module_aliases
+            and node.attr == "Any"
+        ):
+            return True
+    return False
+
+
 def _source_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -209,6 +234,20 @@ def test_application_has_no_entrypoint_adapter_or_shim_imports() -> None:
             or module in {"sqlite3", "subprocess"}
         )
         assert offending == [], f"{path.name} imports outer layers: {offending}"
+
+
+def test_application_and_runtime_have_no_literal_any_usage() -> None:
+    checked_paths = sorted(APPLICATION_ROOT.rglob("*.py")) + sorted(
+        (SRC_ROOT / "runtime").rglob("*.py")
+    )
+    offending = [
+        str(path.relative_to(REPO_ROOT))
+        for path in checked_paths
+        if path.name != "__init__.py" and _has_literal_any_usage(path)
+    ]
+    assert offending == [], (
+        "application/ and runtime/ modules regained literal Any usage: " f"{offending}"
+    )
 
 
 def test_board_control_plane_does_not_import_private_consumer_helpers() -> None:

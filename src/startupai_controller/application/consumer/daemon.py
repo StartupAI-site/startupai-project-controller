@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import time
-from typing import Any, Callable, Protocol, cast
+from typing import Callable, Protocol, cast
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
@@ -24,6 +24,7 @@ from startupai_controller.application.consumer.recovery import (
     RecoveryStatePort,
 )
 from startupai_controller.domain.models import CycleResult
+from startupai_controller.payload_types import MetricPayload
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 
@@ -205,7 +206,7 @@ class RecordMetricFn(Protocol):
         metric_name: str,
         *,
         issue_ref: str | None = None,
-        payload: dict[str, Any] | None = None,
+        payload: MetricPayload | None = None,
     ) -> None: ...
 
 

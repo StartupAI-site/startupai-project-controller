@@ -30,13 +30,15 @@ from startupai_controller.domain.review_queue_policy import (
     retry_delay_seconds as _retry_delay_seconds,
     session_retry_due_at as _session_retry_due_at,
 )
+from startupai_controller.payload_types import (
+    AdmissionSummaryPayload,
+    MetricPayload,
+    SessionRetryStatePayload,
+)
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.validate_critical_path_promotion import parse_issue_ref
 from startupai_controller.runtime.wiring import gh_reason_code
 
-MetricPayload = dict[str, object]
-AdmissionSummaryPayload = dict[str, object]
-SessionRetryStatePayload = dict[str, object]
 SessionUpdateFieldValue = str | int | None
 
 
