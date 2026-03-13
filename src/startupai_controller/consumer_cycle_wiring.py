@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import Callable
 from typing import Protocol, cast
 
+import startupai_controller.consumer_comment_pr_helpers as _comment_pr_helpers
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
 from startupai_controller.application.consumer.cycle import PreparedCycleDeps
@@ -376,7 +377,9 @@ def claim_launch_context(
 ) -> tuple[ClaimedSessionContext | None, CycleResult | None]:
     """Claim board ownership and start a durable running session."""
     effective_comment_checker = comment_checker or (
-        review_state_port.comment_exists if review_state_port is not None else None
+        _comment_pr_helpers.comment_checker_from_review_state_port(review_state_port)
+        if review_state_port is not None
+        else None
     )
     effective_status_resolver = status_resolver or (
         review_state_port.get_issue_status if review_state_port is not None else None

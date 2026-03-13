@@ -113,6 +113,7 @@ def _cmd_report_slo(
         "reliability_metrics": data["reliability_metrics"],
         "context_cache_metrics": data["context_cache_metrics"],
         "worktree_reuse_metrics": data["worktree_reuse_metrics"],
+        "transport_metrics": data["transport_metrics"],
     }
     if as_json:
         print(json.dumps(report, indent=2))
@@ -154,6 +155,37 @@ def _cmd_report_slo(
             f"ready_hours_ge_4={window['ready_hours_ge_4']:.2f}"
         )
     return 0
+
+
+def _one_shot_payload(result: object) -> dict[str, object]:
+    """Render the machine-readable one-shot result payload."""
+    action = getattr(result, "action", "")
+    if action == "idle":
+        exit_class = "idle"
+    elif action == "error":
+        exit_class = "error"
+    else:
+        exit_class = "success"
+    return {
+        "action": action,
+        "reason": getattr(result, "reason", ""),
+        "issue_ref": getattr(result, "issue_ref", None),
+        "session_id": getattr(result, "session_id", None),
+        "pr_url": getattr(result, "pr_url", None),
+        "exit_class": exit_class,
+    }
+
+
+def _one_shot_error_payload(error: Exception) -> dict[str, object]:
+    """Render the machine-readable one-shot error payload."""
+    return {
+        "action": "error",
+        "reason": str(error),
+        "issue_ref": None,
+        "session_id": None,
+        "pr_url": None,
+        "exit_class": "error",
+    }
 
 
 def _create_status_http_server(
@@ -321,6 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     one_p.add_argument("--issue", default=None, help="Target issue ref (e.g. crew#84)")
     one_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
     one_p.add_argument("--dry-run", action="store_true")
+    one_p.add_argument("--json", action="store_true", dest="as_json")
     one_p.add_argument("--verbose", action="store_true")
 
     stat_p = sub.add_parser("status", help="Show consumer state")
@@ -426,13 +459,24 @@ def main(argv: list[str] | None = None) -> int:
     db = core.open_consumer_db(config.db_path)
 
     if args.command == "one-shot":
-        result = core.run_one_cycle(
-            config,
-            db,
-            dry_run=args.dry_run,
-            target_issue=getattr(args, "issue", None),
-        )
-        core.logger.info("Result: %s", result)
+        try:
+            result = core.run_one_cycle(
+                config,
+                db,
+                dry_run=args.dry_run,
+                target_issue=getattr(args, "issue", None),
+            )
+        except Exception as err:
+            if getattr(args, "as_json", False):
+                print(json.dumps(_one_shot_error_payload(err), indent=2))
+                db.close()
+                return 4
+            db.close()
+            raise
+        if getattr(args, "as_json", False):
+            print(json.dumps(_one_shot_payload(result), indent=2))
+        else:
+            core.logger.info("Result: %s", result)
         db.close()
         if result.action == "idle":
             return 2

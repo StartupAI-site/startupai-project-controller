@@ -38,7 +38,7 @@ from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
-from startupai_controller.ports.ready_flow import ReadyFlowPort
+from startupai_controller.ports.ready_flow import GitHubRunnerFn, ReadyFlowPort
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.service_control import ServiceControlPort
 from startupai_controller.ports.session_store import SessionStorePort
@@ -58,6 +58,19 @@ class GitHubPortBundle:
 
 
 GitHubRuntimeMemo = CycleGitHubMemo
+GitHubRunnerInput = GitHubRunnerFn | GhRunnerPort | None
+
+
+def gh_runner_callable(
+    *,
+    gh_runner: GitHubRunnerInput = None,
+) -> GitHubRunnerFn | None:
+    """Normalize one runtime gh runner input into the callable adapter seam."""
+    if gh_runner is None:
+        return None
+    if hasattr(gh_runner, "run_gh"):
+        return gh_runner.run_gh
+    return gh_runner
 
 
 def build_github_port_bundle(
@@ -66,30 +79,31 @@ def build_github_port_bundle(
     *,
     config: CriticalPathConfig | None = None,
     github_memo: CycleGitHubMemo | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GitHubRunnerInput = None,
 ) -> GitHubPortBundle:
     """Build the per-command/per-cycle GitHub adapter bundle."""
     memo = github_memo or CycleGitHubMemo()
+    gh_runner_fn = gh_runner_callable(gh_runner=gh_runner)
     pr_adapter = GitHubPullRequestAdapter(
         project_owner=project_owner,
         project_number=project_number,
         config=config,
         github_memo=memo,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner_fn,
     )
     review_state_adapter = GitHubReviewStateAdapter(
         project_owner=project_owner,
         project_number=project_number,
         config=config,
         github_memo=memo,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner_fn,
     )
     board_mutation_adapter = GitHubBoardMutationAdapter(
         project_owner=project_owner,
         project_number=project_number,
         config=config,
         github_memo=memo,
-        gh_runner=gh_runner,
+        gh_runner=gh_runner_fn,
     )
     return GitHubPortBundle(
         pull_requests=pr_adapter,
@@ -112,34 +126,36 @@ def open_consumer_db(db_path) -> ConsumerDB:
 
 def build_worktree_port(
     *,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GitHubRunnerInput = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> WorktreePort:
     """Build the local worktree/process adapter."""
     return LocalProcessAdapter(
-        gh_runner=gh_runner,
+        gh_runner=gh_runner_callable(gh_runner=gh_runner),
         subprocess_runner=subprocess_runner,
     )
 
 
 def build_process_runner_port(
     *,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GitHubRunnerInput = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> ProcessRunnerPort:
     """Build the local process runner port."""
     return LocalProcessAdapter(
-        gh_runner=gh_runner,
+        gh_runner=gh_runner_callable(gh_runner=gh_runner),
         subprocess_runner=subprocess_runner,
     )
 
 
 def build_gh_runner_port(
     *,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GitHubRunnerInput = None,
 ) -> GhRunnerPort:
     """Build the local gh runner port."""
-    return LocalProcessAdapter(gh_runner=gh_runner)
+    if gh_runner is not None and hasattr(gh_runner, "run_gh"):
+        return gh_runner
+    return LocalProcessAdapter(gh_runner=gh_runner_callable(gh_runner=gh_runner))
 
 
 def build_service_control_port(
@@ -178,11 +194,15 @@ def end_runtime_request_stats(token):
 def run_runtime_gh(
     args: list[str],
     *,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GitHubRunnerInput = None,
     operation_type: str = "",
 ) -> str:
     """Execute one GitHub CLI command through the runtime boundary."""
-    return _run_gh(args, gh_runner=gh_runner, operation_type=operation_type)
+    return _run_gh(
+        args,
+        gh_runner=gh_runner_callable(gh_runner=gh_runner),
+        operation_type=operation_type,
+    )
 
 
 def runtime_gh_reason_code(error: Exception) -> str:

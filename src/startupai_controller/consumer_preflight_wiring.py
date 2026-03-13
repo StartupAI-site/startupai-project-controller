@@ -48,10 +48,13 @@ from startupai_controller.runtime.wiring import (
     build_ready_flow_port,
     build_session_store,
     end_runtime_request_stats,
+    gh_runner_callable,
 )
 from startupai_controller.domain.scheduling_policy import (
     snapshot_to_issue_ref as _snapshot_to_issue_ref,
 )
+from startupai_controller.ports.process_runner import GhRunnerPort
+from startupai_controller.ports.ready_flow import GitHubRunnerFn
 from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     load_config,
@@ -95,22 +98,18 @@ def initialize_cycle_runtime(
     config: Any,
     db: Any,
     *,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GitHubRunnerFn | GhRunnerPort | None = None,
 ) -> Any:
     """Build cycle-scoped runtime wiring and effective config."""
     cp_config = load_config(config.critical_paths_path)
-    gh_port = (
-        gh_runner
-        if hasattr(gh_runner, "run_gh")
-        else build_gh_runner_port(gh_runner=gh_runner)
-    )
+    gh_port = build_gh_runner_port(gh_runner=gh_runner)
     github_memo = CycleGitHubMemo()
     github_bundle = build_github_port_bundle(
         config.project_owner,
         config.project_number,
         config=cp_config,
         github_memo=github_memo,
-        gh_runner=gh_port.run_gh if gh_port is not None else None,
+        gh_runner=gh_runner_callable(gh_runner=gh_port),
     )
     return _initialize_cycle_runtime_use_case(
         config,
@@ -288,7 +287,7 @@ def prepare_cycle(
     db: Any,
     *,
     dry_run: bool = False,
-    gh_runner: Callable[..., str] | None = None,
+    gh_runner: GitHubRunnerFn | GhRunnerPort | None = None,
 ) -> Any:
     """Run control-plane preflight once for a daemon tick."""
     return _prepare_cycle_use_case(

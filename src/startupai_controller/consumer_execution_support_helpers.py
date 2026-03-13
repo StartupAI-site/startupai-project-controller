@@ -15,6 +15,15 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 
 
+class BranchPublicationError(RuntimeError):
+    """Typed PR-head publication failure raised before PR creation."""
+
+    def __init__(self, *, reason_code: str, detail: str) -> None:
+        self.reason_code = reason_code
+        self.detail = detail
+        super().__init__(detail)
+
+
 def run_workspace_hooks(
     commands: tuple[str, ...],
     *,
@@ -131,3 +140,57 @@ def has_commits_on_branch(
         text=True,
     )
     return bool(result.stdout.strip())
+
+
+def validate_branch_publication(
+    worktree_path: str,
+    branch: str,
+    *,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> None:
+    """Require that the PR head branch exists locally and is published on origin."""
+    runner = subprocess_runner or (
+        lambda args, **kwargs: subprocess.run(args, **kwargs)
+    )
+
+    def _git(*git_args: str) -> subprocess.CompletedProcess[str]:
+        return runner(
+            ["git", "-C", worktree_path, *git_args],
+            capture_output=True,
+            text=True,
+        )
+
+    current_branch = _git("branch", "--show-current")
+    current_branch_name = current_branch.stdout.strip()
+    if current_branch.returncode != 0 or not current_branch_name:
+        detail = (
+            current_branch.stderr.strip()
+            or current_branch.stdout.strip()
+            or "unable to resolve current branch"
+        )
+        raise BranchPublicationError(
+            reason_code="branch_not_published",
+            detail=f"cannot resolve PR head branch in {worktree_path}: {detail}",
+        )
+    if current_branch_name != branch:
+        raise BranchPublicationError(
+            reason_code="branch_mismatch",
+            detail=(
+                f"refusing PR creation for {branch}: worktree is on "
+                f"{current_branch_name}"
+            ),
+        )
+
+    local_branch = _git("show-ref", "--verify", f"refs/heads/{branch}")
+    if local_branch.returncode != 0:
+        raise BranchPublicationError(
+            reason_code="branch_not_published",
+            detail=f"head branch {branch} does not exist locally",
+        )
+
+    remote_branch = _git("ls-remote", "--exit-code", "--heads", "origin", branch)
+    if remote_branch.returncode != 0 or not remote_branch.stdout.strip():
+        raise BranchPublicationError(
+            reason_code="branch_not_published",
+            detail=f"head branch {branch} is not published on origin",
+        )

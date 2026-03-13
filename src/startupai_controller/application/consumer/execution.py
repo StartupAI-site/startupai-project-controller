@@ -295,6 +295,7 @@ class ExecutionDeps:
     """Injected seams for claimed-session execution."""
 
     assemble_codex_prompt: Callable[..., str]
+    drain_requested: Callable[[Path], bool]
     run_codex_session: Callable[..., int]
     parse_codex_result: Callable[..., CodexResultPayload | None]
     session_status_from_codex_result: Callable[..., tuple[str, str | None]]
@@ -366,6 +367,41 @@ def execute_claimed_session(
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     output_path = config.output_dir / f"{session_id}.json"
+    if deps.drain_requested(config.drain_path):
+        if pr_port is None or board_port is None:
+            raise ValueError(
+                "pr_port and board_port are required for pre-execution drain aborts"
+            )
+        (
+            effective_session_status,
+            resolution_evaluation,
+            _done_reason,
+        ) = deps.handle_non_review_execution_outcome(
+            config=config,
+            db=db,
+            prepared=prepared,
+            launch_context=launch_context,
+            session_id=session_id,
+            session_status="aborted",
+            codex_result=None,
+            has_commits=False,
+            gh_runner=gh_runner,
+            pr_port=pr_port,
+            board_port=board_port,
+        )
+        return deps.build_session_execution_outcome(
+            session_status=effective_session_status,
+            failure_reason="drain_requested_pre_execution",
+            pr_url=None,
+            has_commits=False,
+            codex_result=None,
+            should_transition_to_review=False,
+            immediate_review_summary=ReviewQueueDrainSummary(),
+            resolution_evaluation=resolution_evaluation,
+            done_reason="drain_requested_pre_execution",
+        )
+
+    session_store.update_session(session_id, {"phase": "executing"})
     exit_code = deps.run_codex_session(
         launch_context.worktree_path,
         prompt,

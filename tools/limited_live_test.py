@@ -68,6 +68,8 @@ class CommandResult:
     stderr: str
     started_at: str
     completed_at: str
+    timed_out: bool = False
+    timeout_seconds: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -115,6 +117,7 @@ class LimitedLiveTestConfig:
     shutdown_poll_seconds: int
     drain_timeout_seconds: int
     post_quiesce_exit_seconds: int
+    command_timeout_seconds: int
     consumer_interval_seconds: int | None
     confirm_single_consumer: bool
     confirmation_note: str
@@ -161,14 +164,41 @@ class SubprocessBackend:
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
 
-    def run(self, argv: list[str]) -> CommandResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
         started_at = self._clock.now_utc().isoformat()
-        completed = subprocess.run(
-            argv,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            completed_at = self._clock.now_utc().isoformat()
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            timeout_note = (
+                f"command timed out after {timeout_seconds} seconds"
+                if timeout_seconds is not None
+                else "command timed out"
+            )
+            stderr = f"{stderr}\n{timeout_note}".strip()
+            return CommandResult(
+                argv=list(argv),
+                returncode=124,
+                stdout=stdout,
+                stderr=stderr,
+                started_at=started_at,
+                completed_at=completed_at,
+                timed_out=True,
+                timeout_seconds=timeout_seconds,
+            )
         completed_at = self._clock.now_utc().isoformat()
         return CommandResult(
             argv=list(argv),
@@ -177,6 +207,7 @@ class SubprocessBackend:
             stderr=completed.stderr,
             started_at=started_at,
             completed_at=completed_at,
+            timeout_seconds=timeout_seconds,
         )
 
     def start_consumer(self, argv: list[str], log_path: Path) -> ManagedProcess:
@@ -190,8 +221,15 @@ class SubprocessBackend:
         )
         return PopenManagedProcess(process, log_handle)
 
-    def local_consumer_processes(self) -> list[str]:
-        result = self.run(["ps", "-eo", "pid=,command="])
+    def local_consumer_processes(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> list[str]:
+        result = self.run(
+            ["ps", "-eo", "pid=,command="],
+            timeout_seconds=timeout_seconds,
+        )
         if result.returncode != 0:
             return []
         matches: list[str] = []
@@ -204,8 +242,15 @@ class SubprocessBackend:
                 matches.append(command)
         return matches
 
-    def systemd_consumer_active(self) -> bool:
-        result = self.run(["systemctl", "--user", "is-active", "startupai-consumer"])
+    def systemd_consumer_active(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        result = self.run(
+            ["systemctl", "--user", "is-active", "startupai-consumer"],
+            timeout_seconds=timeout_seconds,
+        )
         return result.returncode == 0 and result.stdout.strip() in {
             "active",
             "activating",
@@ -304,18 +349,25 @@ class LimitedLiveTestHarness:
             raise HarnessError(
                 "Cross-machine single-consumer confirmation is required."
             )
-        if self.backend.systemd_consumer_active():
+        if self.backend.systemd_consumer_active(
+            timeout_seconds=float(self.config.command_timeout_seconds)
+        ):
             raise HarnessError("Local startupai-consumer systemd unit is active.")
-        if self.backend.local_consumer_processes():
+        if self.backend.local_consumer_processes(
+            timeout_seconds=float(self.config.command_timeout_seconds)
+        ):
             raise HarnessError("Another local board_consumer run process is active.")
-        self._require_ok(self.backend.run(["gh", "auth", "status"]), "gh auth status")
         self._require_ok(
-            self.backend.run(self._consumer_status_command(local_only=False)),
-            "board_consumer status --json",
+            self._run_aux_command(["gh", "auth", "status"]),
+            "gh auth status",
         )
         self._require_ok(
-            self.backend.run(self._consumer_one_shot_command()),
-            "board_consumer one-shot --dry-run",
+            self._run_aux_command(self._consumer_status_command(local_only=False)),
+            "board_consumer status --json",
+        )
+        self._require_one_shot_ok(
+            self._run_aux_command(self._consumer_one_shot_command()),
+            "board_consumer one-shot --dry-run --json",
         )
 
     def _capture_baseline_snapshots(self) -> None:
@@ -379,7 +431,7 @@ class LimitedLiveTestHarness:
             self._shutdown_mode = "unexpected-exit"
             return
         drain_requested_at = self.clock.monotonic()
-        drain_result = self.backend.run(self._consumer_drain_command())
+        drain_result = self._run_aux_command(self._consumer_drain_command())
         if not drain_result.ok:
             self.snapshot_failures.append("drain command failed")
             self.issues.append("Drain request failed; forcing shutdown escalation.")
@@ -417,7 +469,6 @@ class LimitedLiveTestHarness:
             self.clock.sleep(float(self.config.shutdown_poll_seconds))
         self._forced_shutdown = True
         self._shutdown_mode = "forced"
-        self.issues.append("Drain timeout exceeded; sent SIGINT/SIGTERM escalation.")
         child.send_signal(signal.SIGINT)
         sigint_deadline = self.clock.monotonic() + 60
         while self.clock.monotonic() < sigint_deadline:
@@ -510,7 +561,7 @@ class LimitedLiveTestHarness:
         reason: str | None = None,
     ) -> SnapshotRecord:
         directory.mkdir(parents=True, exist_ok=True)
-        result = self.backend.run(command)
+        result = self._run_aux_command(command)
         base = directory / name
         payload = _parse_json(result.stdout)
         if payload is not None:
@@ -527,6 +578,8 @@ class LimitedLiveTestHarness:
                 "started_at": result.started_at,
                 "completed_at": result.completed_at,
                 "reason": reason,
+                "timed_out": result.timed_out,
+                "timeout_seconds": result.timeout_seconds,
             },
         )
         record = SnapshotRecord(
@@ -544,13 +597,19 @@ class LimitedLiveTestHarness:
             self.tick_records.append(record)
         elif "report-slo" in name:
             self.slo_records.append(record)
-        if result.returncode != 0:
+        if result.returncode != 0 and not self._is_nonfatal_one_shot_idle(
+            result,
+            payload,
+        ):
             message = f"{name} failed with exit code {result.returncode}"
+            if result.timed_out:
+                message = f"{name} timed out after {result.timeout_seconds} seconds"
             self.snapshot_failures.append(message)
             self.issues.append(message)
         return record
 
     def _build_summary(self) -> RunSummary:
+        acceptable_forced_shutdown = self._acceptable_forced_shutdown()
         degraded_periods = _derive_periods(
             self.status_records, "degraded", "degraded_reason"
         )
@@ -579,6 +638,7 @@ class LimitedLiveTestHarness:
             degraded_periods,
             claim_periods,
             log_highlights,
+            acceptable_forced_shutdown=acceptable_forced_shutdown,
         )
         if not self.snapshot_failures:
             self.worked.append(
@@ -586,6 +646,15 @@ class LimitedLiveTestHarness:
             )
         if not self._unexpected_exit:
             self.worked.append("consumer remained under supervised harness control")
+        if self._forced_shutdown:
+            if acceptable_forced_shutdown:
+                self.worked.append(
+                    "forced shutdown occurred only after waiting on in-flight external execution"
+                )
+            else:
+                self.issues.append(
+                    "Drain timeout exceeded; sent SIGINT/SIGTERM escalation."
+                )
         improvements = list(self.improvements)
         if conclusion == SUMMARY_CONCLUSIONS[1]:
             improvements.append(
@@ -618,6 +687,8 @@ class LimitedLiveTestHarness:
         degraded_periods: list[dict[str, Any]],
         claim_periods: list[dict[str, Any]],
         log_highlights: list[str],
+        *,
+        acceptable_forced_shutdown: bool,
     ) -> str:
         if not self._meaningful_board_activity:
             return SUMMARY_CONCLUSIONS[3]
@@ -639,10 +710,35 @@ class LimitedLiveTestHarness:
             degraded_periods
             or self.snapshot_failures
             or self._unexpected_exit
-            or self._forced_shutdown
+            or (self._forced_shutdown and not acceptable_forced_shutdown)
         ):
             return SUMMARY_CONCLUSIONS[1]
         return SUMMARY_CONCLUSIONS[0]
+
+    def _acceptable_forced_shutdown(self) -> bool:
+        """Return True when forced shutdown waited only on in-flight execution."""
+        if not self._forced_shutdown:
+            return False
+        payload = self._latest_local_status_payload()
+        if payload is None:
+            return False
+        workers = payload.get("workers") or []
+        if not workers:
+            return False
+        return all(
+            worker.get("status") == "running"
+            and worker.get("external_execution_started") is True
+            and worker.get("drain_wait_class") == "finishing_inflight_execution"
+            for worker in workers
+        )
+
+    def _latest_local_status_payload(self) -> dict[str, Any] | None:
+        """Return the latest local-only status payload captured by the harness."""
+        for record in reversed(self.status_records):
+            payload = record.payload
+            if payload and payload.get("local_only") is True:
+                return payload
+        return None
 
     def _write_summary(self, summary: RunSummary) -> None:
         summary_payload = asdict(summary)
@@ -760,6 +856,7 @@ class LimitedLiveTestHarness:
             "startupai_controller.board_consumer",
             "one-shot",
             "--dry-run",
+            "--json",
         ]
         if self.config.db_path:
             command.extend(["--db-path", str(self.config.db_path)])
@@ -818,15 +915,50 @@ class LimitedLiveTestHarness:
     def _require_ok(self, result: CommandResult, label: str) -> None:
         if result.ok:
             return
+        if result.timed_out:
+            raise HarnessError(
+                f"{label} timed out after {result.timeout_seconds} seconds."
+            )
+        raise HarnessError(
+            f"{label} failed with exit code {result.returncode}: {result.stderr or result.stdout}"
+        )
+
+    def _require_one_shot_ok(self, result: CommandResult, label: str) -> None:
+        payload = _parse_json(result.stdout)
+        if result.ok or self._is_nonfatal_one_shot_idle(result, payload):
+            return
+        if result.timed_out:
+            raise HarnessError(
+                f"{label} timed out after {result.timeout_seconds} seconds."
+            )
         raise HarnessError(
             f"{label} failed with exit code {result.returncode}: {result.stderr or result.stdout}"
         )
 
     def _git_commit(self) -> str | None:
-        result = self.backend.run(["git", "rev-parse", "HEAD"])
+        result = self._run_aux_command(["git", "rev-parse", "HEAD"])
         if result.ok:
             return result.stdout.strip()
         return None
+
+    def _run_aux_command(self, argv: list[str]) -> CommandResult:
+        return self.backend.run(
+            argv,
+            timeout_seconds=float(self.config.command_timeout_seconds),
+        )
+
+    def _is_nonfatal_one_shot_idle(
+        self,
+        result: CommandResult,
+        payload: dict[str, Any] | None,
+    ) -> bool:
+        if "one-shot" not in result.argv:
+            return False
+        if result.returncode != 2:
+            return False
+        if payload is None:
+            return False
+        return payload.get("exit_class") == "idle" and payload.get("action") == "idle"
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -968,6 +1100,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra wait after local quiescence before escalation.",
     )
     parser.add_argument(
+        "--command-timeout-seconds",
+        type=int,
+        default=300,
+        help="Timeout for auxiliary snapshot and preflight commands.",
+    )
+    parser.add_argument(
         "--consumer-interval-seconds",
         type=int,
         default=None,
@@ -998,6 +1136,7 @@ def config_from_args(args: argparse.Namespace) -> LimitedLiveTestConfig:
         shutdown_poll_seconds=args.shutdown_poll_seconds,
         drain_timeout_seconds=args.drain_timeout_seconds,
         post_quiesce_exit_seconds=args.post_quiesce_exit_seconds,
+        command_timeout_seconds=args.command_timeout_seconds,
         consumer_interval_seconds=args.consumer_interval_seconds,
         confirm_single_consumer=args.confirm_single_consumer,
         confirmation_note=args.confirmation_note,

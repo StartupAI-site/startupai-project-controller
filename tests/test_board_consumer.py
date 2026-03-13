@@ -1731,6 +1731,7 @@ class TestRunOneCycle:
             "subprocess": [],
             "comments": [],
         }
+        current_branch_name = {"value": "feat/84-test-issue"}
 
         def gh_runner(args, **kw):
             call_log["gh"].append(list(args))
@@ -1833,6 +1834,76 @@ class TestRunOneCycle:
                 stdout = "abc1234 Some commit" if has_commits else ""
                 return subprocess.CompletedProcess(
                     args=args, returncode=0, stdout=stdout, stderr=""
+                )
+
+            if len(args) >= 5 and args[:4] == [
+                "git",
+                "-C",
+                str(worktree_root),
+                "checkout",
+            ]:
+                current_branch_name["value"] = str(args[4])
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                )
+
+            if args[:5] == [
+                "git",
+                "-C",
+                str(worktree_root),
+                "branch",
+                "--show-current",
+            ]:
+                branch_file = worktree_root / ".current_branch"
+                branch_name = (
+                    branch_file.read_text().strip()
+                    if branch_file.exists()
+                    else current_branch_name["value"]
+                )
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout=f"{branch_name}\n",
+                    stderr="",
+                )
+
+            if (
+                len(args) == 6
+                and args[:5]
+                == [
+                    "git",
+                    "-C",
+                    str(worktree_root),
+                    "show-ref",
+                    "--verify",
+                ]
+                and str(args[5]).startswith("refs/heads/")
+            ):
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout=f"abc123 refs/heads/{Path(str(args[5])).name}\n",
+                    stderr="",
+                )
+
+            if len(args) == 8 and args[:7] == [
+                "git",
+                "-C",
+                str(worktree_root),
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+            ]:
+                branch = str(args[7])
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout=f"abc123\trefs/heads/{branch}\n",
+                    stderr="",
                 )
 
             return subprocess.CompletedProcess(
@@ -2735,9 +2806,12 @@ class TestRunOneCycle:
         monkeypatch.setattr(
             "startupai_controller.consumer_launch_support_wiring.create_worktree",
             lambda issue_ref, title, config, **kwargs: (
+                (tmp_path / "claimed-worktree" / ".current_branch").write_text(
+                    f"{kwargs['branch_name_override']}\n"
+                ),
                 str(tmp_path / "claimed-worktree"),
                 kwargs["branch_name_override"],
-            ),
+            )[1:],
         )
         monkeypatch.setattr(
             "startupai_controller.consumer_codex_comment_wiring.create_or_update_pr",
@@ -2801,9 +2875,12 @@ class TestRunOneCycle:
         monkeypatch.setattr(
             "startupai_controller.consumer_launch_support_wiring.create_worktree",
             lambda issue_ref, title, config, **kwargs: (
+                (tmp_path / "claimed-worktree" / ".current_branch").write_text(
+                    f"{kwargs['branch_name_override']}\n"
+                ),
                 str(tmp_path / "claimed-worktree"),
                 kwargs["branch_name_override"],
-            ),
+            )[1:],
         )
         monkeypatch.setattr(
             "startupai_controller.consumer_launch_support_wiring.reconcile_repair_branch",
@@ -2863,9 +2940,12 @@ class TestRunOneCycle:
         monkeypatch.setattr(
             "startupai_controller.consumer_launch_support_wiring.create_worktree",
             lambda issue_ref, title, config, **kwargs: (
+                (tmp_path / "claimed-worktree" / ".current_branch").write_text(
+                    f"{kwargs['branch_name_override']}\n"
+                ),
                 str(tmp_path / "claimed-worktree"),
                 kwargs["branch_name_override"],
-            ),
+            )[1:],
         )
         monkeypatch.setattr(
             "startupai_controller.consumer_launch_support_wiring.reconcile_repair_branch",

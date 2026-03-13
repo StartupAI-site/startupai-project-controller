@@ -113,6 +113,7 @@ def create_pr_for_execution_result(
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
         has_commits_on_branch=_execution_support_helpers.has_commits_on_branch,
+        validate_branch_publication=_execution_support_helpers.validate_branch_publication,
         create_or_update_pr=_codex_comment_wiring.create_or_update_pr,
         pr_creation_outcome_factory=PrCreationOutcome,
         logger=logger,

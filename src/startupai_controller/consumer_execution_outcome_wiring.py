@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 from typing import Callable, Protocol, cast
 
+import startupai_controller.consumer_comment_pr_helpers as _comment_pr_helpers
 import startupai_controller.consumer_review_handoff_helpers as _review_handoff_helpers
 from startupai_controller.application.consumer.execution import (
     ExecutionDeps,
@@ -55,6 +56,9 @@ from startupai_controller.runtime.wiring import (
     build_github_port_bundle,
     build_process_runner_port,
     build_session_store,
+)
+from startupai_controller.consumer_drain_control import (
+    drain_requested as _drain_requested,
 )
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
@@ -161,6 +165,7 @@ def create_pr_for_execution_result(
     subprocess_runner: SubprocessRunnerFn | None,
     gh_runner: GitHubRunnerFn | None,
     has_commits_on_branch: Callable[..., bool],
+    validate_branch_publication: Callable[..., None],
     create_or_update_pr: Callable[..., str],
     pr_creation_outcome_factory: type[PrCreationOutcome],
     logger: LoggerLike,
@@ -176,6 +181,7 @@ def create_pr_for_execution_result(
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
         has_commits_on_branch=has_commits_on_branch,
+        validate_branch_publication=validate_branch_publication,
         create_or_update_pr=create_or_update_pr,
         pr_creation_outcome_factory=pr_creation_outcome_factory,
         logger=logger,
@@ -778,6 +784,7 @@ def execute_claimed_session(
         prepared=prepared,
         deps=ExecutionDeps(
             assemble_codex_prompt=assemble_codex_prompt,
+            drain_requested=_drain_requested,
             run_codex_session=run_codex_session,
             parse_codex_result=parse_codex_result,
             session_status_from_codex_result=session_status_from_codex_result,
@@ -819,7 +826,9 @@ def finalize_claimed_session(
     """Persist final session state and return the cycle result."""
     gh_runner_fn = _gh_runner_callable(gh_runner)
     effective_comment_checker = comment_checker or (
-        review_state_port.comment_exists if review_state_port is not None else None
+        _comment_pr_helpers.comment_checker_from_review_state_port(review_state_port)
+        if review_state_port is not None
+        else None
     )
 
     def _post_claimed_session_result_comment(

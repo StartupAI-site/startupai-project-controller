@@ -59,6 +59,22 @@ class MetricWindowPayload(TypedDict):
     occupied_slots_per_ready_hour_ge_4: float | None
 
 
+class TransportWindowPayload(TypedDict):
+    """Rolling transport-observation summary emitted in status/report outputs."""
+
+    hours: int
+    observations: int
+    graphql_requests: int
+    rest_requests: int
+    total_requests: int
+    retry_attempts: int
+    cli_fallbacks: int
+    latency_le_250_ms: int
+    latency_le_1000_ms: int
+    latency_gt_1000_ms: int
+    error_counts: ObjectPayload
+
+
 class CurrentMainWorkflowsFn(Protocol):
     """Load the canonical workflow definitions/statuses for status reporting."""
 
@@ -131,6 +147,8 @@ class CollectedStatusRuntimeState:
     admission_summary: AdmissionSummaryPayload
     throughput_1h: MetricWindowPayload
     throughput_24h: MetricWindowPayload
+    transport_1h: TransportWindowPayload
+    transport_24h: TransportWindowPayload
 
 
 @dataclass(frozen=True)
@@ -358,7 +376,51 @@ def _lane_wip_limits_payload(
     return lane_wip_limits
 
 
-def _worker_status_payload(worker: SessionInfo) -> WorkerStatusPayload:
+def _active_seconds(started_at: str | None, *, now: datetime) -> int | None:
+    """Return active duration in seconds when a start timestamp is present."""
+    if not started_at:
+        return None
+    started = datetime.fromisoformat(started_at)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0, int((now - started).total_seconds()))
+
+
+def _external_execution_started(session: SessionInfo) -> bool:
+    """Return True once the claimed session crossed into Codex execution."""
+    return session.phase == "executing"
+
+
+def _drain_wait_class(
+    session: SessionInfo,
+    *,
+    drain_requested: bool,
+) -> str:
+    """Classify why a session is still active during a drain window."""
+    if session.status != "running":
+        return "not_draining"
+    if not drain_requested:
+        return "not_draining"
+    if _external_execution_started(session):
+        return "finishing_inflight_execution"
+    return "pre_execution_abort_pending"
+
+
+def _drain_abort_reason(session: SessionInfo) -> str | None:
+    """Return the structured drain abort reason when this session was drained."""
+    if session.failure_reason == "drain_requested_pre_execution":
+        return session.failure_reason
+    if session.done_reason == "drain_requested_pre_execution":
+        return session.done_reason
+    return None
+
+
+def _worker_status_payload(
+    worker: SessionInfo,
+    *,
+    now: datetime,
+    drain_requested: bool,
+) -> WorkerStatusPayload:
     """Render one active worker payload."""
     return {
         "id": worker.id,
@@ -366,6 +428,14 @@ def _worker_status_payload(worker: SessionInfo) -> WorkerStatusPayload:
         "slot_id": worker.slot_id,
         "phase": worker.phase,
         "status": worker.status,
+        "started_at": worker.started_at,
+        "active_seconds": _active_seconds(worker.started_at, now=now),
+        "external_execution_started": _external_execution_started(worker),
+        "drain_wait_class": _drain_wait_class(
+            worker,
+            drain_requested=drain_requested,
+        ),
+        "drain_abort_reason": _drain_abort_reason(worker),
         "session_kind": worker.session_kind,
         "repair_pr_url": worker.repair_pr_url,
         "branch_reconcile_state": worker.branch_reconcile_state,
@@ -430,12 +500,69 @@ def _worktree_reuse_status_payload(
     }
 
 
+def _transport_window_payload(
+    db: StatusStorePort,
+    *,
+    hours: int,
+    now: datetime,
+) -> TransportWindowPayload:
+    """Summarize persisted transport observations over a rolling window."""
+    since = now - timedelta(hours=hours)
+    observations = db.metric_events_since(
+        since,
+        event_types=("github_transport_observation",),
+    )
+    error_counts: dict[str, int] = {}
+    graphql_requests = 0
+    rest_requests = 0
+    retry_attempts = 0
+    cli_fallbacks = 0
+    latency_le_250_ms = 0
+    latency_le_1000_ms = 0
+    latency_gt_1000_ms = 0
+    for observation in observations:
+        payload = observation.payload
+        graphql_requests += int(payload.get("graphql_requests", 0) or 0)
+        rest_requests += int(payload.get("rest_requests", 0) or 0)
+        retry_attempts += int(payload.get("retry_attempts", 0) or 0)
+        cli_fallbacks += int(payload.get("cli_fallbacks", 0) or 0)
+        latency_le_250_ms += int(payload.get("latency_le_250_ms", 0) or 0)
+        latency_le_1000_ms += int(payload.get("latency_le_1000_ms", 0) or 0)
+        latency_gt_1000_ms += int(payload.get("latency_gt_1000_ms", 0) or 0)
+        raw_error_counts = payload.get("error_counts", {})
+        if isinstance(raw_error_counts, dict):
+            for key, value in raw_error_counts.items():
+                error_counts[str(key)] = error_counts.get(str(key), 0) + int(value or 0)
+    return {
+        "hours": hours,
+        "observations": len(observations),
+        "graphql_requests": graphql_requests,
+        "rest_requests": rest_requests,
+        "total_requests": graphql_requests + rest_requests,
+        "retry_attempts": retry_attempts,
+        "cli_fallbacks": cli_fallbacks,
+        "latency_le_250_ms": latency_le_250_ms,
+        "latency_le_1000_ms": latency_le_1000_ms,
+        "latency_gt_1000_ms": latency_gt_1000_ms,
+        "error_counts": dict(sorted(error_counts.items())),
+    }
+
+
+def _transport_status_payload(
+    transport_1h: TransportWindowPayload,
+    transport_24h: TransportWindowPayload,
+) -> ObjectPayload:
+    """Render transport-observation payload for status JSON."""
+    return {"windows": {"1h": transport_1h, "24h": transport_24h}}
+
+
 def _recent_session_status_payload(
     session: SessionInfo,
     *,
     config: ConsumerConfig,
     workflows: dict[str, WorkflowDefinition],
     now: datetime,
+    drain_requested: bool,
     session_retry_state: SessionRetryStateFn,
 ) -> RecentSessionStatusPayload:
     """Render one recent session payload for status JSON."""
@@ -451,7 +578,14 @@ def _recent_session_status_payload(
         "branch_reconcile_state": session.branch_reconcile_state,
         "branch_reconcile_error": session.branch_reconcile_error,
         "started_at": session.started_at,
+        "active_seconds": _active_seconds(session.started_at, now=now),
         "completed_at": session.completed_at,
+        "external_execution_started": _external_execution_started(session),
+        "drain_wait_class": _drain_wait_class(
+            session,
+            drain_requested=drain_requested,
+        ),
+        "drain_abort_reason": _drain_abort_reason(session),
         "pr_url": session.pr_url,
         "resolution_kind": session.resolution_kind,
         "verification_class": session.verification_class,
@@ -542,6 +676,8 @@ def _collect_status_runtime_state(
         now=status_now,
         parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
     )
+    transport_1h = _transport_window_payload(db, hours=1, now=status_now)
+    transport_24h = _transport_window_payload(db, hours=24, now=status_now)
 
     return CollectedStatusRuntimeState(
         leases=leases,
@@ -556,6 +692,8 @@ def _collect_status_runtime_state(
         admission_summary=admission_summary,
         throughput_1h=throughput_1h,
         throughput_24h=throughput_24h,
+        transport_1h=transport_1h,
+        transport_24h=transport_24h,
     )
 
 
@@ -580,6 +718,8 @@ def _build_status_payload(
     admission_summary: AdmissionSummaryPayload,
     throughput_1h: MetricWindowPayload,
     throughput_24h: MetricWindowPayload,
+    transport_1h: TransportWindowPayload,
+    transport_24h: TransportWindowPayload,
     local_only: bool,
     deps: CollectStatusPayloadDeps,
 ) -> StatusPayload:
@@ -598,6 +738,7 @@ def _build_status_payload(
     claim_suppressed_reason = control_state.get(suppressed_reason_key)
     claim_suppressed_scope = control_state.get(suppressed_scope_key)
     last_rate_limit_at = control_state.get(last_rate_limit_key)
+    drain_requested = deps.drain_requested(config.drain_path)
     control_plane_health = deps.control_plane_health_summary(
         control_state,
         deferred_action_count=deferred_action_count,
@@ -609,12 +750,19 @@ def _build_status_payload(
     return {
         "active_leases": leases,
         "active_slots": slots,
-        "workers": [_worker_status_payload(worker) for worker in workers],
+        "workers": [
+            _worker_status_payload(
+                worker,
+                now=status_now,
+                drain_requested=drain_requested,
+            )
+            for worker in workers
+        ],
         "repo_prefixes": list(config.repo_prefixes),
         "global_concurrency": config.global_concurrency,
         "lane_wip_limits": lane_wip_limits,
         "poll_interval_seconds": effective_interval,
-        "drain_requested": deps.drain_requested(config.drain_path),
+        "drain_requested": drain_requested,
         "drain_path": str(config.drain_path),
         "workflow_state_path": str(config.workflow_state_path),
         "workflow_last_reload_at": last_reload_at,
@@ -639,6 +787,7 @@ def _build_status_payload(
         "worktree_reuse_metrics": _worktree_reuse_status_payload(
             throughput_1h, throughput_24h
         ),
+        "transport_metrics": _transport_status_payload(transport_1h, transport_24h),
         "review_summary": review_summary,
         "review_queue": review_queue,
         "admission": admission_summary,
@@ -652,6 +801,7 @@ def _build_status_payload(
                 config=config,
                 workflows=main_workflows,
                 now=status_now,
+                drain_requested=drain_requested,
                 session_retry_state=deps.session_retry_state,
             )
             for session in sessions
@@ -708,4 +858,6 @@ def collect_status_payload(
         admission_summary=status_state.admission_summary,
         throughput_1h=status_state.throughput_1h,
         throughput_24h=status_state.throughput_24h,
+        transport_1h=status_state.transport_1h,
+        transport_24h=status_state.transport_24h,
     )

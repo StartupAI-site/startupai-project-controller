@@ -16,6 +16,48 @@ Use this harness when you want to:
 This is a proving exercise, not a transport migration. It uses the current
 controller exactly as shipped. It does not switch to GitHub MCP.
 
+## Latest Burn-In Result
+
+The latest completed live run at
+`~/.local/share/startupai/test-runs/20260313T185906Z/` concluded:
+
+- `current transport acceptable but needs deeper instrumentation`
+
+Operational follow-up policy from that run:
+
+- keep the current GitHub transport layer for now
+- do **not** migrate to GitHub MCP in the next defect batch
+- fix controller workflow defects first
+- persist deeper transport metrics in existing status/SLO outputs so the next
+  burn-in can compare controller failures against transport behavior more
+  precisely
+
+Observed live defects from that run:
+
+- repeated PR creation failures from invalid unpublished head branches
+- one transient degraded window from an `In Progress` board-transition race
+
+Observed review anomalies that still require artifact-first validation before
+any policy change:
+
+- `missing-copilot-review`
+- missing codex verdict marker escalation on `app#126` / PR `#219`
+
+Artifact-first validation command:
+
+```bash
+uv run python tools/validate_burnin_review_anomalies.py --write-report
+```
+
+Latest artifact-first validation result for `20260313T185906Z`:
+
+- the burn-in artifacts contain repeated log evidence for both
+  `missing-copilot-review` and missing codex verdict marker on
+  `app#126` / PR `#219`
+- matching status snapshots confirm the same issue/session context
+- no contradictory artifact evidence shows controller misclassification
+- therefore no review-policy change is included in this defect batch
+
 ## Safety Model
 
 - Real board and PR actions are allowed.
@@ -49,7 +91,7 @@ controller exactly as shipped. It does not switch to GitHub MCP.
 
    ```bash
    uv run python -m startupai_controller.board_consumer status --json
-   uv run python -m startupai_controller.board_consumer one-shot --dry-run
+   uv run python -m startupai_controller.board_consumer one-shot --dry-run --json
    ```
 
 ## Run Command
@@ -64,6 +106,7 @@ Optional overrides:
 
 - `--db-path <path>`
 - `--consumer-interval-seconds <seconds>`
+- `--command-timeout-seconds <seconds>`
 - `--duration-seconds <seconds>`
 - `--local-snapshot-seconds <seconds>`
 - `--full-snapshot-seconds <seconds>`
@@ -75,6 +118,16 @@ Default behavior:
 - full status/SLO/tick snapshots every `900` seconds
 - drain poll cadence: every `30` seconds
 - maximum graceful drain window: `900` seconds
+- auxiliary command timeout: `300` seconds
+
+`--command-timeout-seconds` applies only to auxiliary commands such as:
+
+- preflight readiness checks
+- baseline snapshots
+- timeline snapshots
+- final diagnostics
+
+It does **not** apply to the supervised consumer child process.
 
 ## Artifact Layout
 
@@ -110,7 +163,7 @@ Expected contents:
 - `board_consumer report-slo --json`
 - `board_consumer report-slo --json --local-only`
 - `board_control_plane tick --json --dry-run`
-- `board_consumer one-shot --dry-run`
+- `board_consumer one-shot --dry-run --json`
 
 Final diagnostics also include:
 
@@ -133,6 +186,16 @@ Immediate extra snapshot bundle when first observed:
 - `degraded=true`
 - `claim_suppressed_until` becomes non-empty
 - the consumer exits unexpectedly
+
+If an auxiliary snapshot command times out:
+
+- the timeout is recorded in artifact metadata and the final summary
+- the harness continues where safe
+- a timeout is evidence for review, not automatically a harness failure
+
+If a preflight/readiness command times out:
+
+- the run aborts before the consumer child starts
 
 ## Shutdown Behavior
 
@@ -187,7 +250,11 @@ The report ends with exactly one conclusion:
 1. Confirm the controller is still stopped and drained.
 2. Review `summary.md`, `summary.json`, and `consumer-run.log`.
 3. Compare baseline vs final status and SLO payloads.
-4. Decide whether the next step is:
+4. Treat `one-shot --dry-run --json` with `exit_class=idle` as valid evidence rather
+   than a harness failure.
+5. For short smoke runs, forced shutdown is only acceptable when the remaining
+   active workers are explicitly classified as `finishing_inflight_execution`.
+6. Decide whether the next step is:
    - no transport change
    - deeper transport instrumentation
    - a narrow GitHub MCP comparison spike

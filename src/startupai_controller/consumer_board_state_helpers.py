@@ -67,6 +67,7 @@ def transition_issue_to_in_progress(
     *,
     build_github_port_bundle: Callable[..., Any],
     from_statuses: set[str] | None = None,
+    active_session_id: str | None = None,
     review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -84,7 +85,9 @@ def transition_issue_to_in_progress(
         port_review = port_review or bundle.review_state
         port_board = port_board or bundle.board_mutations
     old_status = port_review.get_issue_status(issue_ref)
-    if old_status in (from_statuses or {"Review"}):
+    allowed_statuses = from_statuses or {"Review"}
+    same_session_ready_race = old_status == "Ready" and active_session_id is not None
+    if old_status in allowed_statuses or same_session_ready_race:
         port_board.set_issue_status(issue_ref, "In Progress")
         changed = True
     else:
@@ -137,7 +140,7 @@ def reconcile_active_repair_review_items(
     consumer_config: Any,
     critical_path_config: Any,
     *,
-    active_repair_issue_refs: set[str],
+    active_repair_sessions_by_issue: dict[str, str],
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
     board_snapshot: Any | None,
@@ -161,7 +164,8 @@ def reconcile_active_repair_review_items(
             continue
         if snapshot.executor.strip().lower() != consumer_config.executor:
             continue
-        if issue_ref not in active_repair_issue_refs:
+        active_session_id = active_repair_sessions_by_issue.get(issue_ref)
+        if active_session_id is None:
             continue
 
         if not dry_run:
@@ -170,6 +174,7 @@ def reconcile_active_repair_review_items(
                 critical_path_config,
                 consumer_config.project_owner,
                 consumer_config.project_number,
+                active_session_id=active_session_id,
                 review_state_port=review_state_port,
                 board_port=board_port,
             )
@@ -356,6 +361,7 @@ def transition_issue_to_in_progress_from_shell(
     project_number: int,
     *,
     from_statuses: set[str] | None = None,
+    active_session_id: str | None = None,
     review_state_port: Any | None = None,
     board_port: Any | None = None,
     board_info_resolver: Callable[..., Any] | None = None,
@@ -371,6 +377,7 @@ def transition_issue_to_in_progress_from_shell(
         project_number,
         build_github_port_bundle=build_github_port_bundle,
         from_statuses=from_statuses,
+        active_session_id=active_session_id,
         review_state_port=review_state_port,
         board_port=board_port,
         gh_runner=gh_runner,
