@@ -495,6 +495,15 @@ def test_consumer_review_queue_processing_routes_due_drain_through_module() -> N
     ), "consumer_review_queue_processing.py should depend on consumer_review_queue_drain_processing"
 
 
+def test_pull_request_adapter_routes_batch_graphql_queries_through_helper_module() -> (
+    None
+):
+    imported = _controller_runtime_imports(SRC_ROOT / "adapters" / "pull_requests.py")
+    assert (
+        "startupai_controller.adapters.pull_request_batch_queries" in imported
+    ), "adapters/pull_requests.py should depend on pull_request_batch_queries"
+
+
 def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
     source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
     forbidden = [

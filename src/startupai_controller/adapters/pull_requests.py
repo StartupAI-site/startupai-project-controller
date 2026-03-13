@@ -6,8 +6,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import json
 import time
-from typing import Any
+from typing import cast
 
+import startupai_controller.adapters.pull_request_batch_queries as _pull_request_batch_queries
 from startupai_controller.adapters.github_base import GitHubAdapterBase
 from startupai_controller.adapters import (
     pull_request_support as _pull_request_support,
@@ -43,6 +44,9 @@ from startupai_controller.adapters.github_types import (
     COPILOT_CODING_AGENT_LOGINS,
     CycleGitHubMemo,
     CodexReviewVerdict,
+    GitHubCommentNode,
+    GitHubReviewNode,
+    GitHubStatusCheckRollupNode,
     LinkedIssue,
     PullRequestViewPayload,
     PullRequestStateProbe as _PullRequestStateProbe,
@@ -291,9 +295,12 @@ class GitHubPullRequestAdapter(GitHubAdapterBase):
             base_ref_name=str(payload.get("baseRefName") or "main"),
             merged_at=str(payload.get("mergedAt") or ""),
             auto_merge_enabled=payload.get("autoMergeRequest") is not None,
-            comments=comments,
-            reviews=reviews,
-            status_check_rollup=status_check_rollup,
+            comments=cast(tuple[GitHubCommentNode, ...], comments),
+            reviews=cast(tuple[GitHubReviewNode, ...], reviews),
+            status_check_rollup=cast(
+                tuple[GitHubStatusCheckRollupNode, ...],
+                status_check_rollup,
+            ),
         )
 
     def _query_closing_issue_refs(
@@ -390,148 +397,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
         pr_numbers: Sequence[int],
     ) -> dict[int, PullRequestViewPayload]:
         """Return expanded PR payloads for a bounded set of PR numbers."""
-        if "/" not in pr_repo:
-            raise ValueError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
-        owner, repo = pr_repo.split("/", maxsplit=1)
         numbers = tuple(sorted({int(number) for number in pr_numbers}))
-        if not numbers:
-            return {}
         if len(numbers) == 1:
             number = numbers[0]
             return {number: self._query_pull_request_view_payload(pr_repo, number)}
-
-        fields = """
-      number
-      url
-      state
-      isDraft
-      mergeStateStatus
-      mergeable
-      baseRefName
-      headRefName
-      mergedAt
-      autoMergeRequest { enabledAt }
-      body
-      author { login }
-      reviews(last: 100) {
-        nodes {
-          body
-          submittedAt
-          state
-          author { login }
-        }
-      }
-      comments(last: 100) {
-        nodes {
-          body
-          createdAt
-          author { login }
-        }
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name
-                    status
-                    conclusion
-                    detailsUrl
-                    completedAt
-                    startedAt
-                  }
-                  ... on StatusContext {
-                    context
-                    state
-                    targetUrl
-                    createdAt
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    """
-        query_parts = "\n".join(
-            f"pr_{number}: pullRequest(number: {number}) {{ {fields} }}"
-            for number in numbers
+        return _pull_request_batch_queries.query_pull_request_view_payloads(
+            graphql=self._graphql,
+            pr_repo=pr_repo,
+            pr_numbers=numbers,
+            normalize_graphql_rollup_node=_normalize_graphql_rollup_node,
         )
-        query = (
-            "query($owner: String!, $repo: String!) {\n"
-            "  repository(owner: $owner, name: $repo) {\n"
-            f"{query_parts}\n"
-            "  }\n"
-            "}"
-        )
-        payload = self._graphql(
-            query,
-            fields=[
-                "-f",
-                f"owner={owner}",
-                "-f",
-                f"repo={repo}",
-            ],
-        )
-        repository = (payload.get("data") or {}).get("repository") or {}
-        results: dict[int, PullRequestViewPayload] = {}
-        for number in numbers:
-            node = repository.get(f"pr_{number}")
-            if not isinstance(node, dict):
-                continue
-            review_nodes = (
-                (node.get("reviews") or {}).get("nodes", [])
-                if isinstance(node.get("reviews"), dict)
-                else []
-            )
-            comment_nodes = (
-                (node.get("comments") or {}).get("nodes", [])
-                if isinstance(node.get("comments"), dict)
-                else []
-            )
-            commit_nodes = (
-                (node.get("commits") or {}).get("nodes", [])
-                if isinstance(node.get("commits"), dict)
-                else []
-            )
-            status_nodes: list[dict[str, Any]] = []
-            if commit_nodes:
-                latest_commit = commit_nodes[-1]
-                rollup = (
-                    (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
-                ).get("contexts") or {}
-                for item in rollup.get("nodes", []) or []:
-                    if not isinstance(item, dict):
-                        continue
-                    normalized = _normalize_graphql_rollup_node(item)
-                    if normalized is not None:
-                        status_nodes.append(normalized)
-            results[number] = PullRequestViewPayload(
-                pr_repo=pr_repo,
-                pr_number=number,
-                url=str(node.get("url") or ""),
-                head_ref_name=str(node.get("headRefName") or ""),
-                author=str(((node.get("author") or {}).get("login") or ""))
-                .strip()
-                .lower(),
-                body=str(node.get("body") or ""),
-                state=str(node.get("state") or ""),
-                is_draft=bool(node.get("isDraft", False)),
-                merge_state_status=str(node.get("mergeStateStatus") or ""),
-                mergeable=str(node.get("mergeable") or ""),
-                base_ref_name=str(node.get("baseRefName") or "main"),
-                merged_at=str(node.get("mergedAt") or ""),
-                auto_merge_enabled=node.get("autoMergeRequest") is not None,
-                comments=tuple(
-                    item for item in comment_nodes if isinstance(item, dict)
-                ),
-                reviews=tuple(item for item in review_nodes if isinstance(item, dict)),
-                status_check_rollup=tuple(status_nodes),
-            )
-        return results
 
     def _memoized_pull_request_view_payloads(
         self,
@@ -561,126 +436,14 @@ query($owner: String!, $repo: String!, $number: Int!) {
         pr_numbers: Sequence[int],
     ) -> dict[int, _PullRequestStateProbe]:
         """Return lightweight PR probes for digest-based review scheduling."""
-        if "/" not in pr_repo:
-            raise ValueError(f"pr_repo must be owner/repo, got '{pr_repo}'.")
-        owner, repo = pr_repo.split("/", maxsplit=1)
         numbers = tuple(sorted({int(number) for number in pr_numbers}))
-        if not numbers:
-            return {}
-
-        fields = """
-      number
-      state
-      isDraft
-      mergeStateStatus
-      mergeable
-      baseRefName
-      headRefOid
-      updatedAt
-      autoMergeRequest { enabledAt }
-      reviews(last: 1) {
-        nodes { submittedAt }
-      }
-      comments(last: 1) {
-        nodes { createdAt }
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name
-                    status
-                    conclusion
-                    detailsUrl
-                    completedAt
-                    startedAt
-                  }
-                  ... on StatusContext {
-                    context
-                    state
-                    targetUrl
-                    createdAt
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    """
-        query_parts = "\n".join(
-            f"pr_{number}: pullRequest(number: {number}) {{ {fields} }}"
-            for number in numbers
+        return _pull_request_batch_queries.query_pull_request_state_probes(
+            graphql=self._graphql,
+            pr_repo=pr_repo,
+            pr_numbers=numbers,
+            normalize_graphql_rollup_node=_normalize_graphql_rollup_node,
+            latest_node_timestamp=_latest_node_timestamp,
         )
-        query = (
-            "query($owner: String!, $repo: String!) {\n"
-            "  repository(owner: $owner, name: $repo) {\n"
-            f"{query_parts}\n"
-            "  }\n"
-            "}"
-        )
-        payload = self._graphql(
-            query,
-            fields=[
-                "-f",
-                f"owner={owner}",
-                "-f",
-                f"repo={repo}",
-            ],
-        )
-        repository = (payload.get("data") or {}).get("repository") or {}
-        results: dict[int, _PullRequestStateProbe] = {}
-        for number in numbers:
-            node = repository.get(f"pr_{number}")
-            if not isinstance(node, dict):
-                continue
-            review_nodes = (
-                (node.get("reviews") or {}).get("nodes", [])
-                if isinstance(node.get("reviews"), dict)
-                else []
-            )
-            comment_nodes = (
-                (node.get("comments") or {}).get("nodes", [])
-                if isinstance(node.get("comments"), dict)
-                else []
-            )
-            commit_nodes = (
-                (node.get("commits") or {}).get("nodes", [])
-                if isinstance(node.get("commits"), dict)
-                else []
-            )
-            status_nodes: list[dict[str, Any]] = []
-            if commit_nodes:
-                latest_commit = commit_nodes[-1]
-                rollup = (
-                    (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
-                ).get("contexts") or {}
-                for item in rollup.get("nodes", []) or []:
-                    if not isinstance(item, dict):
-                        continue
-                    normalized = _normalize_graphql_rollup_node(item)
-                    if normalized is not None:
-                        status_nodes.append(normalized)
-            results[number] = _PullRequestStateProbe(
-                pr_repo=pr_repo,
-                pr_number=number,
-                state=str(node.get("state") or ""),
-                is_draft=bool(node.get("isDraft", False)),
-                merge_state_status=str(node.get("mergeStateStatus") or ""),
-                mergeable=str(node.get("mergeable") or ""),
-                base_ref_name=str(node.get("baseRefName") or "main"),
-                auto_merge_enabled=node.get("autoMergeRequest") is not None,
-                head_ref_oid=str(node.get("headRefOid") or ""),
-                updated_at=str(node.get("updatedAt") or ""),
-                latest_comment_at=_latest_node_timestamp(comment_nodes, "createdAt"),
-                latest_review_at=_latest_node_timestamp(review_nodes, "submittedAt"),
-                status_check_rollup=tuple(status_nodes),
-            )
-        return results
 
     def _memoized_pull_request_state_probes(
         self,
