@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections.abc import Callable
-from typing import Any
 
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
