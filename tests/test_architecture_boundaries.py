@@ -1054,9 +1054,7 @@ KNOWN_SHIM_IMPORTERS = {}
 
 # Baselines: current line counts for each shim file.
 # When a PR shrinks a shim, update the baseline downward in the same PR.
-SHIM_SIZE_BASELINES = {
-    "board_io.py": 1461,
-}
+SHIM_SIZE_BASELINES = {}
 
 SHIM_FILENAMES = {m.rsplit(".", 1)[-1] + ".py" for m in SHIM_MODULES}
 
@@ -1094,13 +1092,15 @@ def test_shim_size_ratchet() -> None:
         )
 
 
-def test_consumer_db_and_github_http_shims_are_absent() -> None:
+def test_deleted_shim_files_are_absent() -> None:
+    assert not (SRC_ROOT / "board_io.py").exists()
     assert not (SRC_ROOT / "consumer_db.py").exists()
     assert not (SRC_ROOT / "github_http.py").exists()
 
 
-def test_no_runtime_or_test_imports_consumer_db_or_github_http_shims() -> None:
+def test_no_runtime_or_test_imports_deleted_shims() -> None:
     forbidden = {
+        "startupai_controller.board_io",
         "startupai_controller.consumer_db",
         "startupai_controller.github_http",
     }
@@ -1112,5 +1112,5 @@ def test_no_runtime_or_test_imports_consumer_db_or_github_http_shims() -> None:
             if hits:
                 violations[str(path.relative_to(REPO_ROOT))] = hits
     assert violations == {}, (
-        "consumer_db/github_http shim imports remain after deletion: " f"{violations}"
+        "deleted shim imports remain after deletion: " f"{violations}"
     )

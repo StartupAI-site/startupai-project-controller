@@ -19,7 +19,6 @@ import pytest
 
 import startupai_controller.board_automation as automation
 import startupai_controller.automation_port_helpers as automation_port_helpers
-import startupai_controller.board_io as board_io_mod
 from startupai_controller.board_automation import (
     ExecutorRoutingDecision,
     PromotionResult,
@@ -43,19 +42,14 @@ from startupai_controller.board_automation import (
     _post_claim_comment,
 )
 from startupai_controller.board_graph import classify_parallelism_snapshot
-from startupai_controller.board_io import (
+from startupai_controller.adapters.github_types import CodexReviewVerdict
+from startupai_controller.domain.models import (
     CheckObservation,
     LinkedIssue,
-    CodexReviewVerdict,
     OpenPullRequest,
     PrGateStatus,
-    query_closing_issues,
-    query_latest_codex_verdict,
-    _marker_for,
-    _comment_exists,
-    _repo_to_prefix,
-    _query_failed_check_runs,
 )
+from startupai_controller.domain.repair_policy import marker_for as _marker_for
 from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
