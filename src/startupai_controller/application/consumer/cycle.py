@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
@@ -19,6 +19,8 @@ from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeSta
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.ports.review_state import ReviewStatePort
+
+SubprocessRunnerFn = Callable[..., object]
 
 
 class ResolveLaunchContextForCycleFn(Protocol):
@@ -35,7 +37,7 @@ class ResolveLaunchContextForCycleFn(Protocol):
         dry_run: bool,
         review_state_port: ReviewStatePort | None,
         pr_port: PullRequestPort | None,
-        subprocess_runner: Callable[..., Any] | None,
+        subprocess_runner: SubprocessRunnerFn | None,
         gh_runner: Callable[..., str] | None,
     ) -> tuple[PreparedLaunchContext | None, CycleResult | None]: ...
 

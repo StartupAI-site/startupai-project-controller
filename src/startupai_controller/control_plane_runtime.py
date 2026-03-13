@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 import json
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.ports.control_plane_state import (
     ControlPlaneStatePort,
     ControlValueStorePort,
 )
 from startupai_controller.consumer_workflow import (
     WorkflowDefinition,
+    WorkflowRepoStatus,
     effective_poll_interval,
     load_repo_workflows,
     snapshot_from_statuses,
     write_workflow_snapshot,
+)
+from startupai_controller.payload_types import (
+    AdmissionSummaryPayload,
+    ControlPlaneHealthPayload,
 )
 from startupai_controller.runtime.wiring import clear_github_runtime_caches
 
@@ -75,7 +80,7 @@ def _mark_degraded(
 
 def _persist_admission_summary(
     db: ControlValueStorePort,
-    summary: dict[str, Any],
+    summary: AdmissionSummaryPayload,
 ) -> None:
     """Persist the latest admission summary for local-only status surfaces."""
     db.set_control_value(
@@ -91,7 +96,7 @@ def _clear_degraded(db: ControlValueStorePort) -> None:
 
 
 def _apply_automation_runtime(
-    config: Any,
+    config: ConsumerConfig,
     automation_config: BoardAutomationConfig | None,
 ) -> None:
     """Apply automation-config runtime controls to the consumer config."""
@@ -118,7 +123,7 @@ def _control_plane_health_summary(
     deferred_action_count: int,
     oldest_deferred_action_age_seconds: float | None,
     poll_interval_seconds: int,
-) -> dict[str, Any]:
+) -> ControlPlaneHealthPayload:
     """Classify consumer control-plane health into stable machine states."""
     degraded = control_state.get(CONTROL_KEY_DEGRADED) == "true"
     degraded_reason = control_state.get(CONTROL_KEY_DEGRADED_REASON) or ""
@@ -147,10 +152,10 @@ def _control_plane_health_summary(
 
 
 def _current_main_workflows(
-    config: Any,
+    config: ConsumerConfig,
     *,
     persist_snapshot: bool = True,
-) -> tuple[dict[str, WorkflowDefinition], dict[str, Any], int]:
+) -> tuple[dict[str, WorkflowDefinition], dict[str, WorkflowRepoStatus], int]:
     """Load repo-owned workflow contracts from canonical main checkouts."""
     workflows, statuses = load_repo_workflows(
         config.repo_prefixes,

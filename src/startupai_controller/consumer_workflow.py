@@ -9,9 +9,10 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
+
+from startupai_controller.payload_types import WorkflowStatusPayload
 
 DEFAULT_WORKFLOW_FILENAME = "WORKFLOW.md"
 WORKFLOW_CONFIG_KEY = "startupai_consumer"
@@ -383,7 +384,7 @@ def read_workflow_snapshot(path: Path) -> WorkflowStateSnapshot | None:
     )
 
 
-def workflow_status_payload(status: WorkflowRepoStatus) -> dict[str, Any]:
+def workflow_status_payload(status: WorkflowRepoStatus) -> WorkflowStatusPayload:
     """Convert a workflow repo status into JSON-ready data."""
     return {
         "available": status.available,

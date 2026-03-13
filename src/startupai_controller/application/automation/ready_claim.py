@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from startupai_controller.board_automation_config import (
     BoardAutomationConfig,
@@ -16,7 +16,11 @@ from startupai_controller.board_graph import (
     _ready_snapshot_rank,
     _resolve_issue_coordinates,
 )
-from startupai_controller.domain.models import ClaimReadyResult, SchedulingDecision
+from startupai_controller.domain.models import (
+    ClaimReadyResult,
+    IssueSnapshot,
+    SchedulingDecision,
+)
 from startupai_controller.domain.repair_policy import marker_for as _marker_for
 from startupai_controller.domain.scheduling_policy import (
     VALID_EXECUTORS,
@@ -175,7 +179,7 @@ def _load_schedule_ready_state(
     review_state_port: ReviewStatePort,
 ) -> tuple[
     bool,
-    list[Any],
+    list[IssueSnapshot],
     dict[str, int],
     dict[tuple[str, str], int],
 ]:
@@ -228,7 +232,7 @@ def _record_missing_executor_ready_item(
 
 
 def _process_schedule_ready_snapshot(
-    snapshot: object,
+    snapshot: IssueSnapshot,
     *,
     use_ports: bool,
     config: CriticalPathConfig,
@@ -253,11 +257,7 @@ def _process_schedule_ready_snapshot(
         dependency_review_state_port or review_state_port
     )
     del use_ports
-    ref = getattr(snapshot, "issue_ref", None)
-    if ref is None:
-        ref = _snapshot_to_issue_ref(snapshot.issue_ref, config.issue_prefixes)
-        if ref is None:
-            return
+    ref = snapshot.issue_ref
 
     if not all_prefixes and this_repo_prefix:
         parsed = parse_issue_ref(ref)
@@ -290,8 +290,9 @@ def _process_schedule_ready_snapshot(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=lambda candidate_ref, *_args, **_kwargs: effective_dependency_review_state_port.get_issue_status(
-                candidate_ref
+            status_resolver=lambda candidate_ref, *_args, **_kwargs: (
+                effective_dependency_review_state_port.get_issue_status(candidate_ref)
+                or "NOT_ON_BOARD"
             ),
             require_in_graph=True,
         )
@@ -421,7 +422,7 @@ def _load_claim_ready_state(
     review_state_port: ReviewStatePort,
 ) -> tuple[
     bool,
-    dict[str, object],
+    dict[str, IssueSnapshot],
     dict[str, int],
     dict[tuple[str, str], int],
 ]:
@@ -437,7 +438,7 @@ def _load_claim_ready_state(
             wip_items,
         )
 
-    ready_by_ref: dict[str, object] = {}
+    ready_by_ref: dict[str, IssueSnapshot] = {}
     for snapshot in ready_items:
         ref = snapshot.issue_ref
         if not all_prefixes and this_repo_prefix:
@@ -449,7 +450,7 @@ def _load_claim_ready_state(
 
 
 def _claim_ready_candidates(
-    ready_by_ref: dict[str, object],
+    ready_by_ref: dict[str, IssueSnapshot],
     *,
     norm_executor: str,
     issue_ref: str | None,
@@ -475,7 +476,7 @@ def _claim_ready_candidates(
 
 def _attempt_claim_ready_candidate(
     ref: str,
-    snapshot: object,
+    snapshot: IssueSnapshot,
     *,
     issue_ref: str | None,
     config: CriticalPathConfig,
@@ -509,8 +510,9 @@ def _attempt_claim_ready_candidate(
             config=config,
             project_owner=project_owner,
             project_number=project_number,
-            status_resolver=lambda candidate_ref, *_args, **_kwargs: effective_dependency_review_state_port.get_issue_status(
-                candidate_ref
+            status_resolver=lambda candidate_ref, *_args, **_kwargs: (
+                effective_dependency_review_state_port.get_issue_status(candidate_ref)
+                or "NOT_ON_BOARD"
             ),
             require_in_graph=True,
         )

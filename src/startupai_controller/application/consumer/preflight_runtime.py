@@ -15,7 +15,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
@@ -31,6 +31,7 @@ from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
 )
+from startupai_controller.payload_types import AdmissionSummaryPayload
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.control_plane_state import ControlValueStorePort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
@@ -77,7 +78,7 @@ class ExecutePrepareCyclePhasesResult(Protocol):
 
     board_snapshot: CycleBoardSnapshot
     review_queue_summary: ReviewQueueDrainSummary
-    admission_summary: dict[str, Any]
+    admission_summary: AdmissionSummaryPayload
     timings_ms: dict[str, int]
 
 
@@ -90,7 +91,7 @@ class ExecutePrepareCyclePhasesFn(Protocol):
         db: ConsumerRuntimeStatePort,
         *,
         runtime: CycleRuntimeContext,
-        deps: Any,
+        deps: object,
         dry_run: bool = False,
     ) -> ExecutePrepareCyclePhasesResult:
         """Return board snapshot, review queue, admission, and timing results."""
@@ -154,7 +155,10 @@ class PhaseHelperDeps:
     record_successful_board_sync: Callable[[ControlValueStorePort], None]
     clear_degraded: Callable[[ControlValueStorePort], None]
     mark_degraded: Callable[[ControlValueStorePort, str], None]
-    persist_admission_summary: Callable[[ControlValueStorePort, dict[str, Any]], None]
+    persist_admission_summary: Callable[
+        [ControlValueStorePort, AdmissionSummaryPayload],
+        None,
+    ]
     logger: logging.Logger
 
 
@@ -170,7 +174,7 @@ class PrepareCycleDeps:
     parse_issue_ref: Callable[[str], IssueRef]
     record_metric: Callable[..., None]
     control_key_degraded: str
-    prepare_cycle_phases_deps_factory: Callable[..., Any]
+    prepare_cycle_phases_deps_factory: Callable[..., object]
     execute_prepare_cycle_phases: ExecutePrepareCyclePhasesFn
 
 
@@ -398,7 +402,7 @@ def run_admission_phase(
     board_snapshot: CycleBoardSnapshot,
     timings_ms: dict[str, int],
     dry_run: bool,
-) -> dict[str, Any]:
+) -> AdmissionSummaryPayload:
     """Run backlog admission for the current cycle."""
     phase_started = time.monotonic()
     admission_decision = runtime.ready_flow_port.admit_backlog_items(

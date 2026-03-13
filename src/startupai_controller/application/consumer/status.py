@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol, TypedDict
+from typing import Callable, Protocol, TypedDict
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
@@ -15,9 +15,48 @@ from startupai_controller.consumer_workflow import (
     WorkflowStateSnapshot,
 )
 from startupai_controller.domain.models import SessionInfo
+from startupai_controller.payload_types import (
+    AdmissionSummaryPayload,
+    ControlPlaneHealthPayload,
+    ObjectPayload,
+    SessionRetryStatePayload,
+    StatusPayload,
+    WorkflowStatusPayload,
+)
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.status_store import MetricEventView, StatusStorePort
 from startupai_controller.validate_critical_path_promotion import IssueRef
+
+ReviewSummaryPayload = ObjectPayload
+ReviewQueueSummaryPayload = ObjectPayload
+RecentSessionStatusPayload = ObjectPayload
+WorkerStatusPayload = ObjectPayload
+
+
+class MetricWindowPayload(TypedDict):
+    """Rolling metric window emitted in the status payload."""
+
+    hours: int
+    candidate_selected: int
+    claim_attempted: int
+    claim_suppressed: int
+    durable_starts: int
+    startup_failures: int
+    review_transitions: int
+    done_transitions: int
+    occupied_slot_seconds: float
+    occupied_slots_per_hour: float
+    cache_hits: int
+    cache_misses: int
+    cache_hit_rate: float | None
+    worktree_reused: int
+    worktree_blocked: int
+    rate_limit_events: int
+    durable_start_reliability: float | None
+    ready_hours_ge_1: float
+    ready_hours_ge_4: float
+    occupied_slots_per_ready_hour_ge_1: float | None
+    occupied_slots_per_ready_hour_ge_4: float | None
 
 
 class CurrentMainWorkflowsFn(Protocol):
@@ -43,7 +82,7 @@ class ControlPlaneHealthSummaryFn(Protocol):
         deferred_action_count: int,
         oldest_deferred_action_age_seconds: float | None,
         poll_interval_seconds: int,
-    ) -> dict[str, Any]:
+    ) -> ControlPlaneHealthPayload:
         """Return the machine-readable health summary."""
         ...
 
@@ -58,7 +97,7 @@ class SessionRetryStateFn(Protocol):
         config: ConsumerConfig,
         workflows: dict[str, WorkflowDefinition],
         now: datetime | None = None,
-    ) -> dict[str, Any]:
+    ) -> SessionRetryStatePayload:
         """Return retry-state fields for one session."""
         ...
 
@@ -77,6 +116,24 @@ class StatusControlKeys(TypedDict):
 
 
 @dataclass(frozen=True)
+class CollectedStatusRuntimeState:
+    """DB-backed runtime state consumed when assembling status JSON."""
+
+    leases: int
+    slots: list[int]
+    workers: list[SessionInfo]
+    sessions: list[SessionInfo]
+    control_state: dict[str, str]
+    deferred_action_count: int
+    oldest_deferred_action_age_seconds: float | None
+    review_summary: ReviewSummaryPayload
+    review_queue: ReviewQueueSummaryPayload
+    admission_summary: AdmissionSummaryPayload
+    throughput_1h: MetricWindowPayload
+    throughput_24h: MetricWindowPayload
+
+
+@dataclass(frozen=True)
 class CollectStatusPayloadDeps:
     """Injected seams for consumer status collection."""
 
@@ -89,17 +146,17 @@ class CollectStatusPayloadDeps:
     read_workflow_snapshot: Callable[[Path], WorkflowStateSnapshot | None]
     parse_issue_ref: Callable[[str], IssueRef]
     load_admission_summary: Callable[
-        [dict[str, str], BoardAutomationConfig | None], dict[str, Any]
+        [dict[str, str], BoardAutomationConfig | None], AdmissionSummaryPayload
     ]
     control_plane_health_summary: ControlPlaneHealthSummaryFn
     drain_requested: Callable[[Path], bool]
-    workflow_status_payload: Callable[[WorkflowRepoStatus], dict[str, Any]]
+    workflow_status_payload: Callable[[WorkflowRepoStatus], WorkflowStatusPayload]
     session_retry_state: SessionRetryStateFn
     parse_iso8601_timestamp: Callable[[str], datetime | None]
     control_keys: StatusControlKeys
 
 
-def _local_review_summary(db: StatusStorePort) -> dict[str, Any]:
+def _local_review_summary(db: StatusStorePort) -> ReviewSummaryPayload:
     """Build review summary from local consumer state only."""
     review_refs = db.latest_review_issue_refs()
     return {
@@ -115,7 +172,7 @@ def _github_review_summary(
     *,
     deps: CollectStatusPayloadDeps,
     review_state_port: ReviewStatePort,
-) -> dict[str, Any]:
+) -> ReviewSummaryPayload:
     """Build review summary from GitHub with local fallback."""
     try:
         review_refs: list[str] = []
@@ -142,7 +199,7 @@ def _local_review_queue_summary(
     db: StatusStorePort,
     *,
     now: datetime,
-) -> dict[str, Any]:
+) -> ReviewQueueSummaryPayload:
     """Return bounded local review-queue diagnostics."""
     entries = db.list_review_queue_items()
     due_count = db.due_review_queue_count(now=now)
@@ -158,11 +215,11 @@ def _metric_window_payload(
     *,
     hours: int,
     now: datetime,
-) -> dict[str, Any]:
+) -> MetricWindowPayload:
     """Return one rolling SLO/throughput window summary."""
     since = now - timedelta(hours=hours)
     counts = db.count_metric_events_since(since)
-    occupied_slot_seconds = db.occupied_slot_seconds_since(since, now=now)
+    occupied_slot_seconds = float(db.occupied_slot_seconds_since(since, now=now))
     hydration_total = counts.get("context_cache_hit", 0) + counts.get(
         "context_cache_miss", 0
     )
@@ -192,6 +249,10 @@ def _metric_window_payload(
         "durable_start_reliability": (
             durable_starts / claim_attempted if claim_attempted else None
         ),
+        "ready_hours_ge_1": 0.0,
+        "ready_hours_ge_4": 0.0,
+        "occupied_slots_per_ready_hour_ge_1": None,
+        "occupied_slots_per_ready_hour_ge_4": None,
     }
 
 
@@ -235,12 +296,12 @@ def _ready_pressure_hours(
 
 def _augment_slo_window_payload(
     db: StatusStorePort,
-    payload: dict[str, Any],
+    payload: MetricWindowPayload,
     *,
     hours: int,
     now: datetime,
     parse_iso8601_timestamp: Callable[[str], datetime | None],
-) -> dict[str, Any]:
+) -> MetricWindowPayload:
     """Attach queue-opportunity normalized throughput metrics to a window."""
     since = now - timedelta(hours=hours)
     observations = db.metric_events_since(
@@ -271,13 +332,14 @@ def _augment_slo_window_payload(
         if ready_hours_ge_4 > 0
         else None
     )
-    return {
+    augmented: MetricWindowPayload = {
         **payload,
         "ready_hours_ge_1": ready_hours_ge_1,
         "ready_hours_ge_4": ready_hours_ge_4,
         "occupied_slots_per_ready_hour_ge_1": occupied_slots_per_ready_hour_ge_1,
         "occupied_slots_per_ready_hour_ge_4": occupied_slots_per_ready_hour_ge_4,
     }
+    return augmented
 
 
 def _lane_wip_limits_payload(
@@ -296,7 +358,7 @@ def _lane_wip_limits_payload(
     return lane_wip_limits
 
 
-def _worker_status_payload(worker: SessionInfo) -> dict[str, Any]:
+def _worker_status_payload(worker: SessionInfo) -> WorkerStatusPayload:
     """Render one active worker payload."""
     return {
         "id": worker.id,
@@ -317,9 +379,9 @@ def _worker_status_payload(worker: SessionInfo) -> dict[str, Any]:
 
 
 def _throughput_status_payload(
-    throughput_1h: dict[str, Any],
-    throughput_24h: dict[str, Any],
-) -> dict[str, Any]:
+    throughput_1h: MetricWindowPayload,
+    throughput_24h: MetricWindowPayload,
+) -> ObjectPayload:
     """Render throughput payload for status JSON."""
     return {
         "baseline_status": "pending-soak",
@@ -328,9 +390,9 @@ def _throughput_status_payload(
 
 
 def _reliability_status_payload(
-    throughput_1h: dict[str, Any],
-    throughput_24h: dict[str, Any],
-) -> dict[str, Any]:
+    throughput_1h: MetricWindowPayload,
+    throughput_24h: MetricWindowPayload,
+) -> ObjectPayload:
     """Render reliability payload for status JSON."""
     return {
         "durable_start_reliability_1h": throughput_1h["durable_start_reliability"],
@@ -341,9 +403,9 @@ def _reliability_status_payload(
 
 
 def _context_cache_status_payload(
-    throughput_1h: dict[str, Any],
-    throughput_24h: dict[str, Any],
-) -> dict[str, Any]:
+    throughput_1h: MetricWindowPayload,
+    throughput_24h: MetricWindowPayload,
+) -> ObjectPayload:
     """Render issue-context cache payload for status JSON."""
     return {
         "hit_rate_1h": throughput_1h["cache_hit_rate"],
@@ -356,9 +418,9 @@ def _context_cache_status_payload(
 
 
 def _worktree_reuse_status_payload(
-    throughput_1h: dict[str, Any],
-    throughput_24h: dict[str, Any],
-) -> dict[str, Any]:
+    throughput_1h: MetricWindowPayload,
+    throughput_24h: MetricWindowPayload,
+) -> ObjectPayload:
     """Render worktree reuse payload for status JSON."""
     return {
         "reused_1h": throughput_1h["worktree_reused"],
@@ -375,7 +437,7 @@ def _recent_session_status_payload(
     workflows: dict[str, WorkflowDefinition],
     now: datetime,
     session_retry_state: SessionRetryStateFn,
-) -> dict[str, Any]:
+) -> RecentSessionStatusPayload:
     """Render one recent session payload for status JSON."""
     return {
         "id": session.id,
@@ -448,7 +510,7 @@ def _collect_status_runtime_state(
     db: StatusStorePort,
     review_state_port: ReviewStatePort | None,
     deps: CollectStatusPayloadDeps,
-) -> dict[str, Any]:
+) -> CollectedStatusRuntimeState:
     """Collect DB-backed runtime state for status reporting."""
     leases = db.active_lease_count()
     slots = sorted(db.active_slot_ids())
@@ -481,20 +543,20 @@ def _collect_status_runtime_state(
         parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
     )
 
-    return {
-        "leases": leases,
-        "slots": slots,
-        "workers": workers,
-        "sessions": sessions,
-        "control_state": control_state,
-        "deferred_action_count": deferred_action_count,
-        "oldest_deferred_action_age_seconds": oldest_deferred_action_age_seconds,
-        "review_summary": review_summary,
-        "review_queue": review_queue,
-        "admission_summary": admission_summary,
-        "throughput_1h": throughput_1h,
-        "throughput_24h": throughput_24h,
-    }
+    return CollectedStatusRuntimeState(
+        leases=leases,
+        slots=slots,
+        workers=workers,
+        sessions=sessions,
+        control_state=control_state,
+        deferred_action_count=deferred_action_count,
+        oldest_deferred_action_age_seconds=oldest_deferred_action_age_seconds,
+        review_summary=review_summary,
+        review_queue=review_queue,
+        admission_summary=admission_summary,
+        throughput_1h=throughput_1h,
+        throughput_24h=throughput_24h,
+    )
 
 
 def _build_status_payload(
@@ -513,14 +575,14 @@ def _build_status_payload(
     control_state: dict[str, str],
     deferred_action_count: int,
     oldest_deferred_action_age_seconds: float | None,
-    review_summary: dict[str, Any],
-    review_queue: dict[str, Any],
-    admission_summary: dict[str, Any],
-    throughput_1h: dict[str, Any],
-    throughput_24h: dict[str, Any],
+    review_summary: ReviewSummaryPayload,
+    review_queue: ReviewQueueSummaryPayload,
+    admission_summary: AdmissionSummaryPayload,
+    throughput_1h: MetricWindowPayload,
+    throughput_24h: MetricWindowPayload,
     local_only: bool,
     deps: CollectStatusPayloadDeps,
-) -> dict[str, Any]:
+) -> StatusPayload:
     """Assemble the final JSON-serializable status payload."""
     degraded_key = deps.control_keys["degraded"]
     degraded_reason_key = deps.control_keys["degraded_reason"]
@@ -605,7 +667,7 @@ def collect_status_payload(
     db: StatusStorePort,
     review_state_port: ReviewStatePort | None,
     deps: CollectStatusPayloadDeps,
-) -> dict[str, Any]:
+) -> StatusPayload:
     """Collect consumer status as a JSON-serializable payload."""
     (
         auto_config,
@@ -634,5 +696,16 @@ def collect_status_payload(
         status_now=status_now,
         local_only=local_only,
         deps=deps,
-        **status_state,
+        leases=status_state.leases,
+        slots=status_state.slots,
+        workers=status_state.workers,
+        sessions=status_state.sessions,
+        control_state=status_state.control_state,
+        deferred_action_count=status_state.deferred_action_count,
+        oldest_deferred_action_age_seconds=status_state.oldest_deferred_action_age_seconds,
+        review_summary=status_state.review_summary,
+        review_queue=status_state.review_queue,
+        admission_summary=status_state.admission_summary,
+        throughput_1h=status_state.throughput_1h,
+        throughput_24h=status_state.throughput_24h,
     )

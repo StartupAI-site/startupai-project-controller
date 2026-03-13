@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
@@ -14,6 +14,7 @@ from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ReviewQueueDrainSummary,
 )
+from startupai_controller.payload_types import AdmissionSummaryPayload
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.pull_requests import PullRequestPort
@@ -114,7 +115,7 @@ class RunAdmissionPhaseFn(Protocol):
         board_snapshot: CycleBoardSnapshot,
         timings_ms: dict[str, int],
         dry_run: bool,
-    ) -> dict[str, Any]:
+    ) -> AdmissionSummaryPayload:
         """Run the backlog admission phase."""
         ...
 
@@ -184,7 +185,7 @@ class PrepareCyclePhasesResult:
 
     board_snapshot: CycleBoardSnapshot
     review_queue_summary: ReviewQueueDrainSummary
-    admission_summary: dict[str, Any]
+    admission_summary: AdmissionSummaryPayload
     timings_ms: dict[str, int]
 
 
