@@ -279,7 +279,9 @@ def set_blocked_with_reason(
             status_mutator(info.project_id, info.item_id)
         elif info.status != "Blocked":
             if board_port is None:
-                raise ValueError("board_port or default_board_mutation_port_fn required")
+                raise ValueError(
+                    "board_port or default_board_mutation_port_fn required"
+                )
             board_port.set_issue_status(issue_ref, "Blocked")
         if board_port is None:
             raise ValueError("board_port or default_board_mutation_port_fn required")
@@ -365,7 +367,9 @@ def transition_issue_status(
                 status_mutator(info.project_id, info.item_id, to_status)
             else:
                 if board_port is None:
-                    raise ValueError("board_port or default_board_mutation_port_fn required")
+                    raise ValueError(
+                        "board_port or default_board_mutation_port_fn required"
+                    )
                 board_port.set_issue_status(issue_ref, to_status)
         return True, current_status
     if app_transition_issue_status_fn is None:
