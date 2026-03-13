@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from typing import Any, Callable, cast
+from typing import Callable, cast
 
 import startupai_controller.consumer_automation_bridge as _automation_bridge
 import startupai_controller.consumer_board_state_helpers as _board_state_helpers
@@ -23,6 +23,7 @@ from startupai_controller.control_plane_runtime import (
 )
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    CodexSessionResult,
     PrCreationOutcome,
     PreparedCycleContext,
     PreparedLaunchContext,
@@ -53,7 +54,7 @@ from startupai_controller.runtime.wiring import (
 )
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
-CodexResultPayload = dict[str, Any]
+CodexResultPayload = CodexSessionResult
 SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
 
 

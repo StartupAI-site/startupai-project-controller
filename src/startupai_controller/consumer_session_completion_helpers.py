@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    CodexSessionResult,
     PrCreationOutcome,
     PreparedLaunchContext,
     SessionExecutionOutcome,
@@ -22,7 +23,7 @@ from startupai_controller.ports.ready_flow import (
 )
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
-CodexResultPayload = dict[str, Any]
+CodexResultPayload = CodexSessionResult
 SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -47,11 +48,11 @@ def session_status_from_codex_result(
     codex_result: CodexResultPayload | None,
 ) -> tuple[str, str | None]:
     """Map Codex exit/result into session status and failure reason."""
-    if exit_code == 0 and codex_result and codex_result.get("outcome") == "success":
+    if exit_code == 0 and codex_result and codex_result["outcome"] == "success":
         return "success", None
     if exit_code == 124:
         return "timeout", "timeout"
-    if codex_result and codex_result.get("outcome") in {"failed", "blocked"}:
+    if codex_result and codex_result["outcome"] in {"failed", "blocked"}:
         return "failed", "validation_failed"
     return "failed", "codex_error"
 
@@ -72,7 +73,7 @@ def create_pr_for_execution_result(
     logger: LoggerLike,
 ) -> PrCreationOutcome:
     """Reuse or create a PR from claimed-session output."""
-    pr_url = codex_result.get("pr_url") if codex_result else None
+    pr_url = codex_result["pr_url"] if codex_result else None
     has_commits = False
     updated_session_status = session_status
     updated_failure_reason = failure_reason
@@ -245,9 +246,8 @@ def maybe_escalate_claimed_session_failure(
     try:
         escalation_reason = ""
         if codex_result:
-            escalation_reason = codex_result.get("blocker_reason") or codex_result.get(
-                "summary",
-                "",
+            escalation_reason = (
+                codex_result["blocker_reason"] or codex_result["summary"]
             )
         escalate_to_claude(
             issue_ref,

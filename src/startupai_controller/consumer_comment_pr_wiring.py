@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import Any
 
 from startupai_controller import consumer_comment_pr_helpers as _comment_pr_helpers
 from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_types import CodexSessionResult
 from startupai_controller.domain.repair_policy import (
     consumer_provenance_marker as _domain_consumer_provenance_marker,
     deterministic_branch_pattern as _domain_deterministic_branch_pattern,
@@ -16,6 +16,7 @@ from startupai_controller.domain.repair_policy import (
     repo_to_prefix_for_repo as _domain_repo_to_prefix_for_repo,
 )
 from startupai_controller.domain.models import OpenPullRequestMatch
+from startupai_controller.domain.resolution_policy import ResolutionPayload
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.ready_flow import GitHubRunnerFn
 from startupai_controller.ports.status_store import StatusStorePort
@@ -240,13 +241,13 @@ def classify_open_pr_candidates(
 
 def post_result_comment(
     issue_ref: str,
-    result: dict[str, Any],
+    result: CodexSessionResult,
     session_id: str,
     config: CriticalPathConfig,
     *,
     marker_for: Callable[..., str],
     resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
-    normalize_resolution_payload: Callable[[object], dict[str, Any] | None],
+    normalize_resolution_payload: Callable[[object], ResolutionPayload | None],
     default_review_comment_checker_fn: Callable[
         ...,
         _comment_pr_helpers.CommentMarkerCheckerFn,

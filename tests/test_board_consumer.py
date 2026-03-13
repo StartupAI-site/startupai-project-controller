@@ -1224,6 +1224,14 @@ class TestParseCodexResult:
         result = _parse_codex_result(tmp_path / "nonexistent.json")
         assert result is None
 
+    def test_returns_none_when_json_payload_is_not_an_object(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "result.json"
+        path.write_text(json.dumps(["not", "an", "object"]))
+        result = _parse_codex_result(path)
+        assert result is None
+
 
 # -- _create_or_update_pr tests -----------------------------------------------
 

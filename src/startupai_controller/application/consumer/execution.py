@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, cast
+from typing import TYPE_CHECKING, Callable, Protocol, cast
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    CodexSessionResult,
     PrCreationOutcome,
     PreparedCycleContext,
     PreparedLaunchContext,
@@ -18,6 +19,7 @@ from startupai_controller.consumer_types import (
 from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.domain.models import CycleResult, ReviewQueueDrainSummary
 from startupai_controller.domain.models import ResolutionEvaluation, ReviewQueueEntry
+from startupai_controller.domain.resolution_policy import ResolutionPayload
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
@@ -26,7 +28,11 @@ from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
-CodexResultPayload = dict[str, Any]
+if TYPE_CHECKING:
+    import subprocess
+
+CodexResultPayload = CodexSessionResult
+SubprocessRunnerFn = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 class CreatePrForExecutionResultFn(Protocol):
@@ -41,7 +47,7 @@ class CreatePrForExecutionResultFn(Protocol):
         codex_result: CodexResultPayload | None,
         session_status: str,
         failure_reason: str | None,
-        subprocess_runner: Callable[..., Any] | None,
+        subprocess_runner: SubprocessRunnerFn | None,
         gh_runner: Callable[..., str] | None,
     ) -> PrCreationOutcome: ...
 
@@ -109,7 +115,7 @@ class VerifyResolutionPayloadFn(Protocol):
     def __call__(
         self,
         issue_ref: str,
-        resolution: CodexResultPayload | None,
+        resolution: ResolutionPayload | None,
         *,
         config: ConsumerConfig,
         workflows: dict[str, WorkflowDefinition],
@@ -534,7 +540,7 @@ def handle_non_review_execution_outcome(
     if session_status == "success" and not has_commits:
         resolution_evaluation = deps.verify_resolution_payload(
             candidate,
-            codex_result.get("resolution") if codex_result else None,
+            codex_result["resolution"] if codex_result else None,
             config=launch_context.effective_consumer_config,
             workflows=prepared.main_workflows,
             pr_port=pr_port,

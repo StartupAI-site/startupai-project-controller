@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import cast
 
 import startupai_controller.consumer_comment_pr_helpers as _comment_pr_helpers
 import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
@@ -12,6 +12,7 @@ import startupai_controller.consumer_review_queue_processing as _review_queue_pr
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_types import CodexSessionResult
 from startupai_controller.domain.launch_policy import (
     classify_pr_candidates as _classify_pr_candidates_pure,
 )
@@ -304,7 +305,7 @@ def classify_open_pr_candidates(
 
 def post_result_comment(
     issue_ref: str,
-    result: dict[str, Any],
+    result: CodexSessionResult,
     session_id: str,
     config: CriticalPathConfig,
     *,
