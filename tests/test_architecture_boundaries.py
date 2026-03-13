@@ -504,6 +504,33 @@ def test_pull_request_adapter_routes_batch_graphql_queries_through_helper_module
     ), "adapters/pull_requests.py should depend on pull_request_batch_queries"
 
 
+def test_pull_request_adapter_routes_support_helpers_through_dedicated_modules() -> (
+    None
+):
+    imported = _controller_runtime_imports(SRC_ROOT / "adapters" / "pull_requests.py")
+    assert (
+        "startupai_controller.adapters.pull_request_board_helpers" in imported
+    ), "adapters/pull_requests.py should depend on pull_request_board_helpers"
+    assert (
+        "startupai_controller.adapters.pull_request_query_helpers" in imported
+    ), "adapters/pull_requests.py should depend on pull_request_query_helpers"
+    assert (
+        "startupai_controller.adapters.pull_request_support" not in imported
+    ), "adapters/pull_requests.py should not depend on pull_request_support directly"
+
+
+def test_pull_request_support_routes_compat_surface_through_helper_modules() -> None:
+    imported = _controller_runtime_imports(
+        SRC_ROOT / "adapters" / "pull_request_support.py"
+    )
+    assert (
+        "startupai_controller.adapters.pull_request_board_helpers" in imported
+    ), "adapters/pull_request_support.py should depend on pull_request_board_helpers"
+    assert (
+        "startupai_controller.adapters.pull_request_query_helpers" in imported
+    ), "adapters/pull_request_support.py should depend on pull_request_query_helpers"
+
+
 def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
     source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
     forbidden = [

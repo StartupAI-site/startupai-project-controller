@@ -9,9 +9,10 @@ import time
 from typing import cast
 
 import startupai_controller.adapters.pull_request_batch_queries as _pull_request_batch_queries
+import startupai_controller.adapters.pull_request_board_helpers as _pull_request_board_helpers
+import startupai_controller.adapters.pull_request_query_helpers as _pull_request_query_helpers
 from startupai_controller.adapters.github_base import GitHubAdapterBase
 from startupai_controller.adapters import (
-    pull_request_support as _pull_request_support,
     pull_request_review_state as _review_state_builders,
 )
 from startupai_controller.domain.models import (
@@ -85,32 +86,36 @@ def _marker_for(kind: str, ref: str) -> str:
     return marker_for(kind, ref)
 
 
-_query_project_item_field = _pull_request_support._query_project_item_field
+_query_project_item_field = _pull_request_board_helpers._query_project_item_field
 _query_single_select_field_option = (
-    _pull_request_support._query_single_select_field_option
+    _pull_request_board_helpers._query_single_select_field_option
 )
-_set_text_field = _pull_request_support._set_text_field
-_set_single_select_field = _pull_request_support._set_single_select_field
-_set_status_if_changed = _pull_request_support._set_status_if_changed
-_query_issue_board_info = _pull_request_support._query_issue_board_info
-_query_status_field_option = _pull_request_support._query_status_field_option
-_set_board_status = _pull_request_support._set_board_status
-_extract_run_id = _pull_request_support._extract_run_id
-_normalize_graphql_rollup_node = _pull_request_support._normalize_graphql_rollup_node
-_latest_node_timestamp = _pull_request_support._latest_node_timestamp
-_query_latest_marker_timestamp = _pull_request_support._query_latest_marker_timestamp
-_query_issue_updated_at = _pull_request_support._query_issue_updated_at
-query_issue_body = _pull_request_support.query_issue_body
-memoized_query_issue_body = _pull_request_support.memoized_query_issue_body
-_query_open_pr_updated_at = _pull_request_support._query_open_pr_updated_at
-_is_pr_open = _pull_request_support._is_pr_open
-_query_failed_check_runs = _pull_request_support._query_failed_check_runs
-_query_pr_head_sha = _pull_request_support._query_pr_head_sha
+_set_text_field = _pull_request_board_helpers._set_text_field
+_set_single_select_field = _pull_request_board_helpers._set_single_select_field
+_set_status_if_changed = _pull_request_board_helpers._set_status_if_changed
+_query_issue_board_info = _pull_request_board_helpers._query_issue_board_info
+_query_status_field_option = _pull_request_board_helpers._query_status_field_option
+_set_board_status = _pull_request_board_helpers._set_board_status
+_extract_run_id = _pull_request_query_helpers._extract_run_id
+_normalize_graphql_rollup_node = (
+    _pull_request_query_helpers._normalize_graphql_rollup_node
+)
+_latest_node_timestamp = _pull_request_query_helpers._latest_node_timestamp
+_query_latest_marker_timestamp = (
+    _pull_request_query_helpers._query_latest_marker_timestamp
+)
+_query_issue_updated_at = _pull_request_query_helpers._query_issue_updated_at
+query_issue_body = _pull_request_query_helpers.query_issue_body
+memoized_query_issue_body = _pull_request_query_helpers.memoized_query_issue_body
+_query_open_pr_updated_at = _pull_request_query_helpers._query_open_pr_updated_at
+_is_pr_open = _pull_request_query_helpers._is_pr_open
+_query_failed_check_runs = _pull_request_query_helpers._query_failed_check_runs
+_query_pr_head_sha = _pull_request_query_helpers._query_pr_head_sha
 _query_latest_wip_activity_timestamp = (
-    _pull_request_support._query_latest_wip_activity_timestamp
+    _pull_request_query_helpers._query_latest_wip_activity_timestamp
 )
-_query_issue_assignees = _pull_request_support._query_issue_assignees
-_set_issue_assignees = _pull_request_support._set_issue_assignees
+_query_issue_assignees = _pull_request_query_helpers._query_issue_assignees
+_set_issue_assignees = _pull_request_query_helpers._set_issue_assignees
 
 
 _pull_request_state_probe_from_payload = (
@@ -783,7 +788,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
         )
 
 
-_list_project_items = _pull_request_support._list_project_items
+_list_project_items = _pull_request_board_helpers._list_project_items
 
 
 GitHubCliAdapter = GitHubPullRequestAdapter
