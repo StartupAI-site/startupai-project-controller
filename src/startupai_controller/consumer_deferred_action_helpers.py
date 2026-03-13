@@ -2,34 +2,91 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Mapping
+from typing import Callable, Protocol, TypeAlias
 
-import startupai_controller.consumer_automation_bridge as _automation_bridge
-import startupai_controller.consumer_board_state_helpers as _board_state_helpers
-import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
-from startupai_controller.board_graph import _resolve_issue_coordinates
-from startupai_controller.validate_critical_path_promotion import GhQueryError
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.control_plane_state import ControlValueStorePort
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    GhQueryError,
+)
+
+GhRunner = Callable[..., str]
+BoardInfoResolver = Callable[..., object]
+BoardMutator = Callable[..., None]
+CommentChecker = Callable[..., bool]
+CommentPoster = Callable[..., None]
+DeferredActionPayload: TypeAlias = Mapping[str, object]
+
+
+class DeferredActionView(Protocol):
+    """Minimal deferred-action row surface needed for replay."""
+
+    id: int
+    action_type: str
+
+    @property
+    def payload(self) -> DeferredActionPayload:
+        """Return the stored JSON payload decoded into Python values."""
+        ...
+
+
+class DeferredActionStorePort(ControlValueStorePort, Protocol):
+    """Persistence surface needed to replay and delete deferred actions."""
+
+    def list_deferred_actions(self) -> list[DeferredActionView]:
+        """Return deferred actions in replay order."""
+        ...
+
+    def delete_deferred_action(self, action_id: int) -> None:
+        """Delete one deferred action after a successful replay."""
+        ...
+
+
+def _payload_string(payload: DeferredActionPayload, key: str) -> str:
+    """Return one payload value coerced to string."""
+    return str(payload[key])
+
+
+def _payload_string_set(payload: DeferredActionPayload, key: str) -> set[str]:
+    """Return a set of stringified payload values for one sequence field."""
+    raw = payload.get(key)
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        return {str(value) for value in raw}
+    return set()
+
+
+def _payload_int(payload: DeferredActionPayload, key: str) -> int:
+    """Return one payload value coerced to int."""
+    value = payload[key]
+    if isinstance(value, int):
+        return int(value)
+    return int(str(value))
 
 
 def replay_deferred_status_action(
     *,
-    payload: dict[str, Any],
-    config: Any,
-    critical_path_config: Any,
-    review_state_port: Any | None,
-    board_port: Any | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    payload: DeferredActionPayload,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
+    board_info_resolver: BoardInfoResolver | None,
+    board_mutator: BoardMutator | None,
+    gh_runner: GhRunner | None,
     set_blocked_with_reason: Callable[..., None],
     transition_issue_to_review: Callable[..., None],
     transition_issue_to_in_progress: Callable[..., None],
     return_issue_to_ready: Callable[..., None],
 ) -> None:
     """Replay a deferred issue status transition."""
-    issue_ref = str(payload["issue_ref"])
-    to_status = str(payload["to_status"])
-    from_statuses = {str(value) for value in payload.get("from_statuses", [])}
+    issue_ref = _payload_string(payload, "issue_ref")
+    to_status = _payload_string(payload, "to_status")
+    from_statuses = _payload_string_set(payload, "from_statuses")
     blocked_reason = payload.get("blocked_reason")
     if to_status == "Blocked":
         set_blocked_with_reason(
@@ -85,16 +142,16 @@ def replay_deferred_status_action(
 
 def replay_deferred_verdict_marker(
     *,
-    payload: dict[str, Any],
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    payload: DeferredActionPayload,
+    comment_checker: CommentChecker | None,
+    comment_poster: CommentPoster | None,
+    gh_runner: GhRunner | None,
     post_pr_codex_verdict: Callable[..., bool],
 ) -> None:
     """Replay a deferred PR verdict marker post."""
     post_pr_codex_verdict(
-        str(payload["pr_url"]),
-        str(payload["session_id"]),
+        _payload_string(payload, "pr_url"),
+        _payload_string(payload, "session_id"),
         comment_checker=comment_checker,
         comment_poster=comment_poster,
         gh_runner=gh_runner,
@@ -103,18 +160,20 @@ def replay_deferred_verdict_marker(
 
 def replay_deferred_issue_comment(
     *,
-    payload: dict[str, Any],
-    critical_path_config: Any,
-    board_port: Any | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
+    payload: DeferredActionPayload,
+    critical_path_config: CriticalPathConfig,
+    board_port: BoardMutationPort | None,
+    comment_poster: CommentPoster | None,
+    gh_runner: GhRunner | None,
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig], tuple[str, str, int]
+    ],
     runtime_comment_poster: Callable[..., None],
 ) -> None:
     """Replay a deferred issue comment post."""
-    issue_ref = str(payload["issue_ref"])
+    issue_ref = _payload_string(payload, "issue_ref")
     owner, repo, number = resolve_issue_coordinates(issue_ref, critical_path_config)
-    body = str(payload["body"])
+    body = _payload_string(payload, "body")
     if board_port is not None:
         board_port.post_issue_comment(f"{owner}/{repo}", number, body)
         return
@@ -124,15 +183,17 @@ def replay_deferred_issue_comment(
 
 def replay_deferred_issue_close(
     *,
-    payload: dict[str, Any],
-    critical_path_config: Any,
-    board_port: Any | None,
-    gh_runner: Callable[..., str] | None,
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
+    payload: DeferredActionPayload,
+    critical_path_config: CriticalPathConfig,
+    board_port: BoardMutationPort | None,
+    gh_runner: GhRunner | None,
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig], tuple[str, str, int]
+    ],
     runtime_issue_closer: Callable[..., None],
 ) -> None:
     """Replay a deferred issue close."""
-    issue_ref = str(payload["issue_ref"])
+    issue_ref = _payload_string(payload, "issue_ref")
     owner, repo, number = resolve_issue_coordinates(issue_ref, critical_path_config)
     if board_port is not None:
         board_port.close_issue(f"{owner}/{repo}", number)
@@ -142,15 +203,15 @@ def replay_deferred_issue_close(
 
 def replay_deferred_check_rerun(
     *,
-    payload: dict[str, Any],
-    pr_port: Any | None,
-    gh_runner: Callable[..., str] | None,
+    payload: DeferredActionPayload,
+    pr_port: PullRequestPort | None,
+    gh_runner: GhRunner | None,
     runtime_failed_check_rerun: Callable[..., None],
 ) -> None:
     """Replay a deferred failed-check rerun request."""
-    pr_repo = str(payload["pr_repo"])
+    pr_repo = _payload_string(payload, "pr_repo")
     check_name = str(payload.get("check_name") or "")
-    run_id = int(payload["run_id"])
+    run_id = _payload_int(payload, "run_id")
     if pr_port is not None:
         if not pr_port.rerun_failed_check(pr_repo, check_name, run_id):
             raise GhQueryError(f"Failed rerunning check for {pr_repo} run {run_id}")
@@ -160,14 +221,14 @@ def replay_deferred_check_rerun(
 
 def replay_deferred_automerge_enable(
     *,
-    payload: dict[str, Any],
-    pr_port: Any | None,
-    gh_runner: Callable[..., str] | None,
+    payload: DeferredActionPayload,
+    pr_port: PullRequestPort | None,
+    gh_runner: GhRunner | None,
     runtime_automerge_enabler: Callable[..., None],
 ) -> None:
     """Replay a deferred auto-merge enablement."""
-    pr_repo = str(payload["pr_repo"])
-    pr_number = int(payload["pr_number"])
+    pr_repo = _payload_string(payload, "pr_repo")
+    pr_number = _payload_int(payload, "pr_number")
     if pr_port is not None:
         pr_port.enable_automerge(pr_repo, pr_number)
         return
@@ -176,23 +237,25 @@ def replay_deferred_automerge_enable(
 
 def replay_deferred_action(
     *,
-    action: Any,
-    config: Any,
-    critical_path_config: Any,
-    pr_port: Any | None,
-    review_state_port: Any | None,
-    board_port: Any | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
+    action: DeferredActionView,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    pr_port: PullRequestPort | None,
+    review_state_port: ReviewStatePort | None,
+    board_port: BoardMutationPort | None,
+    board_info_resolver: BoardInfoResolver | None,
+    board_mutator: BoardMutator | None,
+    comment_checker: CommentChecker | None,
+    comment_poster: CommentPoster | None,
+    gh_runner: GhRunner | None,
     set_blocked_with_reason: Callable[..., None],
     transition_issue_to_review: Callable[..., None],
     transition_issue_to_in_progress: Callable[..., None],
     return_issue_to_ready: Callable[..., None],
     post_pr_codex_verdict: Callable[..., bool],
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig], tuple[str, str, int]
+    ],
     runtime_comment_poster: Callable[..., None],
     runtime_issue_closer: Callable[..., None],
     runtime_failed_check_rerun: Callable[..., None],
@@ -266,21 +329,21 @@ def replay_deferred_action(
 
 
 def replay_deferred_actions(
-    db: Any,
-    config: Any,
-    critical_path_config: Any,
+    db: DeferredActionStorePort,
+    config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
     *,
-    pr_port: Any | None = None,
-    review_state_port: Any | None = None,
-    board_port: Any | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
-    comment_checker: Callable[..., bool] | None = None,
-    comment_poster: Callable[..., None] | None = None,
-    gh_runner: Callable[..., str] | None = None,
+    pr_port: PullRequestPort | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    board_info_resolver: BoardInfoResolver | None = None,
+    board_mutator: BoardMutator | None = None,
+    comment_checker: CommentChecker | None = None,
+    comment_poster: CommentPoster | None = None,
+    gh_runner: GhRunner | None = None,
     replay_deferred_action: Callable[..., None],
-    record_successful_github_mutation: Callable[..., None],
-    clear_degraded: Callable[[Any], None],
+    record_successful_github_mutation: Callable[[ControlValueStorePort], None],
+    clear_degraded: Callable[[ControlValueStorePort], None],
 ) -> tuple[int, ...]:
     """Replay queued control-plane actions after GitHub recovery."""
     replayed: list[int] = []
@@ -313,71 +376,3 @@ def replay_deferred_actions(
     if replayed:
         clear_degraded(db)
     return tuple(replayed)
-
-
-def replay_deferred_action_from_shell(
-    *,
-    action: Any,
-    config: Any,
-    critical_path_config: Any,
-    pr_port: Any | None,
-    review_state_port: Any | None,
-    board_port: Any | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    comment_checker: Callable[..., bool] | None,
-    comment_poster: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Execute one deferred action using live shell seams."""
-    replay_deferred_action(
-        action=action,
-        config=config,
-        critical_path_config=critical_path_config,
-        pr_port=pr_port,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        comment_checker=comment_checker,
-        comment_poster=comment_poster,
-        gh_runner=gh_runner,
-        set_blocked_with_reason=_automation_bridge.set_blocked_with_reason,
-        transition_issue_to_review=_board_state_helpers.transition_issue_to_review_from_shell,
-        transition_issue_to_in_progress=_board_state_helpers.transition_issue_to_in_progress_from_shell,
-        return_issue_to_ready=_board_state_helpers.return_issue_to_ready_from_shell,
-        post_pr_codex_verdict=_codex_comment_wiring.post_pr_codex_verdict,
-        resolve_issue_coordinates=_resolve_issue_coordinates,
-        runtime_comment_poster=_codex_comment_wiring.runtime_comment_poster,
-        runtime_issue_closer=_codex_comment_wiring.runtime_issue_closer,
-        runtime_failed_check_rerun=_codex_comment_wiring.runtime_failed_check_rerun,
-        runtime_automerge_enabler=_codex_comment_wiring.runtime_automerge_enabler,
-    )
-
-
-def replay_deferred_status_action_from_shell(
-    *,
-    payload: dict[str, Any],
-    config: Any,
-    critical_path_config: Any,
-    review_state_port: Any | None,
-    board_port: Any | None,
-    board_info_resolver: Callable[..., Any] | None,
-    board_mutator: Callable[..., None] | None,
-    gh_runner: Callable[..., str] | None,
-) -> None:
-    """Replay one deferred status transition using live shell seams."""
-    replay_deferred_status_action(
-        payload=payload,
-        config=config,
-        critical_path_config=critical_path_config,
-        review_state_port=review_state_port,
-        board_port=board_port,
-        board_info_resolver=board_info_resolver,
-        board_mutator=board_mutator,
-        gh_runner=gh_runner,
-        set_blocked_with_reason=_automation_bridge.set_blocked_with_reason,
-        transition_issue_to_review=_board_state_helpers.transition_issue_to_review_from_shell,
-        transition_issue_to_in_progress=_board_state_helpers.transition_issue_to_in_progress_from_shell,
-        return_issue_to_ready=_board_state_helpers.return_issue_to_ready_from_shell,
-    )
