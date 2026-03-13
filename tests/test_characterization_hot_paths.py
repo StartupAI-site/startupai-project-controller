@@ -4,7 +4,7 @@ These tests lock the observed contract of three subsystems that are
 scheduled for extraction by Codex:
 
   1. Deferred action replay loop (control_plane_rescue._replay_deferred_actions)
-  2. Deferred action queue dedupe/supersede (consumer_db.queue_deferred_action)
+  2. Deferred action queue dedupe/supersede (consumer_db_store.queue_deferred_action)
   3. Interrupted-session recovery decision tree
   4. Multi-worker dispatch loop
 
@@ -26,7 +26,7 @@ import pytest
 
 from startupai_controller.board_automation import load_automation_config
 from startupai_controller.consumer_config import ConsumerConfig
-from startupai_controller.consumer_db import ConsumerDB, DeferredAction
+from startupai_controller.adapters.consumer_db_store import ConsumerDB, DeferredAction
 from startupai_controller.consumer_operational_wiring import (
     recover_interrupted_sessions as _recover_interrupted_sessions,
 )
@@ -417,12 +417,12 @@ class TestDeferredActionReplayLoop:
 
 
 # ===========================================================================
-# 2. Deferred Action Queue Dedupe/Supersede (consumer_db)
+# 2. Deferred Action Queue Dedupe/Supersede (consumer_db_store)
 # ===========================================================================
 
 
 class TestDeferredActionQueueContract:
-    """Characterize consumer_db.queue_deferred_action dedupe/supersede behavior."""
+    """Characterize consumer_db_store.queue_deferred_action dedupe behavior."""
 
     def test_exact_duplicate_returns_existing_id(self, tmp_path: Path) -> None:
         """Exact duplicate (same scope, type, payload) returns original row id."""
