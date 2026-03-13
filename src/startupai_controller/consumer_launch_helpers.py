@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
+
+from startupai_controller.consumer_types import IssueContextPayload
 
 
 def setup_launch_worktree(
@@ -41,17 +43,18 @@ def setup_launch_worktree(
             subprocess_runner=subprocess_runner,
         )
     except worktree_error_cls as err:
+        typed_err = cast(Any, err)
         record_metric(
             db,
             config,
             "worktree_blocked",
             issue_ref=issue_ref,
-            payload={"reason": err.reason_code, "detail": err.detail},
+            payload={"reason": typed_err.reason_code, "detail": typed_err.detail},
         )
         blocked_reason = (
-            err.reason_code
-            if err.reason_code == "worktree_in_use"
-            else f"workspace_prepare:{err.detail}"
+            typed_err.reason_code
+            if typed_err.reason_code == "worktree_in_use"
+            else f"workspace_prepare:{typed_err.detail}"
         )
         block_prelaunch_issue(
             issue_ref,
@@ -221,8 +224,8 @@ def resolve_launch_issue_context(
     db: Any,
     issue_context_port: Any,
     gh_runner: Callable[..., str] | None,
-    hydrate_issue_context: Callable[..., dict[str, Any]],
-) -> tuple[dict[str, Any], str]:
+    hydrate_issue_context: Callable[..., IssueContextPayload],
+) -> tuple[IssueContextPayload, str]:
     """Hydrate launch issue context and compute the launch title."""
     context = hydrate_issue_context(
         issue_ref,

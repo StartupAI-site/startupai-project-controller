@@ -6,30 +6,39 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Any, Callable
+from typing import Callable
 
 from startupai_controller import consumer_codex_helpers as _codex_helpers
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import CodexSessionResult
+from startupai_controller.consumer_types import IssueContextPayload
+from startupai_controller.consumer_workflow import WorkflowDefinition
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    IssueRef,
+)
 
 
 def assemble_codex_prompt(
-    issue_context: dict[str, Any],
+    issue_context: IssueContextPayload,
     issue_ref: str,
-    config: Any,
-    consumer_config: Any,
+    config: CriticalPathConfig,
+    consumer_config: ConsumerConfig,
     worktree_path: str,
     branch_name: str,
     *,
     dependency_summary: str = "",
-    workflow_definition: Any | None = None,
+    workflow_definition: WorkflowDefinition | None = None,
     session_kind: str = "new_work",
     repair_pr_url: str | None = None,
     branch_reconcile_state: str | None = None,
     branch_reconcile_error: str | None = None,
-    parse_issue_ref: Callable[[str], Any],
-    resolve_issue_coordinates: Callable[[str, Any], tuple[str, str, int]],
+    parse_issue_ref: Callable[[str], IssueRef],
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig], tuple[str, str, int]
+    ],
     extract_acceptance_criteria: Callable[[str], str],
-    render_workflow_prompt: Callable[[Any, dict[str, Any]], str],
+    render_workflow_prompt: Callable[[WorkflowDefinition, dict[str, str]], str],
 ) -> str:
     """Build the codex execution prompt from the repo contract."""
     return _codex_helpers.assemble_codex_prompt(
@@ -71,7 +80,7 @@ def run_codex_session(
     heartbeat_fn: Callable[[], None] | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     resolve_cli_command_fn: Callable[[str], str],
-    logger: Any,
+    logger: _codex_helpers.CodexLogger,
 ) -> int:
     """Run codex exec with a timeout wrapper."""
     return _codex_helpers.run_codex_session(
@@ -108,7 +117,7 @@ def create_or_update_pr(
     owner: str,
     repo: str,
     title: str,
-    config: Any | None = None,
+    config: object | None = None,
     issue_ref: str | None = None,
     session_id: str = "legacy-session",
     *,
@@ -116,7 +125,7 @@ def create_or_update_pr(
     run_gh: Callable[..., str],
     build_pr_body_fn: Callable[..., str],
     repo_to_prefix_for_repo: Callable[[str], str],
-    parse_issue_ref: Callable[[str], Any],
+    parse_issue_ref: Callable[[str], IssueRef],
 ) -> str:
     """Ensure a PR exists for the branch and return its URL."""
     return _codex_helpers.create_or_update_pr(

@@ -39,6 +39,15 @@ class CodexSessionResult(TypedDict):
     duration_seconds: float
 
 
+class IssueContextPayload(TypedDict):
+    """Normalized issue context payload used across launch and codex paths."""
+
+    title: str
+    body: str
+    labels: list[str]
+    updated_at: str
+
+
 @dataclass(frozen=True)
 class PreparedCycleContext:
     """Preflight context reused across worker launches in one daemon tick."""
@@ -80,7 +89,7 @@ class PreparedLaunchContext:
     repo: str
     number: int
     title: str
-    issue_context: dict[str, Any]
+    issue_context: IssueContextPayload
     session_kind: str
     repair_pr_url: str | None
     repair_branch_name: str | None

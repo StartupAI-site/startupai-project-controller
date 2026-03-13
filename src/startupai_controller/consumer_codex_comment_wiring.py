@@ -6,14 +6,13 @@ import logging
 from pathlib import Path
 import subprocess
 from collections.abc import Callable
-from typing import Any
 
 import startupai_controller.consumer_comment_pr_shell_wiring as _comment_pr_shell_wiring
 import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiring
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
-from startupai_controller.consumer_types import CodexSessionResult
+from startupai_controller.consumer_types import CodexSessionResult, IssueContextPayload
 from startupai_controller.consumer_workflow import render_workflow_prompt
 from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.domain.models import (
@@ -34,7 +33,7 @@ logger = logging.getLogger("board-consumer")
 
 
 def assemble_codex_prompt(
-    issue_context: dict[str, Any],
+    issue_context: IssueContextPayload,
     issue_ref: str,
     config: CriticalPathConfig,
     consumer_config: ConsumerConfig,

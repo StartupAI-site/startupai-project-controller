@@ -9,6 +9,7 @@ from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    IssueContextPayload,
     PendingClaimContext,
     PreparedCycleContext,
     PreparedLaunchContext,
@@ -88,7 +89,7 @@ class ResolveLaunchIssueContextFn(Protocol):
         config: ConsumerConfig,
         db: ConsumerRuntimeStatePort,
         issue_context_port: IssueContextPort,
-    ) -> tuple[dict[str, Any], str]: ...
+    ) -> tuple[IssueContextPayload, str]: ...
 
 
 class SetupLaunchWorktreeFn(Protocol):
@@ -150,7 +151,7 @@ class AssemblePreparedLaunchContextFn(Protocol):
         repo: str,
         number: int,
         title: str,
-        context: dict[str, Any],
+        context: IssueContextPayload,
         session_kind: str,
         repair_pr_url: str | None,
         repair_branch_name: str | None,

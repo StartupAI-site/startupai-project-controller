@@ -28,7 +28,10 @@ from startupai_controller.consumer_worktree_helpers import (
     reconcile_repair_branch as _reconcile_repair_branch_helper,
 )
 from startupai_controller.consumer_types import WorktreePrepareError
-from startupai_controller.consumer_types import PreparedCycleContext
+from startupai_controller.consumer_types import (
+    IssueContextPayload,
+    PreparedCycleContext,
+)
 from startupai_controller.consumer_workflow import (
     WorkflowDefinition,
     load_worktree_workflow,
@@ -251,7 +254,7 @@ def resolve_launch_issue_context(
     db: ConsumerRuntimeStatePort,
     issue_context_port: IssueContextPort,
     gh_runner: GitHubRunnerFn | None,
-) -> tuple[dict[str, Any], str]:
+) -> tuple[IssueContextPayload, str]:
     """Hydrate launch issue context and compute the launch title."""
     return _resolve_launch_issue_context_helper(
         issue_ref,
