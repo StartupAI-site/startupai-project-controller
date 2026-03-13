@@ -201,13 +201,13 @@ def _evaluate_rebalance_snapshot(
     ref = snapshot.issue_ref
     parsed = parse_issue_ref(ref)
     if not all_prefixes and this_repo_prefix and parsed.prefix != this_repo_prefix:
-        return None, board_port
+        return None
 
     owner, repo, number = _resolve_issue_coordinates(ref, config)
     executor = snapshot.executor.strip().lower()
     if executor not in VALID_EXECUTORS:
         decision.skipped.append((ref, "invalid-executor"))
-        return None, board_port
+        return None
 
     if is_graph_member(config, ref):
         code, _msg = ready_promotion_evaluator(
@@ -392,7 +392,7 @@ def rebalance_wip(
             )
 
     for (executor, lane), candidates in lane_buckets.items():
-        board_port = _apply_rebalance_lane_overflow(
+        _apply_rebalance_lane_overflow(
             candidates,
             executor=executor,
             lane=lane,

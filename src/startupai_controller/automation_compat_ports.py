@@ -8,16 +8,18 @@ wrapping mechanics.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
+
+from startupai_controller.ports.ready_flow import BoardInfoView
 
 
 class _DelegatingPort:
     """Delegate unknown attributes to an underlying port implementation."""
 
-    def __init__(self, base) -> None:
+    def __init__(self, base: Any) -> None:
         self._base = base
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
 
 
@@ -33,7 +35,7 @@ def wrap_review_state_port(
     project_owner: str,
     project_number: int,
     status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., object] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     comment_exists_fn: Callable[..., bool] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ):
@@ -45,17 +47,21 @@ def wrap_review_state_port(
     ):
         return review_state_port
 
+    resolve_status = status_resolver
+    resolve_board_info = board_info_resolver
+    comment_exists = comment_exists_fn
+
     class _CompatReviewStatePort(_DelegatingPort):
         def get_issue_status(self, issue_ref: str):
-            if board_info_resolver is not None:
-                return board_info_resolver(
+            if resolve_board_info is not None:
+                return resolve_board_info(
                     issue_ref,
                     config,
                     project_owner,
                     project_number,
                 ).status
-            if status_resolver is not None:
-                return status_resolver(
+            if resolve_status is not None:
+                return resolve_status(
                     issue_ref,
                     config,
                     project_owner,
@@ -64,9 +70,9 @@ def wrap_review_state_port(
             return self._base.get_issue_status(issue_ref)
 
         def comment_exists(self, repo: str, issue_number: int, marker: str) -> bool:
-            if comment_exists_fn is not None:
+            if comment_exists is not None:
                 owner, repo_name = _split_repo_slug(repo)
-                return comment_exists_fn(
+                return comment_exists(
                     owner,
                     repo_name,
                     issue_number,
@@ -84,7 +90,7 @@ def wrap_board_port(
     config,
     project_owner: str,
     project_number: int,
-    board_info_resolver: Callable[..., object] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     board_mutator: Callable[..., None] | None = None,
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
@@ -93,23 +99,27 @@ def wrap_board_port(
     if board_port is None or (board_mutator is None and comment_poster is None):
         return board_port
 
+    resolve_board_info = board_info_resolver
+    mutate_board = board_mutator
+    post_comment = comment_poster
+
     class _CompatBoardMutationPort(_DelegatingPort):
         def set_issue_status(self, issue_ref: str, status: str) -> None:
-            if board_mutator is not None and board_info_resolver is not None:
-                info = board_info_resolver(
+            if mutate_board is not None and resolve_board_info is not None:
+                info = resolve_board_info(
                     issue_ref,
                     config,
                     project_owner,
                     project_number,
                 )
-                board_mutator(info.project_id, info.item_id, status)
+                mutate_board(info.project_id, info.item_id, status)
                 return
             self._base.set_issue_status(issue_ref, status)
 
         def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
-            if comment_poster is not None:
+            if post_comment is not None:
                 owner, repo_name = _split_repo_slug(repo)
-                comment_poster(
+                post_comment(
                     owner,
                     repo_name,
                     issue_number,
@@ -128,25 +138,28 @@ def wrap_status_transition_board_port(
     config,
     project_owner: str,
     project_number: int,
-    board_info_resolver: Callable[..., object] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     board_mutator: Callable[..., None] | None = None,
 ):
     """Overlay legacy board-mutator behavior on a typed board port."""
     if board_mutator is None or board_info_resolver is None:
         return board_port
 
+    resolve_board_info = board_info_resolver
+    mutate_board = board_mutator
+
     if board_port is None:
         board_port = SimpleNamespace()
 
     class _CompatBoardMutationPort(_DelegatingPort):
         def set_issue_status(self, issue_ref: str, status: str) -> None:
-            info = board_info_resolver(
+            info = resolve_board_info(
                 issue_ref,
                 config,
                 project_owner,
                 project_number,
             )
-            board_mutator(info.project_id, info.item_id, status)
+            mutate_board(info.project_id, info.item_id, status)
 
     return _CompatBoardMutationPort(board_port)
 
@@ -157,18 +170,20 @@ def wrap_status_transition_review_state_port(
     config,
     project_owner: str,
     project_number: int,
-    board_info_resolver: Callable[..., object] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
 ):
     """Overlay legacy board-info status reads on a typed review-state port."""
     if board_info_resolver is None:
         return review_state_port
+
+    resolve_board_info = board_info_resolver
 
     if review_state_port is None:
         review_state_port = SimpleNamespace()
 
     class _CompatReviewStatePort(_DelegatingPort):
         def get_issue_status(self, issue_ref: str):
-            info = board_info_resolver(
+            info = resolve_board_info(
                 issue_ref,
                 config,
                 project_owner,
