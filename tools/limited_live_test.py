@@ -958,7 +958,7 @@ class LimitedLiveTestHarness:
             return False
         if payload is None:
             return False
-        return payload.get("exit_class") == "idle"
+        return payload.get("exit_class") == "idle" and payload.get("action") == "idle"
 
 
 def _write_json(path: Path, payload: Any) -> None:

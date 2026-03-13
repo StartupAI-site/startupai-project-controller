@@ -176,6 +176,18 @@ def _one_shot_payload(result: object) -> dict[str, object]:
     }
 
 
+def _one_shot_error_payload(error: Exception) -> dict[str, object]:
+    """Render the machine-readable one-shot error payload."""
+    return {
+        "action": "error",
+        "reason": str(error),
+        "issue_ref": None,
+        "session_id": None,
+        "pr_url": None,
+        "exit_class": "error",
+    }
+
+
 def _create_status_http_server(
     config: ConsumerConfig,
     *,
@@ -447,12 +459,20 @@ def main(argv: list[str] | None = None) -> int:
     db = core.open_consumer_db(config.db_path)
 
     if args.command == "one-shot":
-        result = core.run_one_cycle(
-            config,
-            db,
-            dry_run=args.dry_run,
-            target_issue=getattr(args, "issue", None),
-        )
+        try:
+            result = core.run_one_cycle(
+                config,
+                db,
+                dry_run=args.dry_run,
+                target_issue=getattr(args, "issue", None),
+            )
+        except Exception as err:
+            if getattr(args, "as_json", False):
+                print(json.dumps(_one_shot_error_payload(err), indent=2))
+                db.close()
+                return 4
+            db.close()
+            raise
         if getattr(args, "as_json", False):
             print(json.dumps(_one_shot_payload(result), indent=2))
         else:

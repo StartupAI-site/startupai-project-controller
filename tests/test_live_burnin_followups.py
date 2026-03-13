@@ -142,6 +142,69 @@ def test_one_shot_json_reports_idle_without_changing_exit_code(
     assert payload["exit_class"] == "idle"
 
 
+def test_one_shot_json_reports_error_without_changing_error_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeConfig:
+        def __init__(
+            self,
+            *,
+            db_path: Path,
+            automation_config_path: Path,
+            critical_paths_path: Path,
+            **_kwargs: object,
+        ) -> None:
+            self.db_path = db_path
+            self.automation_config_path = automation_config_path
+            self.critical_paths_path = critical_paths_path
+
+    class FakeDb:
+        def close(self) -> None:
+            return None
+
+    class FakeLogger:
+        def info(self, *_args, **_kwargs) -> None:
+            return None
+
+    def _run_one_cycle(*_args, **_kwargs):
+        raise RuntimeError("synthetic one-shot failure")
+
+    fake_core = type(
+        "FakeCore",
+        (),
+        {
+            "DEFAULT_DB_PATH": tmp_path / "consumer.sqlite3",
+            "DEFAULT_CONFIG_PATH": tmp_path / "critical-paths.json",
+            "DEFAULT_AUTOMATION_CONFIG_PATH": tmp_path / "automation.json",
+            "DEFAULT_STATUS_HOST": "127.0.0.1",
+            "DEFAULT_STATUS_PORT": 8765,
+            "DEFAULT_DRAIN_PATH": tmp_path / "consumer.drain",
+            "ConsumerConfig": FakeConfig,
+            "ConfigError": RuntimeError,
+            "load_config": staticmethod(lambda _path: object()),
+            "load_automation_config": staticmethod(lambda _path: None),
+            "_apply_automation_runtime": staticmethod(lambda *_args, **_kwargs: None),
+            "open_consumer_db": staticmethod(lambda _path: FakeDb()),
+            "run_one_cycle": staticmethod(_run_one_cycle),
+            "logger": FakeLogger(),
+        },
+    )()
+
+    monkeypatch.setattr(board_consumer_cli, "_core", lambda: fake_core)
+
+    exit_code = board_consumer_cli.main(
+        ["one-shot", "--dry-run", "--json", "--db-path", str(tmp_path / "db.sqlite3")]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 4
+    assert payload["action"] == "error"
+    assert payload["exit_class"] == "error"
+    assert payload["reason"] == "synthetic one-shot failure"
+
+
 def test_validate_branch_publication_rejects_branch_mismatch() -> None:
     def runner(args, **kwargs):
         if args[3:] == ["branch", "--show-current"]:

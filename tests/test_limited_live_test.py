@@ -347,6 +347,43 @@ def test_one_shot_idle_json_is_nonfatal_for_harness(tmp_path: Path) -> None:
     assert harness._is_nonfatal_one_shot_idle(result, payload) is True
 
 
+def test_one_shot_idle_requires_idle_action_for_nonfatal_harness_classification(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload()],
+        status_full=[_status_payload()],
+        report_slo=[_report_payload()],
+        tick_payloads=[_tick_payload()],
+        failures={("other", None): 2},
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    result = backend.run(harness._consumer_one_shot_command())
+    payload = json.loads(result.stdout)
+    payload["action"] = "error"
+
+    assert harness._is_nonfatal_one_shot_idle(result, payload) is False
+    with pytest.raises(HarnessError, match="failed with exit code 2"):
+        harness._require_one_shot_ok(
+            CommandResult(
+                argv=result.argv,
+                returncode=result.returncode,
+                stdout=json.dumps(payload),
+                stderr=result.stderr,
+                started_at=result.started_at,
+                completed_at=result.completed_at,
+                timed_out=result.timed_out,
+                timeout_seconds=result.timeout_seconds,
+            ),
+            "board_consumer one-shot --dry-run --json",
+        )
+
+
 def test_limited_live_test_fails_preflight_when_systemd_active(tmp_path: Path) -> None:
     clock = FakeClock()
     process = FakeProcess(clock=clock, drain_exit_delay=1)
