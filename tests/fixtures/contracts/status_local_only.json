@@ -85,11 +85,15 @@
   },
   "recent_sessions": [
     {
+      "active_seconds": null,
       "branch_reconcile_error": null,
       "branch_reconcile_state": null,
       "completed_at": null,
+      "drain_abort_reason": null,
+      "drain_wait_class": "pre_execution_abort_pending",
       "done_reason": null,
       "executor": "codex",
+      "external_execution_started": false,
       "failure_reason": null,
       "id": "<session-id:running>",
       "issue_ref": "crew#84",
@@ -112,11 +116,15 @@
       "verification_class": null
     },
     {
+      "active_seconds": null,
       "branch_reconcile_error": null,
       "branch_reconcile_state": null,
       "completed_at": "<iso8601>",
+      "drain_abort_reason": null,
+      "drain_wait_class": "not_draining",
       "done_reason": null,
       "executor": "codex",
+      "external_execution_started": false,
       "failure_reason": "api_error",
       "id": "<session-id:failed>",
       "issue_ref": "crew#85",
@@ -221,9 +229,13 @@
   },
   "workers": [
     {
+      "active_seconds": null,
       "branch_reconcile_error": null,
       "branch_reconcile_state": null,
+      "drain_abort_reason": null,
+      "drain_wait_class": "pre_execution_abort_pending",
       "done_reason": null,
+      "external_execution_started": false,
       "id": "<session-id:running>",
       "issue_ref": "crew#84",
       "phase": "running",
@@ -233,6 +245,7 @@
       "resolution_kind": null,
       "session_kind": "repair",
       "slot_id": 1,
+      "started_at": null,
       "status": "running",
       "verification_class": null
     }

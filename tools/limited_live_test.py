@@ -365,9 +365,9 @@ class LimitedLiveTestHarness:
             self._run_aux_command(self._consumer_status_command(local_only=False)),
             "board_consumer status --json",
         )
-        self._require_ok(
+        self._require_one_shot_ok(
             self._run_aux_command(self._consumer_one_shot_command()),
-            "board_consumer one-shot --dry-run",
+            "board_consumer one-shot --dry-run --json",
         )
 
     def _capture_baseline_snapshots(self) -> None:
@@ -469,7 +469,6 @@ class LimitedLiveTestHarness:
             self.clock.sleep(float(self.config.shutdown_poll_seconds))
         self._forced_shutdown = True
         self._shutdown_mode = "forced"
-        self.issues.append("Drain timeout exceeded; sent SIGINT/SIGTERM escalation.")
         child.send_signal(signal.SIGINT)
         sigint_deadline = self.clock.monotonic() + 60
         while self.clock.monotonic() < sigint_deadline:
@@ -598,7 +597,10 @@ class LimitedLiveTestHarness:
             self.tick_records.append(record)
         elif "report-slo" in name:
             self.slo_records.append(record)
-        if result.returncode != 0:
+        if result.returncode != 0 and not self._is_nonfatal_one_shot_idle(
+            result,
+            payload,
+        ):
             message = f"{name} failed with exit code {result.returncode}"
             if result.timed_out:
                 message = f"{name} timed out after {result.timeout_seconds} seconds"
@@ -607,6 +609,7 @@ class LimitedLiveTestHarness:
         return record
 
     def _build_summary(self) -> RunSummary:
+        acceptable_forced_shutdown = self._acceptable_forced_shutdown()
         degraded_periods = _derive_periods(
             self.status_records, "degraded", "degraded_reason"
         )
@@ -635,6 +638,7 @@ class LimitedLiveTestHarness:
             degraded_periods,
             claim_periods,
             log_highlights,
+            acceptable_forced_shutdown=acceptable_forced_shutdown,
         )
         if not self.snapshot_failures:
             self.worked.append(
@@ -642,6 +646,15 @@ class LimitedLiveTestHarness:
             )
         if not self._unexpected_exit:
             self.worked.append("consumer remained under supervised harness control")
+        if self._forced_shutdown:
+            if acceptable_forced_shutdown:
+                self.worked.append(
+                    "forced shutdown occurred only after waiting on in-flight external execution"
+                )
+            else:
+                self.issues.append(
+                    "Drain timeout exceeded; sent SIGINT/SIGTERM escalation."
+                )
         improvements = list(self.improvements)
         if conclusion == SUMMARY_CONCLUSIONS[1]:
             improvements.append(
@@ -674,6 +687,8 @@ class LimitedLiveTestHarness:
         degraded_periods: list[dict[str, Any]],
         claim_periods: list[dict[str, Any]],
         log_highlights: list[str],
+        *,
+        acceptable_forced_shutdown: bool,
     ) -> str:
         if not self._meaningful_board_activity:
             return SUMMARY_CONCLUSIONS[3]
@@ -695,10 +710,35 @@ class LimitedLiveTestHarness:
             degraded_periods
             or self.snapshot_failures
             or self._unexpected_exit
-            or self._forced_shutdown
+            or (self._forced_shutdown and not acceptable_forced_shutdown)
         ):
             return SUMMARY_CONCLUSIONS[1]
         return SUMMARY_CONCLUSIONS[0]
+
+    def _acceptable_forced_shutdown(self) -> bool:
+        """Return True when forced shutdown waited only on in-flight execution."""
+        if not self._forced_shutdown:
+            return False
+        payload = self._latest_local_status_payload()
+        if payload is None:
+            return False
+        workers = payload.get("workers") or []
+        if not workers:
+            return False
+        return all(
+            worker.get("status") == "running"
+            and worker.get("external_execution_started") is True
+            and worker.get("drain_wait_class") == "finishing_inflight_execution"
+            for worker in workers
+        )
+
+    def _latest_local_status_payload(self) -> dict[str, Any] | None:
+        """Return the latest local-only status payload captured by the harness."""
+        for record in reversed(self.status_records):
+            payload = record.payload
+            if payload and payload.get("local_only") is True:
+                return payload
+        return None
 
     def _write_summary(self, summary: RunSummary) -> None:
         summary_payload = asdict(summary)
@@ -816,6 +856,7 @@ class LimitedLiveTestHarness:
             "startupai_controller.board_consumer",
             "one-shot",
             "--dry-run",
+            "--json",
         ]
         if self.config.db_path:
             command.extend(["--db-path", str(self.config.db_path)])
@@ -882,6 +923,18 @@ class LimitedLiveTestHarness:
             f"{label} failed with exit code {result.returncode}: {result.stderr or result.stdout}"
         )
 
+    def _require_one_shot_ok(self, result: CommandResult, label: str) -> None:
+        payload = _parse_json(result.stdout)
+        if result.ok or self._is_nonfatal_one_shot_idle(result, payload):
+            return
+        if result.timed_out:
+            raise HarnessError(
+                f"{label} timed out after {result.timeout_seconds} seconds."
+            )
+        raise HarnessError(
+            f"{label} failed with exit code {result.returncode}: {result.stderr or result.stdout}"
+        )
+
     def _git_commit(self) -> str | None:
         result = self._run_aux_command(["git", "rev-parse", "HEAD"])
         if result.ok:
@@ -893,6 +946,19 @@ class LimitedLiveTestHarness:
             argv,
             timeout_seconds=float(self.config.command_timeout_seconds),
         )
+
+    def _is_nonfatal_one_shot_idle(
+        self,
+        result: CommandResult,
+        payload: dict[str, Any] | None,
+    ) -> bool:
+        if "one-shot" not in result.argv:
+            return False
+        if result.returncode != 2:
+            return False
+        if payload is None:
+            return False
+        return payload.get("exit_class") == "idle"
 
 
 def _write_json(path: Path, payload: Any) -> None:

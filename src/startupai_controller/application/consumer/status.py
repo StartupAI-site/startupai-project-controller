@@ -376,7 +376,51 @@ def _lane_wip_limits_payload(
     return lane_wip_limits
 
 
-def _worker_status_payload(worker: SessionInfo) -> WorkerStatusPayload:
+def _active_seconds(started_at: str | None, *, now: datetime) -> int | None:
+    """Return active duration in seconds when a start timestamp is present."""
+    if not started_at:
+        return None
+    started = datetime.fromisoformat(started_at)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0, int((now - started).total_seconds()))
+
+
+def _external_execution_started(session: SessionInfo) -> bool:
+    """Return True once the claimed session crossed into Codex execution."""
+    return session.phase == "executing"
+
+
+def _drain_wait_class(
+    session: SessionInfo,
+    *,
+    drain_requested: bool,
+) -> str:
+    """Classify why a session is still active during a drain window."""
+    if session.status != "running":
+        return "not_draining"
+    if not drain_requested:
+        return "not_draining"
+    if _external_execution_started(session):
+        return "finishing_inflight_execution"
+    return "pre_execution_abort_pending"
+
+
+def _drain_abort_reason(session: SessionInfo) -> str | None:
+    """Return the structured drain abort reason when this session was drained."""
+    if session.failure_reason == "drain_requested_pre_execution":
+        return session.failure_reason
+    if session.done_reason == "drain_requested_pre_execution":
+        return session.done_reason
+    return None
+
+
+def _worker_status_payload(
+    worker: SessionInfo,
+    *,
+    now: datetime,
+    drain_requested: bool,
+) -> WorkerStatusPayload:
     """Render one active worker payload."""
     return {
         "id": worker.id,
@@ -384,6 +428,14 @@ def _worker_status_payload(worker: SessionInfo) -> WorkerStatusPayload:
         "slot_id": worker.slot_id,
         "phase": worker.phase,
         "status": worker.status,
+        "started_at": worker.started_at,
+        "active_seconds": _active_seconds(worker.started_at, now=now),
+        "external_execution_started": _external_execution_started(worker),
+        "drain_wait_class": _drain_wait_class(
+            worker,
+            drain_requested=drain_requested,
+        ),
+        "drain_abort_reason": _drain_abort_reason(worker),
         "session_kind": worker.session_kind,
         "repair_pr_url": worker.repair_pr_url,
         "branch_reconcile_state": worker.branch_reconcile_state,
@@ -510,6 +562,7 @@ def _recent_session_status_payload(
     config: ConsumerConfig,
     workflows: dict[str, WorkflowDefinition],
     now: datetime,
+    drain_requested: bool,
     session_retry_state: SessionRetryStateFn,
 ) -> RecentSessionStatusPayload:
     """Render one recent session payload for status JSON."""
@@ -525,7 +578,14 @@ def _recent_session_status_payload(
         "branch_reconcile_state": session.branch_reconcile_state,
         "branch_reconcile_error": session.branch_reconcile_error,
         "started_at": session.started_at,
+        "active_seconds": _active_seconds(session.started_at, now=now),
         "completed_at": session.completed_at,
+        "external_execution_started": _external_execution_started(session),
+        "drain_wait_class": _drain_wait_class(
+            session,
+            drain_requested=drain_requested,
+        ),
+        "drain_abort_reason": _drain_abort_reason(session),
         "pr_url": session.pr_url,
         "resolution_kind": session.resolution_kind,
         "verification_class": session.verification_class,
@@ -678,6 +738,7 @@ def _build_status_payload(
     claim_suppressed_reason = control_state.get(suppressed_reason_key)
     claim_suppressed_scope = control_state.get(suppressed_scope_key)
     last_rate_limit_at = control_state.get(last_rate_limit_key)
+    drain_requested = deps.drain_requested(config.drain_path)
     control_plane_health = deps.control_plane_health_summary(
         control_state,
         deferred_action_count=deferred_action_count,
@@ -689,12 +750,19 @@ def _build_status_payload(
     return {
         "active_leases": leases,
         "active_slots": slots,
-        "workers": [_worker_status_payload(worker) for worker in workers],
+        "workers": [
+            _worker_status_payload(
+                worker,
+                now=status_now,
+                drain_requested=drain_requested,
+            )
+            for worker in workers
+        ],
         "repo_prefixes": list(config.repo_prefixes),
         "global_concurrency": config.global_concurrency,
         "lane_wip_limits": lane_wip_limits,
         "poll_interval_seconds": effective_interval,
-        "drain_requested": deps.drain_requested(config.drain_path),
+        "drain_requested": drain_requested,
         "drain_path": str(config.drain_path),
         "workflow_state_path": str(config.workflow_state_path),
         "workflow_last_reload_at": last_reload_at,
@@ -733,6 +801,7 @@ def _build_status_payload(
                 config=config,
                 workflows=main_workflows,
                 now=status_now,
+                drain_requested=drain_requested,
                 session_retry_state=deps.session_retry_state,
             )
             for session in sessions

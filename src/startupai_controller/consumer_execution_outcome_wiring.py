@@ -57,6 +57,7 @@ from startupai_controller.runtime.wiring import (
     build_process_runner_port,
     build_session_store,
 )
+from startupai_controller.consumer_drain_control import drain_requested as _drain_requested
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 CodexResultPayload = CodexSessionResult
@@ -781,6 +782,7 @@ def execute_claimed_session(
         prepared=prepared,
         deps=ExecutionDeps(
             assemble_codex_prompt=assemble_codex_prompt,
+            drain_requested=_drain_requested,
             run_codex_session=run_codex_session,
             parse_codex_result=parse_codex_result,
             session_status_from_codex_result=session_status_from_codex_result,

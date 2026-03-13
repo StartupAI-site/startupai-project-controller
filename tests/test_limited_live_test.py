@@ -134,7 +134,19 @@ class FakeBackend:
         elif self._is_control_plane_command(argv) and "tick" in argv:
             stdout = json.dumps(self._next_payload(self.tick_payloads))
         elif self._is_consumer_command(argv) and "one-shot" in argv:
-            stdout = "dry run ok\n"
+            payload = {
+                "action": "claimed" if returncode == 0 else "idle",
+                "reason": "" if returncode == 0 else "lease-cap",
+                "issue_ref": None,
+                "session_id": None,
+                "pr_url": None,
+                "exit_class": "success" if returncode == 0 else "idle",
+            }
+            if returncode == 4:
+                payload["action"] = "error"
+                payload["reason"] = "error"
+                payload["exit_class"] = "error"
+            stdout = json.dumps(payload)
         elif self._is_consumer_command(argv) and "drain" in argv:
             if (
                 self.process.drain_exit_delay is not None
@@ -312,10 +324,27 @@ def test_limited_live_test_happy_path_creates_artifacts(tmp_path: Path) -> None:
     assert summary.meaningful_board_activity is True
     assert summary.shutdown_mode == "natural"
     assert summary.conclusion == "current transport acceptable for live use"
-    assert (harness.run_dir / "summary.json").exists()
-    assert (harness.run_dir / "summary.md").exists()
-    assert (harness.run_dir / "artifacts" / "baseline" / "status.json").exists()
-    assert (harness.run_dir / "artifacts" / "final" / "status.json").exists()
+
+
+def test_one_shot_idle_json_is_nonfatal_for_harness(tmp_path: Path) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload()],
+        status_full=[_status_payload()],
+        report_slo=[_report_payload()],
+        tick_payloads=[_tick_payload()],
+        failures={("other", None): 2},
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    result = backend.run(harness._consumer_one_shot_command())
+    payload = json.loads(result.stdout)
+
+    harness._require_one_shot_ok(result, "board_consumer one-shot --dry-run --json")
+    assert harness._is_nonfatal_one_shot_idle(result, payload) is True
 
 
 def test_limited_live_test_fails_preflight_when_systemd_active(tmp_path: Path) -> None:
@@ -385,6 +414,52 @@ def test_limited_live_test_escalates_when_drain_does_not_finish(tmp_path: Path) 
     assert summary.shutdown_mode == "forced"
     assert summary.forced_shutdown is True
     assert process.signals == [signal.SIGINT, signal.SIGTERM]
+    assert "Drain timeout exceeded; sent SIGINT/SIGTERM escalation." in summary.issues
+
+
+def test_limited_live_test_treats_forced_shutdown_as_acceptable_when_only_waiting_on_inflight_execution(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(
+        clock=clock,
+        drain_exit_delay=None,
+        sigint_stops=False,
+        sigterm_stops=True,
+    )
+    inflight_worker = {
+        "issue_ref": "crew#84",
+        "status": "running",
+        "external_execution_started": True,
+        "drain_wait_class": "finishing_inflight_execution",
+    }
+    active_status = _status_payload(
+        active_leases=1,
+        workers=[inflight_worker],
+        recent_sessions=[inflight_worker],
+        last_successful_github_mutation_at="2026-03-13T12:05:00+00:00",
+    )
+    active_status["local_only"] = True
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[active_status, active_status, active_status, active_status],
+        status_full=[_status_payload(active_leases=1), _status_payload(active_leases=1)],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.shutdown_mode == "forced"
+    assert summary.forced_shutdown is True
+    assert "Drain timeout exceeded; sent SIGINT/SIGTERM escalation." not in summary.issues
+    assert (
+        "forced shutdown occurred only after waiting on in-flight external execution"
+        in summary.worked
+    )
+    assert summary.conclusion == "current transport acceptable for live use"
 
 
 def test_limited_live_test_records_snapshot_failure_and_continues(

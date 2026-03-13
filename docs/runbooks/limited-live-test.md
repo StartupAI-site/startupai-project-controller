@@ -91,7 +91,7 @@ Latest artifact-first validation result for `20260313T185906Z`:
 
    ```bash
    uv run python -m startupai_controller.board_consumer status --json
-   uv run python -m startupai_controller.board_consumer one-shot --dry-run
+   uv run python -m startupai_controller.board_consumer one-shot --dry-run --json
    ```
 
 ## Run Command
@@ -163,7 +163,7 @@ Expected contents:
 - `board_consumer report-slo --json`
 - `board_consumer report-slo --json --local-only`
 - `board_control_plane tick --json --dry-run`
-- `board_consumer one-shot --dry-run`
+- `board_consumer one-shot --dry-run --json`
 
 Final diagnostics also include:
 
@@ -250,7 +250,11 @@ The report ends with exactly one conclusion:
 1. Confirm the controller is still stopped and drained.
 2. Review `summary.md`, `summary.json`, and `consumer-run.log`.
 3. Compare baseline vs final status and SLO payloads.
-4. Decide whether the next step is:
+4. Treat `one-shot --dry-run --json` with `exit_class=idle` as valid evidence rather
+   than a harness failure.
+5. For short smoke runs, forced shutdown is only acceptable when the remaining
+   active workers are explicitly classified as `finishing_inflight_execution`.
+6. Decide whether the next step is:
    - no transport change
    - deeper transport instrumentation
    - a narrow GitHub MCP comparison spike
