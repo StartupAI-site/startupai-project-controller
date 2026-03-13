@@ -635,11 +635,30 @@ def test_pull_request_adapter_routes_support_helpers_through_dedicated_modules()
         "startupai_controller.adapters.pull_request_board_helpers" in imported
     ), "adapters/pull_requests.py should depend on pull_request_board_helpers"
     assert (
+        "startupai_controller.adapters.pull_request_compat" in imported
+    ), "adapters/pull_requests.py should depend on pull_request_compat"
+    assert (
         "startupai_controller.adapters.pull_request_query_helpers" in imported
     ), "adapters/pull_requests.py should depend on pull_request_query_helpers"
     assert (
         "startupai_controller.adapters.pull_request_support" not in imported
     ), "adapters/pull_requests.py should not depend on pull_request_support directly"
+    assert (
+        "startupai_controller.adapters.github_cli" not in imported
+    ), "adapters/pull_requests.py should not depend on github_cli"
+    source = _source_text(SRC_ROOT / "adapters" / "pull_requests.py")
+    forbidden_defs = [
+        "def query_open_pull_requests(",
+        "def query_pull_request_view_payloads(",
+        "def query_required_status_checks(",
+        "def query_closing_issues(",
+        "def enable_pull_request_automerge(",
+    ]
+    offending = [token for token in forbidden_defs if token in source]
+    assert offending == [], (
+        "adapters/pull_requests.py still defines the inline compatibility surface: "
+        f"{offending}"
+    )
 
 
 def test_pull_request_support_routes_compat_surface_through_helper_modules() -> None:
