@@ -95,6 +95,48 @@ class _RuntimeImportCollector(ast.NodeVisitor):
             self.imports.add(node.module)
 
 
+def _resolve_import_from_base(module_name: str, node: ast.ImportFrom) -> str | None:
+    if node.level == 0:
+        return node.module
+    package = module_name.rsplit(".", 1)[0] if "." in module_name else ""
+    if not package:
+        return node.module
+    package_parts = package.split(".")
+    if node.level > len(package_parts):
+        base_parts: list[str] = []
+    else:
+        base_parts = package_parts[: len(package_parts) - (node.level - 1)]
+    if node.module:
+        base_parts.extend(node.module.split("."))
+    return ".".join(base_parts) or None
+
+
+def _module_name_for_path(path: Path) -> str:
+    relative = path.relative_to(REPO_ROOT).with_suffix("")
+    parts = relative.parts
+    if parts[0] == "src":
+        parts = parts[1:]
+    return ".".join(parts)
+
+
+def _runtime_imported_modules_from_source(source: str, *, module_name: str) -> set[str]:
+    tree = ast.parse(source)
+    collector = _RuntimeImportCollector()
+    collector.visit(tree)
+    imports = set(collector.imports)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        base_module = _resolve_import_from_base(module_name, node)
+        if not base_module:
+            continue
+        imports.add(base_module)
+        imports.update(
+            f"{base_module}.{alias.name}" for alias in node.names if alias.name != "*"
+        )
+    return imports
+
+
 def _runtime_imported_modules(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     collector = _RuntimeImportCollector()
@@ -1051,11 +1093,30 @@ def test_deleted_compatibility_shim_files_are_absent() -> None:
         assert not (SRC_ROOT / filename).exists()
 
 
+def test_runtime_import_collector_tracks_deleted_shims_from_package_imports() -> None:
+    imported = _runtime_imported_modules_from_source(
+        "from startupai_controller import board_io, consumer_db, github_http\n",
+        module_name="tests.example",
+    )
+    assert REMOVED_COMPAT_IMPORTS <= imported
+
+
+def test_runtime_import_collector_tracks_deleted_shims_from_relative_imports() -> None:
+    imported = _runtime_imported_modules_from_source(
+        "from . import board_io\nfrom . import consumer_db\nfrom . import github_http\n",
+        module_name="startupai_controller.example",
+    )
+    assert REMOVED_COMPAT_IMPORTS <= imported
+
+
 def test_no_runtime_or_test_imports_deleted_compatibility_shims() -> None:
     violations: dict[str, set[str]] = {}
     for root in (SRC_ROOT, REPO_ROOT / "tests"):
         for path in sorted(root.rglob("*.py")):
-            imported = _runtime_imported_modules(path)
+            imported = _runtime_imported_modules_from_source(
+                path.read_text(encoding="utf-8"),
+                module_name=_module_name_for_path(path),
+            )
             hits = imported & REMOVED_COMPAT_IMPORTS
             if hits:
                 violations[str(path.relative_to(REPO_ROOT))] = hits
