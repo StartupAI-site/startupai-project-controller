@@ -30,6 +30,8 @@ HOTSPOT_MODULES = {
     / "consumer_review_queue_helpers.py",
     "startupai_controller.consumer_operational_wiring": SRC_ROOT
     / "consumer_operational_wiring.py",
+    "startupai_controller.consumer_prepared_cycle_wiring": SRC_ROOT
+    / "consumer_prepared_cycle_wiring.py",
     "startupai_controller.application.automation.ready_wiring": APPLICATION_ROOT
     / "automation"
     / "ready_wiring.py",
@@ -457,6 +459,38 @@ def test_consumer_operational_wiring_routes_recovery_reconciliation_through_wiri
     )
     assert offending == [], (
         "consumer_operational_wiring.py still owns recovery/reconciliation wiring: "
+        f"{offending}"
+    )
+
+
+def test_consumer_operational_wiring_routes_prepared_cycle_through_wiring_module() -> (
+    None
+):
+    imported = _controller_runtime_imports(SRC_ROOT / "consumer_operational_wiring.py")
+    assert (
+        "startupai_controller.consumer_prepared_cycle_wiring" in imported
+    ), "consumer_operational_wiring.py should depend on consumer_prepared_cycle_wiring"
+    offending = sorted(
+        module
+        for module in imported
+        if module
+        in {
+            "startupai_controller.consumer_automation_bridge",
+            "startupai_controller.consumer_board_state_helpers",
+            "startupai_controller.consumer_claim_wiring",
+            "startupai_controller.consumer_codex_comment_wiring",
+            "startupai_controller.consumer_cycle_wiring",
+            "startupai_controller.consumer_execution_outcome_wiring",
+            "startupai_controller.consumer_selection_retry_wiring",
+            "startupai_controller.consumer_session_completion_helpers",
+            "startupai_controller.consumer_session_execution_wiring",
+            "startupai_controller.consumer_support_wiring",
+            "startupai_controller.control_plane_runtime",
+            "startupai_controller.runtime.wiring",
+        }
+    )
+    assert offending == [], (
+        "consumer_operational_wiring.py still owns prepared-cycle wiring imports: "
         f"{offending}"
     )
 
