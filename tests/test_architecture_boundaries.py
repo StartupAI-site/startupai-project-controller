@@ -32,6 +32,8 @@ HOTSPOT_MODULES = {
     / "consumer_operational_wiring.py",
     "startupai_controller.consumer_prepared_cycle_wiring": SRC_ROOT
     / "consumer_prepared_cycle_wiring.py",
+    "startupai_controller.consumer_launch_claim_wiring": SRC_ROOT
+    / "consumer_launch_claim_wiring.py",
     "startupai_controller.consumer_claimed_session_wiring": SRC_ROOT
     / "consumer_claimed_session_wiring.py",
     "startupai_controller.consumer_review_queue_preparation_processing": SRC_ROOT
@@ -518,6 +520,44 @@ def test_consumer_prepared_cycle_wiring_routes_claimed_session_through_module() 
     assert offending == [], (
         "consumer_prepared_cycle_wiring.py still owns claimed-session execution "
         f"imports directly: {offending}"
+    )
+
+
+def test_consumer_prepared_cycle_wiring_routes_launch_claim_through_module() -> None:
+    imported = _controller_runtime_imports(
+        SRC_ROOT / "consumer_prepared_cycle_wiring.py"
+    )
+    assert (
+        "startupai_controller.consumer_launch_claim_wiring" in imported
+    ), "consumer_prepared_cycle_wiring.py should depend on consumer_launch_claim_wiring"
+    offending = sorted(
+        module
+        for module in imported
+        if module
+        in {
+            "startupai_controller.consumer_automation_bridge",
+            "startupai_controller.consumer_board_state_helpers",
+            "startupai_controller.consumer_claim_wiring",
+            "startupai_controller.consumer_codex_comment_wiring",
+            "startupai_controller.consumer_execution_outcome_wiring",
+            "startupai_controller.consumer_selection_retry_wiring",
+            "startupai_controller.consumer_support_wiring",
+        }
+    )
+    assert offending == [], (
+        "consumer_prepared_cycle_wiring.py still owns launch/claim wiring imports: "
+        f"{offending}"
+    )
+    source = _source_text(SRC_ROOT / "consumer_prepared_cycle_wiring.py")
+    forbidden_defs = [
+        "def prepare_selected_launch_candidate(",
+        "def resolve_launch_context_for_cycle(",
+        "def claim_launch_context(",
+    ]
+    found = [token for token in forbidden_defs if token in source]
+    assert found == [], (
+        "consumer_prepared_cycle_wiring.py still defines the inline launch/claim "
+        f"surface: {found}"
     )
 
 
