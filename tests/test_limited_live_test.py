@@ -444,7 +444,10 @@ def test_limited_live_test_treats_forced_shutdown_as_acceptable_when_only_waitin
         clock=clock,
         process=process,
         status_local=[active_status, active_status, active_status, active_status],
-        status_full=[_status_payload(active_leases=1), _status_payload(active_leases=1)],
+        status_full=[
+            _status_payload(active_leases=1),
+            _status_payload(active_leases=1),
+        ],
         report_slo=[_report_payload(), _report_payload()],
         tick_payloads=[_tick_payload(), _tick_payload()],
     )
@@ -454,7 +457,9 @@ def test_limited_live_test_treats_forced_shutdown_as_acceptable_when_only_waitin
 
     assert summary.shutdown_mode == "forced"
     assert summary.forced_shutdown is True
-    assert "Drain timeout exceeded; sent SIGINT/SIGTERM escalation." not in summary.issues
+    assert (
+        "Drain timeout exceeded; sent SIGINT/SIGTERM escalation." not in summary.issues
+    )
     assert (
         "forced shutdown occurred only after waiting on in-flight external execution"
         in summary.worked

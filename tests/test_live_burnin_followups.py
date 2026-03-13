@@ -25,7 +25,11 @@ from startupai_controller.consumer_types import (
     PrCreationOutcome,
     SessionExecutionOutcome,
 )
-from startupai_controller.domain.models import CycleResult, ReviewQueueDrainSummary, SessionInfo
+from startupai_controller.domain.models import (
+    CycleResult,
+    ReviewQueueDrainSummary,
+    SessionInfo,
+)
 from tests.test_board_consumer import (
     _make_consumer_config,
     _make_db,

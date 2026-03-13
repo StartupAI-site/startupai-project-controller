@@ -57,7 +57,9 @@ from startupai_controller.runtime.wiring import (
     build_process_runner_port,
     build_session_store,
 )
-from startupai_controller.consumer_drain_control import drain_requested as _drain_requested
+from startupai_controller.consumer_drain_control import (
+    drain_requested as _drain_requested,
+)
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 CodexResultPayload = CodexSessionResult
