@@ -734,6 +734,28 @@ def test_pull_request_support_routes_compat_surface_through_helper_modules() -> 
     ), "adapters/pull_request_support.py should depend on pull_request_query_helpers"
 
 
+def test_project_field_sync_routes_single_sync_through_operations_module() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "project_field_sync.py")
+    assert (
+        "startupai_controller.project_field_sync_operations" in imported
+    ), "project_field_sync.py should depend on project_field_sync_operations"
+    source = _source_text(SRC_ROOT / "project_field_sync.py")
+    forbidden = [
+        "schema = query_project_schema(",
+        "items = list_project_issue_items(",
+        "all_stats.merge(sync_custom_fields(",
+        "all_stats.merge(sync_milestones(",
+        "all_stats.merge(sync_dates(",
+        "all_stats.merge(sync_assignees(",
+        "all_stats.merge(sync_pr_ci(",
+    ]
+    offending = [token for token in forbidden if token in source]
+    assert offending == [], (
+        "project_field_sync.py still owns inline single-run sync orchestration: "
+        f"{offending}"
+    )
+
+
 def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
     source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
     forbidden = [
@@ -871,6 +893,7 @@ def test_outer_wiring_hotspots_stay_under_refined_size_ceiling() -> None:
         ): 70,
         (APPLICATION_ROOT / "automation" / "review_wiring.py", "sync_review_state"): 60,
         (SRC_ROOT / "board_control_plane.py", "_tick"): 20,
+        (SRC_ROOT / "project_field_sync.py", "_run_single_sync"): 20,
     }
     offending: dict[str, int] = {}
     for (path, function_name), limit in limits.items():
