@@ -1,4 +1,4 @@
-"""Review-queue wiring helpers extracted from board_consumer."""
+"""Review-queue shell wiring extracted from board_consumer."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Callable
 import startupai_controller.consumer_automation_bridge as _automation_bridge
 import startupai_controller.consumer_board_state_helpers as _board_state_helpers
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
+import startupai_controller.consumer_review_queue_group_wiring as _review_queue_group_wiring
 import startupai_controller.consumer_review_queue_processing as _review_queue_processing
 import startupai_controller.consumer_review_queue_state as _review_queue_state
 from startupai_controller.board_automation_config import BoardAutomationConfig
@@ -219,42 +220,16 @@ def prepare_due_review_processing_from_shell(
     )
 
 
-def process_due_review_group(
-    *,
-    config: ConsumerConfig,
-    store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    pr_port: PullRequestPort,
-    pr_repo: str,
-    pr_number: int,
-    entries: tuple[ReviewQueueEntry, ...],
-    snapshot: ReviewSnapshot | None,
-    updated_snapshot: CycleBoardSnapshot,
-    now: datetime,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-    deps: ReviewQueueWiringDeps,
-) -> ReviewGroupProcessingOutcome:
-    """Process one due PR group from the review queue."""
-    return _review_queue_processing.process_due_review_group(
-        config=config,
-        store=store,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        pr_port=pr_port,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        entries=entries,
-        snapshot=snapshot,
-        updated_snapshot=updated_snapshot,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        review_group_outcome_factory=deps.review_group_outcome_factory,
-        review_rescue_fn=deps.review_rescue_fn,
-        escalate_to_claude=deps.escalate_to_claude,
-    )
+process_due_review_group = _review_queue_group_wiring.process_due_review_group
+apply_review_queue_group_result = (
+    _review_queue_group_wiring.apply_review_queue_group_result
+)
+summarize_review_group_outcome = (
+    _review_queue_group_wiring.summarize_review_group_outcome
+)
+process_review_queue_due_groups = (
+    _review_queue_group_wiring.process_review_queue_due_groups
+)
 
 
 def process_due_review_group_from_shell(
@@ -288,41 +263,9 @@ def process_due_review_group_from_shell(
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        deps=build_review_queue_wiring_deps(),
-    )
-
-
-def apply_review_queue_group_result(
-    *,
-    store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
-    project_owner: str,
-    project_number: int,
-    pr_port: PullRequestPort,
-    pr_repo: str,
-    pr_number: int,
-    entries: tuple[ReviewQueueEntry, ...],
-    result: ReviewRescueResult,
-    now: datetime,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-    deps: ReviewQueueWiringDeps,
-) -> tuple[str, ...]:
-    """Persist one review-group result and return escalated issue refs."""
-    return _review_queue_processing.apply_review_queue_group_result(
-        store=store,
-        critical_path_config=critical_path_config,
-        project_owner=project_owner,
-        project_number=project_number,
-        pr_port=pr_port,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        entries=entries,
-        result=result,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        escalate_to_claude=deps.escalate_to_claude,
+        review_group_outcome_factory=build_review_queue_wiring_deps().review_group_outcome_factory,
+        review_rescue_fn=build_review_queue_wiring_deps().review_rescue_fn,
+        escalate_to_claude=build_review_queue_wiring_deps().escalate_to_claude,
     )
 
 
@@ -355,42 +298,7 @@ def apply_review_queue_group_result_from_shell(
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        deps=build_review_queue_wiring_deps(),
-    )
-
-
-def summarize_review_group_outcome(
-    *,
-    critical_path_config: CriticalPathConfig,
-    store: SessionStorePort,
-    project_owner: str,
-    project_number: int,
-    pr_repo: str,
-    pr_number: int,
-    entries: tuple[ReviewQueueEntry, ...],
-    result: ReviewRescueResult,
-    updated_snapshot: CycleBoardSnapshot,
-    escalated: tuple[str, ...],
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-    deps: ReviewQueueWiringDeps,
-) -> ReviewGroupProcessingOutcome:
-    """Build the public outcome for one processed review group."""
-    return _review_queue_processing.summarize_review_group_outcome(
-        critical_path_config=critical_path_config,
-        store=store,
-        project_owner=project_owner,
-        project_number=project_number,
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        entries=entries,
-        result=result,
-        updated_snapshot=updated_snapshot,
-        escalated=escalated,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        escalate_to_claude=deps.escalate_to_claude,
-        review_group_outcome_factory=deps.review_group_outcome_factory,
+        escalate_to_claude=build_review_queue_wiring_deps().escalate_to_claude,
     )
 
 
@@ -423,50 +331,8 @@ def summarize_review_group_outcome_from_shell(
         escalated=escalated,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        deps=build_review_queue_wiring_deps(),
-    )
-
-
-def process_review_queue_due_groups(
-    *,
-    config: ConsumerConfig,
-    store: SessionStorePort,
-    critical_path_config: CriticalPathConfig,
-    automation_config: BoardAutomationConfig,
-    pr_port: PullRequestPort,
-    prepared_batch: PreparedReviewQueueBatch,
-    board_snapshot: CycleBoardSnapshot,
-    now: datetime,
-    dry_run: bool,
-    gh_runner: Callable[..., str] | None,
-    deps: ReviewQueueWiringDeps,
-) -> ReviewQueueProcessingOutcome:
-    """Process the due PR groups for a prepared review-queue batch."""
-    return _review_queue_processing.process_review_queue_due_groups(
-        config=config,
-        store=store,
-        critical_path_config=critical_path_config,
-        automation_config=automation_config,
-        pr_port=pr_port,
-        prepared_batch=prepared_batch,
-        board_snapshot=board_snapshot,
-        now=now,
-        dry_run=dry_run,
-        gh_runner=gh_runner,
-        post_pr_codex_verdict=deps.post_pr_codex_verdict,
-        review_rescue_fn=deps.review_rescue_fn,
-        escalate_to_claude=deps.escalate_to_claude,
-        prepared_due_processing_factory=deps.prepared_due_processing_factory,
-        review_group_outcome_factory=deps.review_group_outcome_factory,
-        review_queue_processing_outcome_factory=deps.review_queue_processing_outcome_factory,
-        gh_reason_code=deps.gh_reason_code,
-        log_pre_backfill_warning=deps.log_pre_backfill_warning,
-        log_backfill_warning=deps.log_backfill_warning,
-        pre_backfill_verdicts_for_due_prs_fn=deps.pre_backfill_verdicts_for_due_prs,
-        partition_review_queue_entries_by_probe_change_fn=deps.partition_review_queue_entries_by_probe_change,
-        repark_unchanged_review_queue_entries_fn=deps.repark_unchanged_review_queue_entries,
-        build_review_snapshots_for_queue_entries_fn=deps.build_review_snapshots_for_queue_entries,
-        backfill_review_verdicts_from_snapshots_fn=deps.backfill_review_verdicts_from_snapshots,
+        escalate_to_claude=build_review_queue_wiring_deps().escalate_to_claude,
+        review_group_outcome_factory=build_review_queue_wiring_deps().review_group_outcome_factory,
     )
 
 
@@ -495,7 +361,20 @@ def process_review_queue_due_groups_from_shell(
         now=now,
         dry_run=dry_run,
         gh_runner=gh_runner,
-        deps=build_review_queue_wiring_deps(),
+        post_pr_codex_verdict=build_review_queue_wiring_deps().post_pr_codex_verdict,
+        review_rescue_fn=build_review_queue_wiring_deps().review_rescue_fn,
+        escalate_to_claude=build_review_queue_wiring_deps().escalate_to_claude,
+        prepared_due_processing_factory=build_review_queue_wiring_deps().prepared_due_processing_factory,
+        review_group_outcome_factory=build_review_queue_wiring_deps().review_group_outcome_factory,
+        review_queue_processing_outcome_factory=build_review_queue_wiring_deps().review_queue_processing_outcome_factory,
+        gh_reason_code=build_review_queue_wiring_deps().gh_reason_code,
+        log_pre_backfill_warning=build_review_queue_wiring_deps().log_pre_backfill_warning,
+        log_backfill_warning=build_review_queue_wiring_deps().log_backfill_warning,
+        pre_backfill_verdicts_for_due_prs_fn=build_review_queue_wiring_deps().pre_backfill_verdicts_for_due_prs,
+        partition_review_queue_entries_by_probe_change_fn=build_review_queue_wiring_deps().partition_review_queue_entries_by_probe_change,
+        repark_unchanged_review_queue_entries_fn=build_review_queue_wiring_deps().repark_unchanged_review_queue_entries,
+        build_review_snapshots_for_queue_entries_fn=build_review_queue_wiring_deps().build_review_snapshots_for_queue_entries,
+        backfill_review_verdicts_from_snapshots_fn=build_review_queue_wiring_deps().backfill_review_verdicts_from_snapshots,
     )
 
 

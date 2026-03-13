@@ -38,6 +38,8 @@ HOTSPOT_MODULES = {
     / "consumer_claimed_session_wiring.py",
     "startupai_controller.consumer_review_queue_preparation_processing": SRC_ROOT
     / "consumer_review_queue_preparation_processing.py",
+    "startupai_controller.consumer_review_queue_group_wiring": SRC_ROOT
+    / "consumer_review_queue_group_wiring.py",
     "startupai_controller.application.automation.ready_wiring": APPLICATION_ROOT
     / "automation"
     / "ready_wiring.py",
@@ -619,6 +621,25 @@ def test_consumer_review_queue_processing_routes_preparation_through_module() ->
     assert offending == [], (
         "consumer_review_queue_processing.py still defines preparation helper "
         f"entry points inline: {offending}"
+    )
+
+
+def test_consumer_review_queue_wiring_routes_group_processing_through_module() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "consumer_review_queue_wiring.py")
+    assert (
+        "startupai_controller.consumer_review_queue_group_wiring" in imported
+    ), "consumer_review_queue_wiring.py should depend on consumer_review_queue_group_wiring"
+    source = _source_text(SRC_ROOT / "consumer_review_queue_wiring.py")
+    forbidden_defs = [
+        "def process_due_review_group(",
+        "def apply_review_queue_group_result(",
+        "def summarize_review_group_outcome(",
+        "def process_review_queue_due_groups(",
+    ]
+    offending = [token for token in forbidden_defs if token in source]
+    assert offending == [], (
+        "consumer_review_queue_wiring.py still defines the inline due-group "
+        f"processing surface: {offending}"
     )
 
 
