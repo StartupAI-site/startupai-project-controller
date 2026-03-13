@@ -21,6 +21,7 @@ from startupai_controller.domain.models import (
     ReviewSnapshot,
 )
 from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.ready_flow import BoardInfoView
 from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
@@ -143,7 +144,7 @@ def sync_review_state(
     pr_port=None,
     review_state_port=None,
     board_port=None,
-    board_info_resolver: Callable[..., object] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
     # Injected port factories
@@ -197,7 +198,7 @@ def _resolve_sync_review_state_ports(
     pr_port,
     review_state_port,
     board_port,
-    board_info_resolver: Callable[..., object] | None,
+    board_info_resolver: Callable[..., BoardInfoView] | None,
     board_mutator: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
     default_pr_port_fn: Callable[..., object] | None,

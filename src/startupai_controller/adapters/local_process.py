@@ -348,7 +348,6 @@ class LocalProcessAdapter:
         """Execute a gh CLI command and return stdout."""
         from startupai_controller.adapters.github_transport import _run_gh
 
-        runner = self._gh_runner or _run_gh
         if self._gh_runner is not None:
-            return runner(args, check=check)
-        return runner(args)
+            return self._gh_runner(args)
+        return _run_gh(args)

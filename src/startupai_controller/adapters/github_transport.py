@@ -173,3 +173,4 @@ def _run_gh(
                 command_excerpt=" ".join(args[:3]),
                 detail=output,
             ) from error
+    raise AssertionError("gh retry loop exited without returning or raising")
