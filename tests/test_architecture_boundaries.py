@@ -438,6 +438,29 @@ def test_consumer_recovery_shell_has_no_dead_board_callable_kwargs() -> None:
     )
 
 
+def test_consumer_operational_wiring_routes_recovery_reconciliation_through_wiring_module() -> (
+    None
+):
+    imported = _controller_runtime_imports(SRC_ROOT / "consumer_operational_wiring.py")
+    assert (
+        "startupai_controller.consumer_reconciliation_wiring" in imported
+    ), "consumer_operational_wiring.py should depend on consumer_reconciliation_wiring"
+    offending = sorted(
+        module
+        for module in imported
+        if module
+        in {
+            "startupai_controller.consumer_recovery_helpers",
+            "startupai_controller.application.consumer.reconciliation",
+            "startupai_controller.application.consumer.recovery",
+        }
+    )
+    assert offending == [], (
+        "consumer_operational_wiring.py still owns recovery/reconciliation wiring: "
+        f"{offending}"
+    )
+
+
 def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
     source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
     forbidden = [
