@@ -506,6 +506,10 @@ def test_consumer_support_wiring_routes_runtime_control_helpers_through_module()
         "consumer_support_wiring.py should depend on "
         "consumer_launch_runtime_support_wiring"
     )
+    assert "startupai_controller.consumer_resolution_support_wiring" in imported, (
+        "consumer_support_wiring.py should depend on "
+        "consumer_resolution_support_wiring"
+    )
     offending = sorted(
         module
         for module in imported
@@ -514,9 +518,11 @@ def test_consumer_support_wiring_routes_runtime_control_helpers_through_module()
             "startupai_controller.consumer_context_helpers",
             "startupai_controller.consumer_runtime_wiring",
             "startupai_controller.board_graph",
+            "startupai_controller.consumer_resolution_helpers",
             "startupai_controller.consumer_selection_retry_wiring",
             "startupai_controller.consumer_worktree_helpers",
             "startupai_controller.control_plane_runtime",
+            "startupai_controller.runtime.wiring",
         }
     )
     assert offending == [], (
