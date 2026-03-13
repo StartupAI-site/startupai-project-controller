@@ -27,7 +27,7 @@ uv run python -m startupai_controller.board_control_plane <subcommand>
 uv sync --group dev          # Install dependencies
 uv run pytest tests/ -v      # Run tests
 uv run black --check .       # Check formatting
-uv run mypy src/startupai_controller/domain/ src/startupai_controller/ports/
+uv run mypy src/startupai_controller
 ```
 
 ## Architecture
@@ -49,6 +49,9 @@ src/startupai_controller/
 
 Three entry shells delegate to application use cases. Policy lives in `domain/`.
 External mechanism lives in `adapters/`. `ports/` define the boundaries between them.
+The legacy top-level compatibility shims (`board_io.py`, `consumer_db.py`,
+`github_http.py`) have been deleted; canonical adapter modules now own those
+surfaces directly.
 
 See [`CLAUDE.md`](CLAUDE.md) for full architecture details, coding standards, and
 maintenance rules.

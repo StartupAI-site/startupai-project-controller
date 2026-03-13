@@ -51,24 +51,22 @@ required null/default behavior, and derived field behavior. Key order and
 whitespace are not authoritative unless a consumer is proven to depend on raw
 text.
 
-### 4. Compatibility shim policy
+### 4. Compatibility shim outcome
 
-`board_io.py`, `consumer_db.py`, and `github_http.py` remain deprecated facades
-initially. Internal application/runtime code may not depend on them.
+The top-level compatibility facades `board_io.py`, `consumer_db.py`, and
+`github_http.py` were deleted after fixed-scope audit confirmed no remaining
+in-repo or sibling-repo consumers.
 
-Facade removal requires one of two conditions:
+Their responsibilities now live in canonical adapter modules:
 
-- a fixed-scope audit proves there are no remaining consumers and the removal PR
-  records that evidence, or
-- an ADR explicitly approves a breaking change and the release notes document it
+- board/project/review shell helpers -> `adapters.github_cli`,
+  `adapters.review_state`, `adapters.pull_requests`
+- persistence -> `adapters.consumer_db_store`
+- direct GitHub HTTP transport -> `adapters.github_http_transport`
 
-If code-search audit is clean but undocumented/manual consumers cannot be ruled
-out, facades stay in place through at least one merged deployment cycle in
-which dependent automation runs successfully without shim use, or until explicit
-human signoff approves removal.
-
-Deprecation is documentation-first. Runtime warnings are optional later and only
-if they are proven low-risk.
+Compatibility, where it still exists, is adapter-local (for example
+`GitHubCliAdapter` and stable re-export surfaces), not via top-level shim
+modules.
 
 ### 5. Architecture and typing rules
 
@@ -149,5 +147,6 @@ Operationally, this means:
 ### Tradeoffs
 
 - The first milestone adds tests and ADR material before major code movement.
-- Deprecated facades may remain longer than pure refactoring would prefer.
+- Adapter-local compatibility surfaces may remain longer than pure refactoring
+  would prefer.
 - The program is longer than a minimum-change cleanup path.
