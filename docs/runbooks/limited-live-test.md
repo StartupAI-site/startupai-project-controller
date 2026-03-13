@@ -43,6 +43,21 @@ any policy change:
 - `missing-copilot-review`
 - missing codex verdict marker escalation on `app#126` / PR `#219`
 
+Artifact-first validation command:
+
+```bash
+uv run python tools/validate_burnin_review_anomalies.py --write-report
+```
+
+Latest artifact-first validation result for `20260313T185906Z`:
+
+- the burn-in artifacts contain repeated log evidence for both
+  `missing-copilot-review` and missing codex verdict marker on
+  `app#126` / PR `#219`
+- matching status snapshots confirm the same issue/session context
+- no contradictory artifact evidence shows controller misclassification
+- therefore no review-policy change is included in this defect batch
+
 ## Safety Model
 
 - Real board and PR actions are allowed.

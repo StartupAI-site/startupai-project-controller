@@ -180,10 +180,25 @@ class FakeBackend:
         log_path.write_text(self.log_text, encoding="utf-8")
         return self.process
 
-    def local_consumer_processes(self) -> list[str]:
+    def local_consumer_processes(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> list[str]:
+        self.timeout_requests.append((["ps", "-eo", "pid=,command="], timeout_seconds))
         return list(self._local_processes)
 
-    def systemd_consumer_active(self) -> bool:
+    def systemd_consumer_active(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        self.timeout_requests.append(
+            (
+                ["systemctl", "--user", "is-active", "startupai-consumer"],
+                timeout_seconds,
+            )
+        )
         return self._systemd_active
 
     def _next_payload(self, items: list[dict]) -> dict:
@@ -445,3 +460,27 @@ def test_limited_live_test_records_snapshot_timeout_and_continues(
 
     assert any("timed out after" in item for item in summary.snapshot_failures)
     assert (harness.run_dir / "summary.json").exists()
+
+
+def test_limited_live_test_applies_timeout_to_preflight_process_checks(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    harness.run()
+
+    assert (
+        ["systemctl", "--user", "is-active", "startupai-consumer"],
+        60.0,
+    ) in backend.timeout_requests
+    assert (["ps", "-eo", "pid=,command="], 60.0) in backend.timeout_requests

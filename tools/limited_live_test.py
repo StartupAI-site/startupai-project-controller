@@ -221,8 +221,15 @@ class SubprocessBackend:
         )
         return PopenManagedProcess(process, log_handle)
 
-    def local_consumer_processes(self) -> list[str]:
-        result = self.run(["ps", "-eo", "pid=,command="])
+    def local_consumer_processes(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> list[str]:
+        result = self.run(
+            ["ps", "-eo", "pid=,command="],
+            timeout_seconds=timeout_seconds,
+        )
         if result.returncode != 0:
             return []
         matches: list[str] = []
@@ -235,8 +242,15 @@ class SubprocessBackend:
                 matches.append(command)
         return matches
 
-    def systemd_consumer_active(self) -> bool:
-        result = self.run(["systemctl", "--user", "is-active", "startupai-consumer"])
+    def systemd_consumer_active(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        result = self.run(
+            ["systemctl", "--user", "is-active", "startupai-consumer"],
+            timeout_seconds=timeout_seconds,
+        )
         return result.returncode == 0 and result.stdout.strip() in {
             "active",
             "activating",
@@ -335,9 +349,13 @@ class LimitedLiveTestHarness:
             raise HarnessError(
                 "Cross-machine single-consumer confirmation is required."
             )
-        if self.backend.systemd_consumer_active():
+        if self.backend.systemd_consumer_active(
+            timeout_seconds=float(self.config.command_timeout_seconds)
+        ):
             raise HarnessError("Local startupai-consumer systemd unit is active.")
-        if self.backend.local_consumer_processes():
+        if self.backend.local_consumer_processes(
+            timeout_seconds=float(self.config.command_timeout_seconds)
+        ):
             raise HarnessError("Another local board_consumer run process is active.")
         self._require_ok(
             self._run_aux_command(["gh", "auth", "status"]),
