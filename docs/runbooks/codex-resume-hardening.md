@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-51`
-- Active branch: `refactor/controller-10-10-phase-51`
-- Fresh-main baseline already includes merged work through `origin/main` commit `810d31d`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-52`
+- Active branch: `refactor/controller-10-10-phase-52`
+- Fresh-main baseline already includes merged work through `origin/main` commit `3691135`
 
-Do not resume from the main checkout. Continue from the phase-51 worktree.
+Do not resume from the main checkout. Continue from the phase-52 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -83,37 +83,38 @@ Recent merged phases:
 - `PR #90` `refactor: split review queue preparation cluster`
 - `PR #91` `refactor: split claimed session wiring cluster`
 
-Current unmerged phase-51 batch:
+Current unmerged phase-52 batch:
 
-- `src/startupai_controller/consumer_launch_claim_wiring.py`
-- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
+- `src/startupai_controller/consumer_review_queue_group_wiring.py`
+- `src/startupai_controller/consumer_review_queue_wiring.py`
 - `tests/test_architecture_boundaries.py`
 - `docs/runbooks/codex-resume-hardening.md`
 
-Phase-51 batch summary:
+Phase-52 batch summary:
 
-- extracts the launch/claim lifecycle from `consumer_prepared_cycle_wiring.py` into the new `consumer_launch_claim_wiring.py` module
-- keeps `consumer_prepared_cycle_wiring.py` as the compatibility shell for launch/claim entry points plus claimed-session execution and finalization
-- extends architecture-boundary coverage so `consumer_prepared_cycle_wiring.py` must route launch/claim entry points through the dedicated module
-- reduces `consumer_prepared_cycle_wiring.py` substantially while preserving the public shell surface used by `consumer_operational_wiring.py`
+- extracts the due-group review-queue processing cluster from `consumer_review_queue_wiring.py` into the new `consumer_review_queue_group_wiring.py` module
+- keeps `consumer_review_queue_wiring.py` as the review-queue shell for dependency binding, preparation, and top-level drain entry points
+- extends architecture-boundary coverage so `consumer_review_queue_wiring.py` must route due-group processing through the dedicated module
+- reduces `consumer_review_queue_wiring.py` substantially while preserving the existing shell surface
 
-Latest successful validation on the current phase-51 worktree:
+Latest successful validation on the current phase-52 worktree:
 
-- `python3 -m py_compile` on `consumer_launch_claim_wiring.py`, `consumer_prepared_cycle_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
-- targeted `mypy --follow-imports=silent` on `consumer_launch_claim_wiring.py` and `consumer_prepared_cycle_wiring.py`: passed
-- targeted `pytest` on architecture-boundary and board-consumer slices: `180 passed`
-- `uv run black --target-version py312` on `consumer_launch_claim_wiring.py`, `consumer_prepared_cycle_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
-- full suite: `886 passed`
+- `python3 -m py_compile` on `consumer_review_queue_group_wiring.py`, `consumer_review_queue_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
+- targeted `mypy --follow-imports=silent` on `consumer_review_queue_group_wiring.py` and `consumer_review_queue_wiring.py`: passed
+- targeted `pytest` on architecture-boundary and board-consumer slices: `181 passed`
+- `uv run black --target-version py312` on `consumer_review_queue_group_wiring.py`, `consumer_review_queue_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
+- full suite: `887 passed`
 
-No PR is open yet for phase 51. No poller should be running until the next PR
+No PR is open yet for phase 52. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining structural hotspots after the phase-51 launch/claim extraction:
+Remaining structural hotspots after the phase-52 review-queue group extraction:
 
 - `622` lines in `src/startupai_controller/consumer_launch_claim_wiring.py`
-- `623` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
+- `502` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
+- `203` lines in `src/startupai_controller/consumer_review_queue_group_wiring.py`
 - `363` lines in `src/startupai_controller/consumer_prepared_cycle_wiring.py`
 - `596` lines in `src/startupai_controller/consumer_review_queue_processing.py`
 - `0` runtime imports of `consumer_claim_wiring.py` from `src/startupai_controller/consumer_prepared_cycle_wiring.py`
@@ -137,18 +138,18 @@ Bounded-context completion estimate at handoff time:
 
 ## Recommended Next Batch
 
-If phase 51 is not yet merged, finish shipping the launch/claim extraction:
+If phase 52 is not yet merged, finish shipping the review-queue group extraction:
 
-- `src/startupai_controller/consumer_launch_claim_wiring.py`
-- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
+- `src/startupai_controller/consumer_review_queue_group_wiring.py`
+- `src/startupai_controller/consumer_review_queue_wiring.py`
 - `tests/test_architecture_boundaries.py`
 
-If phase 51 is already merged, the strongest next target is the remaining
-review-shell and typing cleanup split:
+If phase 52 is already merged, the strongest next target is the remaining
+typing cleanup split:
 
-- `src/startupai_controller/consumer_review_queue_wiring.py`
 - `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 - `src/startupai_controller/consumer_resolution_support_wiring.py`
+- `src/startupai_controller/consumer_context_helpers.py`
 
 After that, the biggest structural work still pending is:
 
@@ -167,8 +168,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-51
-- active branch: refactor/controller-10-10-phase-51
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-52
+- active branch: refactor/controller-10-10-phase-52
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -187,8 +188,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66 through #92
-- no PR is open yet for phase 51
-- latest full local validation on phase 51 was 886 passed
-- current batch is the launch/claim extraction; next batch after merge is the remaining review-shell and typing cleanup split
+- latest merged PRs: #66 through #93
+- no PR is open yet for phase 52
+- latest full local validation on phase 52 was 887 passed
+- current batch is the review-queue group extraction; next batch after merge is the remaining typing cleanup split
 ```
