@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import inspect
 import os
 from pathlib import Path
 import re
 import subprocess
+from typing import Protocol, cast
 
 from startupai_controller.domain.models import (
     RepairBranchReconcileOutcome,
@@ -17,6 +19,12 @@ from startupai_controller.domain.models import (
 def _git_command_detail(result: subprocess.CompletedProcess[str]) -> str:
     """Return the most useful human-readable detail from a git subprocess result."""
     return result.stderr.strip() or result.stdout.strip() or "unknown-error"
+
+
+class _CheckedGhRunner(Protocol):
+    """Custom gh-runner surface that still honors the compatibility check flag."""
+
+    def __call__(self, args: list[str], *, check: bool = True) -> str: ...
 
 
 class LocalProcessAdapter:
@@ -349,5 +357,12 @@ class LocalProcessAdapter:
         from startupai_controller.adapters.github_transport import _run_gh
 
         if self._gh_runner is not None:
+            try:
+                signature = inspect.signature(self._gh_runner)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None and "check" in signature.parameters:
+                checked_runner = cast(_CheckedGhRunner, self._gh_runner)
+                return checked_runner(args, check=check)
             return self._gh_runner(args)
         return _run_gh(args)

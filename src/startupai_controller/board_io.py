@@ -42,15 +42,20 @@ from startupai_controller.adapters.github_transport import (
     _run_gh,
     gh_reason_code,
 )
+from startupai_controller.adapters.pull_request_batch_queries import (
+    _comment_nodes as _pull_request_comment_nodes,
+    _review_nodes as _pull_request_review_nodes,
+    _status_rollup_nodes as _pull_request_status_rollup_nodes,
+)
+from startupai_controller.adapters.pull_request_query_helpers import (
+    _latest_node_timestamp as _pull_request_latest_node_timestamp,
+    _normalize_graphql_rollup_node as _pull_request_normalize_graphql_rollup_node,
+)
 from startupai_controller.adapters.github_types import (
     COPILOT_CODING_AGENT_LOGINS,
     CycleBoardSnapshot,
     CycleGitHubMemo,
     CodexReviewVerdict,
-    GitHubActorPayload,
-    GitHubCommentNode,
-    GitHubReviewNode,
-    GitHubStatusCheckRollupNode,
     LinkedIssue,
     PullRequestStateProbe,
     PullRequestViewPayload,
@@ -777,21 +782,33 @@ def _pull_request_view_payload_from_json(
     pr_number: int,
     payload: dict[str, Any],
 ) -> PullRequestViewPayload:
-    comments = tuple(
-        _comment_node(item)
-        for item in (payload.get("comments", []) or [])
-        if isinstance(item, dict)
+    comments = _pull_request_comment_nodes(
+        {
+            "comments": {
+                "nodes": [
+                    item
+                    for item in (payload.get("comments", []) or [])
+                    if isinstance(item, dict)
+                ]
+            }
+        }
     )
-    reviews = tuple(
-        _review_node(item)
-        for item in (payload.get("reviews", []) or [])
-        if isinstance(item, dict)
+    reviews = _pull_request_review_nodes(
+        {
+            "reviews": {
+                "nodes": [
+                    item
+                    for item in (payload.get("reviews", []) or [])
+                    if isinstance(item, dict)
+                ]
+            }
+        }
     )
     status_check_rollup = tuple(
         normalized
         for item in (payload.get("statusCheckRollup", []) or [])
         if isinstance(item, dict)
-        for normalized in (_normalize_graphql_rollup_node(item),)
+        for normalized in (_pull_request_normalize_graphql_rollup_node(item),)
         if normalized is not None
     )
     return PullRequestViewPayload(
@@ -814,88 +831,13 @@ def _pull_request_view_payload_from_json(
     )
 
 
-def _author_payload(raw: object) -> GitHubActorPayload:
-    node = raw if isinstance(raw, dict) else {}
-    return GitHubActorPayload(login=str(node.get("login") or ""))
-
-
-def _comment_node(node: dict[str, object]) -> GitHubCommentNode:
-    return GitHubCommentNode(
-        body=str(node.get("body") or ""),
-        createdAt=str(node.get("createdAt") or ""),
-        author=_author_payload(node.get("author")),
-        user=_author_payload(node.get("user")),
-    )
-
-
-def _review_node(node: dict[str, object]) -> GitHubReviewNode:
-    return GitHubReviewNode(
-        body=str(node.get("body") or ""),
-        submittedAt=str(node.get("submittedAt") or ""),
-        state=str(node.get("state") or ""),
-        author=_author_payload(node.get("author")),
-        user=_author_payload(node.get("user")),
-    )
-
-
-def _normalize_graphql_rollup_node(
-    node: dict[str, object],
-) -> GitHubStatusCheckRollupNode | None:
-    typename = str(node.get("__typename") or "")
-    if typename == "CheckRun":
-        return {
-            "__typename": "CheckRun",
-            "name": str(node.get("name") or ""),
-            "status": str(node.get("status") or "").lower(),
-            "conclusion": str(node.get("conclusion") or "").lower(),
-            "detailsUrl": str(node.get("detailsUrl") or ""),
-            "completedAt": str(node.get("completedAt") or ""),
-            "startedAt": str(node.get("startedAt") or ""),
-        }
-    if typename == "StatusContext":
-        return {
-            "__typename": "StatusContext",
-            "context": str(node.get("context") or ""),
-            "state": str(node.get("state") or "").lower(),
-            "targetUrl": str(node.get("targetUrl") or ""),
-            "startedAt": str(node.get("createdAt") or ""),
-        }
-    return None
-
-
 def _pull_request_view_payload_from_graphql_node(
     pr_repo: str,
     pr_number: int,
     node: dict[str, Any],
 ) -> PullRequestViewPayload:
-    review_nodes = (
-        (node.get("reviews") or {}).get("nodes", [])
-        if isinstance(node.get("reviews"), dict)
-        else []
-    )
-    comment_nodes = (
-        (node.get("comments") or {}).get("nodes", [])
-        if isinstance(node.get("comments"), dict)
-        else []
-    )
-    commit_nodes = (
-        (node.get("commits") or {}).get("nodes", [])
-        if isinstance(node.get("commits"), dict)
-        else []
-    )
-    status_nodes: list[GitHubStatusCheckRollupNode] = []
-    if commit_nodes:
-        latest_commit = commit_nodes[-1]
-        rollup = (
-            (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
-        ).get("contexts") or {}
-        for item in rollup.get("nodes", []) or []:
-            if not isinstance(item, dict):
-                continue
-            normalized = _normalize_graphql_rollup_node(item)
-            if normalized is not None:
-                status_nodes.append(normalized)
-
+    comments = _pull_request_comment_nodes(node)
+    reviews = _pull_request_review_nodes(node)
     return PullRequestViewPayload(
         pr_repo=pr_repo,
         pr_number=pr_number,
@@ -910,28 +852,13 @@ def _pull_request_view_payload_from_graphql_node(
         base_ref_name=str(node.get("baseRefName") or "main"),
         merged_at=str(node.get("mergedAt") or ""),
         auto_merge_enabled=node.get("autoMergeRequest") is not None,
-        comments=tuple(
-            _comment_node(item) for item in comment_nodes if isinstance(item, dict)
+        comments=comments,
+        reviews=reviews,
+        status_check_rollup=_pull_request_status_rollup_nodes(
+            node,
+            normalize_graphql_rollup_node=_pull_request_normalize_graphql_rollup_node,
         ),
-        reviews=tuple(
-            _review_node(item) for item in review_nodes if isinstance(item, dict)
-        ),
-        status_check_rollup=tuple(status_nodes),
     )
-
-
-def _latest_node_timestamp(
-    nodes: Sequence[GitHubCommentNode | GitHubReviewNode], *keys: str
-) -> str:
-    timestamps: list[str] = []
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        for key in keys:
-            value = str(node.get(key) or "")
-            if value:
-                timestamps.append(value)
-    return max(timestamps) if timestamps else ""
 
 
 def _pull_request_state_probe_from_graphql_node(
@@ -939,40 +866,8 @@ def _pull_request_state_probe_from_graphql_node(
     pr_number: int,
     node: dict[str, Any],
 ) -> PullRequestStateProbe:
-    review_nodes = (
-        (node.get("reviews") or {}).get("nodes", [])
-        if isinstance(node.get("reviews"), dict)
-        else []
-    )
-    comment_nodes = (
-        (node.get("comments") or {}).get("nodes", [])
-        if isinstance(node.get("comments"), dict)
-        else []
-    )
-    commit_nodes = (
-        (node.get("commits") or {}).get("nodes", [])
-        if isinstance(node.get("commits"), dict)
-        else []
-    )
-    status_nodes: list[GitHubStatusCheckRollupNode] = []
-    if commit_nodes:
-        latest_commit = commit_nodes[-1]
-        rollup = (
-            (latest_commit.get("commit") or {}).get("statusCheckRollup") or {}
-        ).get("contexts") or {}
-        for item in rollup.get("nodes", []) or []:
-            if not isinstance(item, dict):
-                continue
-            normalized = _normalize_graphql_rollup_node(item)
-            if normalized is not None:
-                status_nodes.append(normalized)
-
-    comments = tuple(
-        _comment_node(item) for item in comment_nodes if isinstance(item, dict)
-    )
-    reviews = tuple(
-        _review_node(item) for item in review_nodes if isinstance(item, dict)
-    )
+    comments = _pull_request_comment_nodes(node)
+    reviews = _pull_request_review_nodes(node)
     return PullRequestStateProbe(
         pr_repo=pr_repo,
         pr_number=pr_number,
@@ -984,9 +879,12 @@ def _pull_request_state_probe_from_graphql_node(
         auto_merge_enabled=node.get("autoMergeRequest") is not None,
         head_ref_oid=str(node.get("headRefOid") or ""),
         updated_at=str(node.get("updatedAt") or ""),
-        latest_comment_at=_latest_node_timestamp(comments, "createdAt"),
-        latest_review_at=_latest_node_timestamp(reviews, "submittedAt"),
-        status_check_rollup=tuple(status_nodes),
+        latest_comment_at=_pull_request_latest_node_timestamp(comments, "createdAt"),
+        latest_review_at=_pull_request_latest_node_timestamp(reviews, "submittedAt"),
+        status_check_rollup=_pull_request_status_rollup_nodes(
+            node,
+            normalize_graphql_rollup_node=_pull_request_normalize_graphql_rollup_node,
+        ),
     )
 
 
