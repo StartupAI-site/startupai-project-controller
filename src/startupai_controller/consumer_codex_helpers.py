@@ -9,29 +9,45 @@ import shutil
 import subprocess
 import tempfile
 import time
-from typing import Any, Callable, cast
+from typing import Callable, Protocol, cast
 
-from startupai_controller.consumer_types import CodexSessionResult
+from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_types import CodexSessionResult, IssueContextPayload
+from startupai_controller.consumer_workflow import WorkflowDefinition
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    IssueRef,
+)
+
+
+class CodexLogger(Protocol):
+    """Minimal logger surface needed by codex execution helpers."""
+
+    def error(self, msg: str, *args: object) -> None:
+        """Record one error log line."""
+        ...
 
 
 def assemble_codex_prompt(
-    issue_context: dict[str, Any],
+    issue_context: IssueContextPayload,
     issue_ref: str,
-    config: Any,
-    consumer_config: Any,
+    config: CriticalPathConfig,
+    consumer_config: ConsumerConfig,
     worktree_path: str,
     branch_name: str,
     *,
     dependency_summary: str = "",
-    workflow_definition: Any | None = None,
+    workflow_definition: WorkflowDefinition | None = None,
     session_kind: str = "new_work",
     repair_pr_url: str | None = None,
     branch_reconcile_state: str | None = None,
     branch_reconcile_error: str | None = None,
-    parse_issue_ref: Callable[[str], Any],
-    resolve_issue_coordinates: Callable[[str, Any], tuple[str, str, int]],
+    parse_issue_ref: Callable[[str], IssueRef],
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig], tuple[str, str, int]
+    ],
     extract_acceptance_criteria: Callable[[str], str],
-    render_workflow_prompt: Callable[[Any, dict[str, Any]], str],
+    render_workflow_prompt: Callable[[WorkflowDefinition, dict[str, str]], str],
 ) -> str:
     """Build the codex execution prompt from the repo contract."""
     parsed = parse_issue_ref(issue_ref)
@@ -137,9 +153,9 @@ def run_codex_session(
     heartbeat_fn: Callable[[], None] | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     resolve_cli_command_fn: Callable[[str], str],
-    popen_factory: Callable[..., Any],
+    popen_factory: Callable[..., subprocess.Popen[str]],
     sleep_fn: Callable[[float], None] = time.sleep,
-    logger: Any,
+    logger: CodexLogger,
 ) -> int:
     """Run codex exec with a timeout wrapper and return the exit code."""
     codex_cmd = resolve_cli_command_fn("codex")
@@ -270,7 +286,7 @@ def create_or_update_pr(
     owner: str,
     repo: str,
     title: str,
-    config: Any | None = None,
+    config: object | None = None,
     issue_ref: str | None = None,
     session_id: str = "legacy-session",
     *,
@@ -278,7 +294,7 @@ def create_or_update_pr(
     run_gh: Callable[..., str],
     build_pr_body_fn: Callable[..., str],
     repo_to_prefix_for_repo: Callable[[str], str],
-    parse_issue_ref: Callable[[str], Any],
+    parse_issue_ref: Callable[[str], IssueRef],
 ) -> str:
     """Ensure a PR exists for the branch and return its URL."""
     resolved_issue_ref = issue_ref or f"{repo_to_prefix_for_repo(repo)}#{issue_number}"

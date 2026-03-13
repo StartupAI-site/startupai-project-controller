@@ -17,6 +17,7 @@ from startupai_controller.consumer_context_helpers import (
     snapshot_for_issue as _snapshot_for_issue_helper,
 )
 from startupai_controller import consumer_resolution_helpers as _resolution_helpers
+from startupai_controller.consumer_types import IssueContextPayload
 from startupai_controller.consumer_worktree_helpers import (
     list_repo_worktrees as _list_repo_worktrees_helper,
     worktree_is_clean as _worktree_is_clean_helper,
@@ -407,7 +408,7 @@ def hydrate_issue_context(
     issue_context_port: Any | None = None,
     gh_runner: Callable[..., str] | None = None,
     now: datetime | None = None,
-) -> dict[str, Any]:
+) -> IssueContextPayload:
     """Return locally ready issue context, refreshing the cache when needed."""
     return _hydrate_issue_context_helper(
         issue_ref,

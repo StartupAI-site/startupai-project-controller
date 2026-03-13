@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections.abc import Callable
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_launch_support_wiring as _launch_support_wiring
@@ -22,6 +22,7 @@ from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    IssueContextPayload,
     PendingClaimContext,
     PreparedCycleContext,
     PreparedLaunchContext,
@@ -81,7 +82,7 @@ def assemble_prepared_launch_context(
     repo: str,
     number: int,
     title: str,
-    context: dict[str, Any],
+    context: IssueContextPayload,
     session_kind: str,
     repair_pr_url: str | None,
     repair_branch_name: str | None,
@@ -194,7 +195,7 @@ def prepare_launch_candidate(
         config: ConsumerConfig,
         db: ConsumerRuntimeStatePort,
         issue_context_port: IssueContextPort,
-    ) -> tuple[dict[str, Any], str]:
+    ) -> tuple[IssueContextPayload, str]:
         return _launch_support_wiring.resolve_launch_issue_context(
             issue_ref,
             owner=owner,

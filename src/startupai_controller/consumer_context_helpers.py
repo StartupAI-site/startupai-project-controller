@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from startupai_controller.consumer_types import IssueContextPayload
+from startupai_controller.ports.issue_context import IssueContextPort
 from startupai_controller.runtime.wiring import (
+    GitHubPortBundle,
     build_github_port_bundle as _build_github_port_bundle,
 )
 
@@ -15,10 +18,12 @@ def fetch_issue_context(
     repo: str,
     number: int,
     *,
-    build_github_port_bundle: Callable[..., Any] = _build_github_port_bundle,
-    issue_context_port: Any | None = None,
+    build_github_port_bundle: Callable[
+        ..., GitHubPortBundle
+    ] = _build_github_port_bundle,
+    issue_context_port: IssueContextPort | None = None,
     gh_runner: Callable[..., str] | None = None,
-) -> dict[str, Any]:
+) -> IssueContextPayload:
     """Read issue title, body, and labels via the issue-context boundary."""
     port = (
         issue_context_port
@@ -84,13 +89,13 @@ def hydrate_issue_context(
     snapshot: Any | None,
     config: Any,
     db: Any,
-    fetch_issue_context: Callable[..., dict[str, Any]],
+    fetch_issue_context: Callable[..., IssueContextPayload],
     issue_context_cache_is_fresh: Callable[..., bool],
     record_metric: Callable[..., None],
-    issue_context_port: Any | None = None,
+    issue_context_port: IssueContextPort | None = None,
     gh_runner: Callable[..., str] | None = None,
     now: datetime | None = None,
-) -> dict[str, Any]:
+) -> IssueContextPayload:
     """Return locally ready issue context, refreshing the cache when needed."""
     current = now or datetime.now(timezone.utc)
     cached = (
@@ -102,6 +107,7 @@ def hydrate_issue_context(
         snapshot_updated_at=snapshot_updated_at,
         now=current,
     ):
+        assert cached is not None
         record_metric(
             db,
             config,
@@ -112,7 +118,7 @@ def hydrate_issue_context(
         return {
             "title": cached.title,
             "body": cached.body,
-            "labels": cached.labels,
+            "labels": list(cached.labels),
             "updated_at": cached.issue_updated_at,
         }
 
@@ -131,25 +137,26 @@ def hydrate_issue_context(
         issue_ref=issue_ref,
         now=current,
     )
-    context = fetch_issue_context(
+    fetched_context = fetch_issue_context(
         owner,
         repo,
         number,
         issue_context_port=issue_context_port,
         gh_runner=gh_runner,
     )
-    context.setdefault(
-        "title", snapshot.title if snapshot is not None else f"issue-{number}"
-    )
-    context.setdefault("body", "")
-    labels = context.get("labels")
-    if not isinstance(labels, list):
-        labels = []
-    context["labels"] = [str(label) for label in labels if str(label)]
+    labels = fetched_context.get("labels")
     issue_updated_at = str(
-        context.get("updated_at") or snapshot_updated_at or current.isoformat()
+        fetched_context.get("updated_at") or snapshot_updated_at or current.isoformat()
     )
-    context["updated_at"] = issue_updated_at
+    context: IssueContextPayload = {
+        "title": str(
+            fetched_context.get("title")
+            or (snapshot.title if snapshot is not None else f"issue-{number}")
+        ),
+        "body": str(fetched_context.get("body") or ""),
+        "labels": [str(label) for label in labels if str(label)],
+        "updated_at": issue_updated_at,
+    }
     fetched_at = current.isoformat()
     expires_at = (
         current + timedelta(seconds=config.issue_context_cache_ttl_seconds)
