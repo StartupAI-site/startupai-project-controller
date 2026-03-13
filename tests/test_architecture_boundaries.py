@@ -495,6 +495,29 @@ def test_consumer_review_queue_processing_routes_due_drain_through_module() -> N
     ), "consumer_review_queue_processing.py should depend on consumer_review_queue_drain_processing"
 
 
+def test_consumer_support_wiring_routes_runtime_control_helpers_through_module() -> (
+    None
+):
+    imported = _controller_runtime_imports(SRC_ROOT / "consumer_support_wiring.py")
+    assert (
+        "startupai_controller.consumer_runtime_support_wiring" in imported
+    ), "consumer_support_wiring.py should depend on consumer_runtime_support_wiring"
+    offending = sorted(
+        module
+        for module in imported
+        if module
+        in {
+            "startupai_controller.board_graph",
+            "startupai_controller.consumer_selection_retry_wiring",
+            "startupai_controller.control_plane_runtime",
+        }
+    )
+    assert offending == [], (
+        "consumer_support_wiring.py still owns runtime/control helper imports: "
+        f"{offending}"
+    )
+
+
 def test_pull_request_adapter_routes_batch_graphql_queries_through_helper_module() -> (
     None
 ):
