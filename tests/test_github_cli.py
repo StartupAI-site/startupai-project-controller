@@ -1,42 +1,34 @@
-"""Unit tests for board_io module (GitHub API interaction layer).
-
-Tests IO functions directly without going through orchestration.
-All tests use dependency injection -- NO real GitHub API calls.
-"""
+"""Unit tests for GitHub CLI compatibility helpers and adapter entrypoints."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
 
 import pytest
 
-import startupai_controller.board_io as board_io
-import startupai_controller.adapters.github_transport as github_transport
-from startupai_controller.board_io import (
-    LinkedIssue,
-    _marker_for,
-    _comment_exists,
-    _repo_to_prefix,
+import startupai_controller.adapters.github_cli as github_cli
+import startupai_controller.adapters.pull_request_compat as pull_request_compat
+from startupai_controller.adapters.github_cli import (
+    GitHubCliAdapter,
+    _query_failed_check_runs,
     _query_issue_board_info,
     _query_project_item_field,
     _query_status_field_option,
-    _query_failed_check_runs,
     _set_board_status,
-    clear_cycle_board_snapshot_cache,
     clear_required_status_checks_cache,
-    build_cycle_board_snapshot,
+    enable_pull_request_automerge,
     query_closing_issues,
     query_latest_codex_verdict,
+    query_pull_request_view_payloads,
     query_required_status_checks,
 )
+from startupai_controller.adapters.github_types import PullRequestViewPayload
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
+    GhQueryError,
     load_config,
 )
-
-# -- Fixtures -----------------------------------------------------------------
 
 
 def _valid_payload() -> dict:
@@ -74,59 +66,8 @@ def _load(tmp_path: Path) -> CriticalPathConfig:
     return load_config(_write_config(tmp_path))
 
 
-# -- Marker & comment tests ---------------------------------------------------
-
-
-def test_marker_uniqueness() -> None:
-    """Different refs produce different markers."""
-    m1 = _marker_for("promote-bridge", "crew#88")
-    m2 = _marker_for("promote-bridge", "crew#89")
-    assert m1 != m2
-    assert "crew#88" in m1
-    assert "crew#89" in m2
-
-
-def test_comment_exists_true() -> None:
-    """Response containing marker returns True."""
-    marker = _marker_for("promote-bridge", "crew#88")
-
-    def fake_gh(args):
-        return f"some text\n{marker}\nmore text"
-
-    assert _comment_exists(
-        "StartupAI-site", "startupai-crew", 88, marker, gh_runner=fake_gh
-    )
-
-
-def test_comment_exists_false() -> None:
-    """Empty response returns False."""
-    marker = _marker_for("promote-bridge", "crew#88")
-
-    def fake_gh(args):
-        return ""
-
-    assert not _comment_exists(
-        "StartupAI-site", "startupai-crew", 88, marker, gh_runner=fake_gh
-    )
-
-
-# -- Repo prefix tests --------------------------------------------------------
-
-
-def test_repo_to_prefix(tmp_path: Path) -> None:
-    """Reverse lookup works for both app and crew."""
-    config = _load(tmp_path)
-    assert _repo_to_prefix("StartupAI-site/startupai-crew", config) == "crew"
-    assert _repo_to_prefix("StartupAI-site/app.startupai-site", config) == "app"
-    assert _repo_to_prefix("StartupAI-site/startupai.site", config) == "site"
-    assert _repo_to_prefix("StartupAI-site/unknown", config) is None
-
-
-# -- query_closing_issues tests ------------------------------------------------
-
-
 def test_query_closing_issues_parses_response(tmp_path: Path) -> None:
-    """Injected GraphQL response -> correct LinkedIssue list."""
+    """Injected GraphQL response yields the expected linked issue list."""
     config = _load(tmp_path)
     graphql_response = json.dumps(
         {
@@ -153,18 +94,19 @@ def test_query_closing_issues_parses_response(tmp_path: Path) -> None:
         return graphql_response
 
     issues = query_closing_issues(
-        "StartupAI-site", "startupai-crew", 97, config, gh_runner=fake_gh
+        "StartupAI-site",
+        "startupai-crew",
+        97,
+        config,
+        gh_runner=fake_gh,
     )
+
     assert len(issues) == 1
     assert issues[0].ref == "crew#88"
     assert issues[0].number == 88
 
 
-# -- Check-run query tests -----------------------------------------------------
-
-
 def test_query_failed_check_runs_parses_response() -> None:
-    """_query_failed_check_runs returns names of failed checks."""
     response = json.dumps(
         {
             "check_runs": [
@@ -174,22 +116,28 @@ def test_query_failed_check_runs_parses_response() -> None:
             ]
         }
     )
+
     result = _query_failed_check_runs(
-        "owner", "repo", "sha123", gh_runner=lambda args: response
+        "owner",
+        "repo",
+        "sha123",
+        gh_runner=lambda args: response,
     )
+
     assert result == ["Tests", "Build"]
 
 
 def test_query_failed_check_runs_returns_none_on_api_error() -> None:
-    """_query_failed_check_runs returns None when API fails."""
-    from startupai_controller.validate_critical_path_promotion import (
-        GhQueryError as _GhQueryError,
+    def failing_gh(args):
+        raise GhQueryError("rate limited")
+
+    result = _query_failed_check_runs(
+        "owner",
+        "repo",
+        "sha123",
+        gh_runner=failing_gh,
     )
 
-    def failing_gh(args):
-        raise _GhQueryError("rate limited")
-
-    result = _query_failed_check_runs("owner", "repo", "sha123", gh_runner=failing_gh)
     assert result is None
 
 
@@ -218,20 +166,22 @@ def test_query_pr_gate_status_normalizes_state_to_uppercase() -> None:
             return branch_payload
         raise AssertionError(args)
 
-    result = board_io._query_pr_gate_status(
+    result = GitHubCliAdapter(
+        project_owner="",
+        project_number=0,
+        gh_runner=fake_gh,
+    ).get_gate_status(
         "owner/repo",
         123,
-        gh_runner=fake_gh,
     )
 
     assert result.state == "OPEN"
 
 
-def test_query_project_item_field_wrapper_respects_board_io_runner(
-    monkeypatch,
+def test_query_project_item_field_uses_github_cli_runner(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Wrapper should still honor board_io._run_gh monkeypatches for compatibility."""
     config = _load(tmp_path)
 
     def fake_gh(args, gh_runner=None, operation_type="query"):
@@ -257,7 +207,7 @@ def test_query_project_item_field_wrapper_respects_board_io_runner(
             }
         )
 
-    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+    monkeypatch.setattr(github_cli, "_run_gh", fake_gh)
 
     value = _query_project_item_field(
         "crew#84",
@@ -270,8 +220,8 @@ def test_query_project_item_field_wrapper_respects_board_io_runner(
     assert value == "codex"
 
 
-def test_query_issue_board_info_wrapper_respects_board_io_runner(
-    monkeypatch,
+def test_query_issue_board_info_uses_github_cli_runner(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config = _load(tmp_path)
@@ -301,7 +251,7 @@ def test_query_issue_board_info_wrapper_respects_board_io_runner(
             }
         )
 
-    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+    monkeypatch.setattr(github_cli, "_run_gh", fake_gh)
 
     info = _query_issue_board_info(
         "crew#84",
@@ -315,8 +265,8 @@ def test_query_issue_board_info_wrapper_respects_board_io_runner(
     assert info.project_id == "PROJ1"
 
 
-def test_query_status_field_option_wrapper_respects_board_io_runner(
-    monkeypatch,
+def test_query_status_field_option_uses_github_cli_runner(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_gh(args, gh_runner=None, operation_type="query"):
         return json.dumps(
@@ -334,7 +284,7 @@ def test_query_status_field_option_wrapper_respects_board_io_runner(
             }
         )
 
-    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+    monkeypatch.setattr(github_cli, "_run_gh", fake_gh)
 
     field_id, option_id = _query_status_field_option("PROJ1", "Review")
 
@@ -342,7 +292,9 @@ def test_query_status_field_option_wrapper_respects_board_io_runner(
     assert option_id == "OPT1"
 
 
-def test_set_board_status_wrapper_respects_board_io_runner(monkeypatch) -> None:
+def test_set_board_status_uses_github_cli_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[list[str]] = []
 
     def fake_gh(args, gh_runner=None, operation_type="query"):
@@ -355,7 +307,7 @@ def test_set_board_status_wrapper_respects_board_io_runner(monkeypatch) -> None:
             }
         )
 
-    monkeypatch.setattr(board_io, "_run_gh", fake_gh)
+    monkeypatch.setattr(github_cli, "_run_gh", fake_gh)
 
     _set_board_status("PROJ1", "ITEM1", "FIELD1", "OPT1")
 
@@ -456,7 +408,7 @@ def test_query_pull_request_view_payloads_batches_graphql_aliases() -> None:
         assert "pr_211: pullRequest(number: 211)" in joined
         return graphql_payload
 
-    payloads = board_io.query_pull_request_view_payloads(
+    payloads = query_pull_request_view_payloads(
         "StartupAI-site/startupai-crew",
         (211, 210),
         gh_runner=fake_gh,
@@ -483,52 +435,6 @@ def test_query_pull_request_view_payloads_batches_graphql_aliases() -> None:
     assert second.auto_merge_enabled is True
 
 
-def test_run_gh_retries_transient_connection_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unsupported commands still use subprocess retry behavior."""
-    calls = {"count": 0}
-
-    def fake_check_output(args, text=True, stderr=None, timeout=None):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=args,
-                output="error connecting to api.github.com",
-            )
-        return '{"ok": true}'
-
-    monkeypatch.setattr(github_transport.subprocess, "check_output", fake_check_output)
-    monkeypatch.setattr(github_transport.time, "sleep", lambda *_: None)
-
-    result = board_io._run_gh(["unsupported", "command"])
-
-    assert result == '{"ok": true}'
-    assert calls["count"] == 2
-
-
-def test_run_gh_fails_fast_on_timeout_expired(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unsupported subprocess fallbacks still fail fast on timeout."""
-    calls = {"count": 0, "timeout": None}
-
-    def fake_check_output(args, text=True, stderr=None, timeout=None):
-        calls["count"] += 1
-        calls["timeout"] = timeout
-        raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
-
-    monkeypatch.setattr(github_transport.subprocess, "check_output", fake_check_output)
-    monkeypatch.setattr(github_transport.time, "sleep", lambda *_: None)
-
-    with pytest.raises(board_io.GhCommandError, match="timed out after"):
-        board_io._run_gh(["unsupported", "command"])
-
-    assert calls["count"] == 1
-    assert calls["timeout"] == github_transport._GH_COMMAND_TIMEOUT_SECONDS
-
-
 def test_query_required_status_checks_uses_ttl_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -536,11 +442,16 @@ def test_query_required_status_checks_uses_ttl_cache(
     clear_required_status_checks_cache()
     calls = {"count": 0}
 
-    def fake_run_gh(args, **kwargs):
-        calls["count"] += 1
-        return json.dumps({"contexts": ["ci"], "checks": [{"context": "gate"}]})
+    class _Adapter:
+        def _query_required_status_checks(self, pr_repo, base_ref_name):
+            calls["count"] += 1
+            return {"ci", "gate"}
 
-    monkeypatch.setattr(board_io, "_run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        pull_request_compat,
+        "_build_pull_request_adapter",
+        lambda **kwargs: _Adapter(),
+    )
 
     first = query_required_status_checks("StartupAI-site/startupai-crew", "main")
     second = query_required_status_checks("StartupAI-site/startupai-crew", "main")
@@ -555,26 +466,28 @@ def test_query_required_status_checks_returns_stale_cache_on_error(
 ) -> None:
     """A cached required-check policy is reused if a refresh fails."""
     clear_required_status_checks_cache()
+
+    class _SuccessAdapter:
+        def _query_required_status_checks(self, pr_repo, base_ref_name):
+            return {"ci"}
+
+    class _FailingAdapter:
+        def _query_required_status_checks(self, pr_repo, base_ref_name):
+            raise GhQueryError("API rate limit exceeded")
+
     monkeypatch.setattr(
-        board_io,
-        "_run_gh",
-        lambda *args, **kwargs: json.dumps({"contexts": ["ci"]}),
+        pull_request_compat,
+        "_build_pull_request_adapter",
+        lambda **kwargs: _SuccessAdapter(),
     )
     first = query_required_status_checks("StartupAI-site/startupai-crew", "main")
 
     monkeypatch.setattr(
-        board_io,
-        "_run_gh",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            board_io.GhCommandError(
-                operation_type="query",
-                failure_kind="rate_limit",
-                command_excerpt="api repos/x/y",
-                detail="API rate limit exceeded",
-            )
-        ),
+        pull_request_compat,
+        "_build_pull_request_adapter",
+        lambda **kwargs: _FailingAdapter(),
     )
-    board_io._required_status_checks_ttl_cache[
+    pull_request_compat._required_status_checks_ttl_cache[
         ("StartupAI-site/startupai-crew", "main")
     ] = (0.0, {"ci"})
 
@@ -584,76 +497,25 @@ def test_query_required_status_checks_returns_stale_cache_on_error(
     assert second == {"ci"}
 
 
-def test_build_cycle_board_snapshot_uses_short_ttl_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Back-to-back snapshot reads reuse the same thin board payload."""
-    clear_cycle_board_snapshot_cache()
-    calls = {"count": 0}
-
-    payload = {
-        "data": {
-            "organization": {
-                "projectV2": {
-                    "id": "PVT_x",
-                    "items": {
-                        "pageInfo": {"hasNextPage": False, "endCursor": ""},
-                        "nodes": [
-                            {
-                                "id": "PVTI_x",
-                                "statusField": {"name": "Ready"},
-                                "executorField": {"name": "codex"},
-                                "handoffField": {"name": "none"},
-                                "priorityField": {"name": "P1"},
-                                "sprintField": {"name": "S1"},
-                                "agentField": {"name": "frontend-dev"},
-                                "ownerField": {"text": "codex:local-consumer"},
-                                "content": {
-                                    "number": 84,
-                                    "title": "Test issue",
-                                    "updatedAt": "2026-03-09T10:00:00Z",
-                                    "repository": {
-                                        "name": "startupai-crew",
-                                        "nameWithOwner": "StartupAI-site/startupai-crew",
-                                        "owner": {"login": "StartupAI-site"},
-                                    },
-                                },
-                            }
-                        ],
-                    },
-                }
-            }
-        }
-    }
-
-    def fake_run_gh(args, **kwargs):
-        calls["count"] += 1
-        return json.dumps(payload)
-
-    monkeypatch.setattr(board_io, "_run_gh", fake_run_gh)
-
-    first = build_cycle_board_snapshot("StartupAI-site", 1)
-    second = build_cycle_board_snapshot("StartupAI-site", 1)
-
-    assert len(first.items) == 1
-    assert len(second.items) == 1
-    assert calls["count"] == 1
-
-    clear_cycle_board_snapshot_cache()
-    third = build_cycle_board_snapshot("StartupAI-site", 1)
-    assert len(third.items) == 1
-    assert calls["count"] == 2
-
-
-# -- Codex verdict tests -------------------------------------------------------
-
-
 def test_query_latest_codex_verdict_prefers_latest_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Latest verdict marker (comment/review) wins by timestamp."""
-    payload = {
-        "comments": [
+    payload = PullRequestViewPayload(
+        pr_repo="StartupAI-site/app.startupai-site",
+        pr_number=158,
+        url="https://github.com/StartupAI-site/app.startupai-site/pull/158",
+        head_ref_name="feat/test",
+        author="codex-bot",
+        body="",
+        state="OPEN",
+        is_draft=False,
+        merge_state_status="CLEAN",
+        mergeable="MERGEABLE",
+        base_ref_name="main",
+        merged_at="",
+        auto_merge_enabled=False,
+        comments=[
             {
                 "body": "codex-review: fail\ncodex-route: executor",
                 "createdAt": "2026-03-05T10:00:00Z",
@@ -665,80 +527,100 @@ def test_query_latest_codex_verdict_prefers_latest_marker(
                 "author": {"login": "codex-bot"},
             },
         ],
-        "reviews": [],
-    }
-    monkeypatch.setattr(board_io, "_run_gh", lambda *a, **k: json.dumps(payload))
+        reviews=[],
+        status_check_rollup=(),
+    )
+    monkeypatch.setattr(
+        pull_request_compat,
+        "query_pull_request_view_payload",
+        lambda *args, **kwargs: payload,
+    )
+
     verdict = query_latest_codex_verdict(
         "StartupAI-site/app.startupai-site",
         158,
         trusted_actors={"codex-bot"},
     )
+
     assert verdict is not None
     assert verdict.decision == "pass"
     assert verdict.actor == "codex-bot"
 
 
-# -- enable_pull_request_automerge (M3: bounded verification) ----------------
-
-
-from startupai_controller.board_io import enable_pull_request_automerge, GhCommandError
-
-
-def test_enable_automerge_confirmed_after_retries() -> None:
-    """Verification reads succeed on second attempt → "confirmed"."""
+def test_enable_automerge_confirmed_after_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verification reads succeed on second attempt -> confirmed."""
     call_count = {"enable": 0, "view": 0}
 
-    def fake_gh(args):
-        if "merge" in args and "--auto" in args:
-            call_count["enable"] += 1
-            return ""
-        if "view" in args and "--json" in args:
+    class _Adapter:
+        def _gh_json(self, args, *, error_message):
             call_count["view"] += 1
             if call_count["view"] >= 2:
-                return json.dumps({"autoMergeRequest": {"enabledAt": "2026-03-09"}})
-            return json.dumps({"autoMergeRequest": None})
+                return {"autoMergeRequest": {"enabledAt": "2026-03-09"}}
+            return {"autoMergeRequest": None}
+
+    def fake_run_gh(args, **kwargs):
+        if "merge" in args and "--auto" in args:
+            call_count["enable"] += 1
         return ""
+
+    monkeypatch.setattr(pull_request_compat, "_run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        pull_request_compat,
+        "_build_pull_request_adapter",
+        lambda **kwargs: _Adapter(),
+    )
+    monkeypatch.setattr(pull_request_compat.time, "sleep", lambda *_: None)
 
     result = enable_pull_request_automerge(
         "o/r",
         42,
         confirm_retries=3,
         confirm_delay_seconds=0,
-        gh_runner=fake_gh,
     )
+
     assert result == "confirmed"
     assert call_count["enable"] == 1
-    assert call_count["view"] >= 2
+    assert call_count["view"] == 2
 
 
-def test_enable_automerge_pending_when_never_confirmed() -> None:
-    """All verify reads return null → "pending"."""
+def test_enable_automerge_pending_when_never_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All verify reads return null -> pending."""
 
-    def fake_gh(args):
-        if "merge" in args and "--auto" in args:
-            return ""
-        if "view" in args:
-            return json.dumps({"autoMergeRequest": None})
-        return ""
+    class _Adapter:
+        def _gh_json(self, args, *, error_message):
+            return {"autoMergeRequest": None}
+
+    monkeypatch.setattr(pull_request_compat, "_run_gh", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        pull_request_compat,
+        "_build_pull_request_adapter",
+        lambda **kwargs: _Adapter(),
+    )
+    monkeypatch.setattr(pull_request_compat.time, "sleep", lambda *_: None)
 
     result = enable_pull_request_automerge(
         "o/r",
         42,
         confirm_retries=3,
         confirm_delay_seconds=0,
-        gh_runner=fake_gh,
     )
+
     assert result == "pending"
 
 
-def test_enable_automerge_propagates_gh_error_on_enable() -> None:
-    """Enable call raises GhQueryError → exception propagates (NOT caught)."""
-    from startupai_controller.validate_critical_path_promotion import GhQueryError
+def test_enable_automerge_propagates_gh_error_on_enable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enable call raises GhQueryError -> exception propagates."""
 
-    def fake_gh(args):
-        if "merge" in args and "--auto" in args:
-            raise GhQueryError("transport error")
-        return ""
+    def fake_run_gh(args, **kwargs):
+        raise GhQueryError("transport error")
+
+    monkeypatch.setattr(pull_request_compat, "_run_gh", fake_run_gh)
 
     with pytest.raises(GhQueryError, match="transport error"):
         enable_pull_request_automerge(
@@ -746,5 +628,4 @@ def test_enable_automerge_propagates_gh_error_on_enable() -> None:
             42,
             confirm_retries=3,
             confirm_delay_seconds=0,
-            gh_runner=fake_gh,
         )
