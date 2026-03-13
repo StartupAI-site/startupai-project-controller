@@ -66,13 +66,59 @@ from startupai_controller.automation_compat_ports import (
     wrap_board_port,
     wrap_review_state_port,
 )
+from startupai_controller.ports.board_mutations import BoardMutationPort
+from startupai_controller.ports.review_state import ReviewStatePort
 
 PROMOTABLE_STATUSES = frozenset({"Backlog", "Blocked"})
+ReviewStatePortFactory = Callable[..., ReviewStatePort]
+BoardMutationPortFactory = Callable[..., BoardMutationPort]
 
 
 def _split_repo_slug(repo: str) -> tuple[str, str]:
     owner, repo_name = repo.split("/", 1)
     return owner, repo_name
+
+
+def _require_review_state_port(
+    review_state_port,
+    *,
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    gh_runner: Callable[..., str] | None,
+    default_review_state_port_fn: ReviewStatePortFactory | None,
+) -> ReviewStatePort:
+    if review_state_port is not None:
+        return review_state_port
+    if default_review_state_port_fn is None:
+        raise ValueError("review_state_port or default_review_state_port_fn required")
+    return default_review_state_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
+
+
+def _require_board_port(
+    board_port,
+    *,
+    project_owner: str,
+    project_number: int,
+    config: CriticalPathConfig,
+    gh_runner: Callable[..., str] | None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None,
+) -> BoardMutationPort:
+    if board_port is not None:
+        return board_port
+    if default_board_mutation_port_fn is None:
+        raise ValueError("board_port or default_board_mutation_port_fn required")
+    return default_board_mutation_port_fn(
+        project_owner,
+        project_number,
+        config,
+        gh_runner=gh_runner,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +139,7 @@ def promote_to_ready(
     gh_runner: Callable[..., str] | None = None,
     *,
     query_issue_board_info_fn: Callable[..., BoardInfo] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None = None,
 ) -> tuple[int, str]:
     """Validate and promote an issue from Backlog/Blocked to Ready."""
     parse_issue_ref(issue_ref)
@@ -142,15 +188,15 @@ def promote_to_ready(
 
     if board_mutator is not None:
         board_mutator(info.project_id, info.item_id)
-    elif default_board_mutation_port_fn is not None:
-        default_board_mutation_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        ).set_issue_status(issue_ref, "Ready")
     else:
-        raise ValueError("board_mutator or default_board_mutation_port_fn required")
+        _require_board_port(
+            None,
+            project_owner=project_owner,
+            project_number=project_number,
+            config=config,
+            gh_runner=gh_runner,
+            default_board_mutation_port_fn=default_board_mutation_port_fn,
+        ).set_issue_status(issue_ref, "Ready")
 
     return 0, (
         f"Current status: {info.status}\n"
@@ -187,7 +233,7 @@ def auto_promote_successors(
     comment_exists_fn: Callable[..., bool],
     issue_ref_to_repo_parts_fn: Callable[..., tuple[str, str, int]],
     new_handoff_job_id_fn: Callable[[str, str], str],
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None = None,
 ) -> PromotionResult:
     """Promote eligible successors of a Done issue."""
     review_state_port, board_port = _resolve_auto_promote_ports(
@@ -245,7 +291,7 @@ def _resolve_auto_promote_ports(
     comment_exists_fn: Callable[..., bool],
     comment_poster: Callable[..., None] | None,
     gh_runner: Callable[..., str] | None,
-    default_board_mutation_port_fn: Callable[..., object] | None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None,
 ):
     """Acquire and adapt the ports needed by auto-promote."""
     comment_checker_fn = comment_checker or comment_exists_fn
@@ -553,21 +599,20 @@ def enforce_ready_dependency_guard(
     # Injected wiring callables
     review_state_port=None,
     board_port=None,
-    default_review_state_port_fn: Callable[..., object] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    default_review_state_port_fn: ReviewStatePortFactory | None = None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None = None,
     find_unmet_dependencies_fn: Callable[..., list[tuple[str, str]]],
 ) -> list[str]:
     """Block Ready issues with unmet predecessors. Returns corrected refs."""
-    if review_state_port is None and default_review_state_port_fn is not None:
-        review_state_port = default_review_state_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
-    ready_items: list[IssueSnapshot] = []
-    if review_state_port is not None:
-        ready_items = review_state_port.list_issues_by_status("Ready")
+    review_state_port = _require_review_state_port(
+        review_state_port,
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        gh_runner=gh_runner,
+        default_review_state_port_fn=default_review_state_port_fn,
+    )
+    ready_items: list[IssueSnapshot] = review_state_port.list_issues_by_status("Ready")
     review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
@@ -575,13 +620,14 @@ def enforce_ready_dependency_guard(
         project_number=project_number,
         gh_runner=gh_runner,
     )
-    if board_port is None and default_board_mutation_port_fn is not None:
-        board_port = default_board_mutation_port_fn(
-            project_owner,
-            project_number,
-            config,
-            gh_runner=gh_runner,
-        )
+    board_port = _require_board_port(
+        board_port,
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
+        gh_runner=gh_runner,
+        default_board_mutation_port_fn=default_board_mutation_port_fn,
+    )
     board_port = wrap_board_port(
         board_port,
         config=config,
@@ -664,25 +710,27 @@ def post_claim_comment(
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
     # Injected wiring callables
-    default_review_state_port_fn: Callable[..., object] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    default_review_state_port_fn: ReviewStatePortFactory | None = None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None = None,
     comment_exists_fn: Callable[..., bool] | None = None,
 ) -> None:
     """Post deterministic kickoff comment on successful claim."""
-    if review_state_port is None and default_review_state_port_fn is not None:
-        review_state_port = default_review_state_port_fn(
-            DEFAULT_PROJECT_OWNER,
-            DEFAULT_PROJECT_NUMBER,
-            config,
-            gh_runner=gh_runner,
-        )
-    if board_port is None and default_board_mutation_port_fn is not None:
-        board_port = default_board_mutation_port_fn(
-            DEFAULT_PROJECT_OWNER,
-            DEFAULT_PROJECT_NUMBER,
-            config,
-            gh_runner=gh_runner,
-        )
+    review_state_port = _require_review_state_port(
+        review_state_port,
+        project_owner=DEFAULT_PROJECT_OWNER,
+        project_number=DEFAULT_PROJECT_NUMBER,
+        config=config,
+        gh_runner=gh_runner,
+        default_review_state_port_fn=default_review_state_port_fn,
+    )
+    board_port = _require_board_port(
+        board_port,
+        project_owner=DEFAULT_PROJECT_OWNER,
+        project_number=DEFAULT_PROJECT_NUMBER,
+        config=config,
+        gh_runner=gh_runner,
+        default_board_mutation_port_fn=default_board_mutation_port_fn,
+    )
     review_state_port = wrap_review_state_port(
         review_state_port,
         config=config,
@@ -732,25 +780,31 @@ def wire_schedule_ready_items(
     board_mutator=None,
     gh_runner: Callable[..., str] | None = None,
     # Injected board-automation helpers
-    default_review_state_port_fn: Callable[..., object] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    default_review_state_port_fn: ReviewStatePortFactory | None = None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None = None,
     legacy_board_status_mutator_fn: Callable[..., Callable] | None = None,
 ) -> SchedulingDecision:
     """Wire port materialisation + legacy mutator, then delegate to core."""
-    review_state_port = review_state_port or default_review_state_port_fn(
-        project_owner,
-        project_number,
-        config,
+    review_state_port = _require_review_state_port(
+        review_state_port,
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
         gh_runner=gh_runner,
+        default_review_state_port_fn=default_review_state_port_fn,
     )
-    board_port = board_port or default_board_mutation_port_fn(
-        project_owner,
-        project_number,
-        config,
+    board_port = _require_board_port(
+        board_port,
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
         gh_runner=gh_runner,
+        default_board_mutation_port_fn=default_board_mutation_port_fn,
     )
     status_mutator = board_mutator
     if status_mutator is None and board_info_resolver is not None:
+        if legacy_board_status_mutator_fn is None:
+            raise ValueError("legacy_board_status_mutator_fn required")
         status_mutator = legacy_board_status_mutator_fn(
             project_owner,
             project_number,
@@ -826,25 +880,31 @@ def wire_claim_ready_issue(
     comment_poster: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
     # Injected board-automation helpers
-    default_review_state_port_fn: Callable[..., object] | None = None,
-    default_board_mutation_port_fn: Callable[..., object] | None = None,
+    default_review_state_port_fn: ReviewStatePortFactory | None = None,
+    default_board_mutation_port_fn: BoardMutationPortFactory | None = None,
     legacy_board_status_mutator_fn: Callable[..., Callable] | None = None,
 ) -> ClaimReadyResult:
     """Wire port materialisation + legacy mutator, then delegate to core."""
-    review_state_port = review_state_port or default_review_state_port_fn(
-        project_owner,
-        project_number,
-        config,
+    review_state_port = _require_review_state_port(
+        review_state_port,
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
         gh_runner=gh_runner,
+        default_review_state_port_fn=default_review_state_port_fn,
     )
-    board_port = board_port or default_board_mutation_port_fn(
-        project_owner,
-        project_number,
-        config,
+    board_port = _require_board_port(
+        board_port,
+        project_owner=project_owner,
+        project_number=project_number,
+        config=config,
         gh_runner=gh_runner,
+        default_board_mutation_port_fn=default_board_mutation_port_fn,
     )
     status_mutator = board_mutator
     if status_mutator is None and board_info_resolver is not None:
+        if legacy_board_status_mutator_fn is None:
+            raise ValueError("legacy_board_status_mutator_fn required")
         status_mutator = legacy_board_status_mutator_fn(
             project_owner,
             project_number,

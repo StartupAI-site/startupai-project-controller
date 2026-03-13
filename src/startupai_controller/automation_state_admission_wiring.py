@@ -118,6 +118,29 @@ def _core():
     return core
 
 
+def _require_admission_pipeline_ports(
+    *,
+    review_state_port: _ReviewStatePort | None,
+    pr_port: _PullRequestPort | None,
+    board_port: _BoardMutationPort | None,
+    issue_context_port: _IssueContextPort | None,
+) -> tuple[
+    _ReviewStatePort,
+    _PullRequestPort,
+    _BoardMutationPort,
+    _IssueContextPort,
+]:
+    if review_state_port is None:
+        raise ValueError("review_state_port required for admission pipeline")
+    if pr_port is None:
+        raise ValueError("pr_port required for admission pipeline")
+    if board_port is None:
+        raise ValueError("board_port required for admission pipeline")
+    if issue_context_port is None:
+        raise ValueError("issue_context_port required for admission pipeline")
+    return review_state_port, pr_port, board_port, issue_context_port
+
+
 # ---------------------------------------------------------------------------
 # Board-state mutation wrappers
 # ---------------------------------------------------------------------------
@@ -671,6 +694,17 @@ def _load_admission_source_items(
     gh_runner: Callable[..., str] | None,
 ) -> list[_ProjectItemSnapshot]:
     """Load backlog/ready items needed for one admission pass."""
+    (
+        review_state_port,
+        pr_port,
+        board_port,
+        issue_context_port,
+    ) = _require_admission_pipeline_ports(
+        review_state_port=review_state_port,
+        pr_port=pr_port,
+        board_port=board_port,
+        issue_context_port=issue_context_port,
+    )
     return _wiring_load_admission_source_items(
         automation_config,
         deps=_build_admission_pipeline_deps(
@@ -744,6 +778,17 @@ def _evaluate_admission_candidates(
     bool,
 ]:
     """Run the expensive admission checks needed to choose candidates."""
+    (
+        review_state_port,
+        pr_port,
+        board_port,
+        issue_context_port,
+    ) = _require_admission_pipeline_ports(
+        review_state_port=review_state_port,
+        pr_port=pr_port,
+        board_port=board_port,
+        issue_context_port=issue_context_port,
+    )
     return _wiring_evaluate_admission_candidates(
         provisional_candidates,
         deps=_build_admission_pipeline_deps(
@@ -783,6 +828,17 @@ def _apply_admitted_backlog_candidates(
     gh_runner: Callable[..., str] | None,
 ) -> tuple[list[str], bool, str | None]:
     """Apply backlog-to-ready mutations for the selected candidates."""
+    (
+        review_state_port,
+        pr_port,
+        board_port,
+        issue_context_port,
+    ) = _require_admission_pipeline_ports(
+        review_state_port=review_state_port,
+        pr_port=pr_port,
+        board_port=board_port,
+        issue_context_port=issue_context_port,
+    )
     return _wiring_apply_admitted_backlog_candidates(
         selected,
         deps=_build_admission_pipeline_deps(

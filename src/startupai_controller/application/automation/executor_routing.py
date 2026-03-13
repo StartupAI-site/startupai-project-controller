@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ExecutorRoutingDecision,
+    IssueSnapshot,
+    ProjectItemSnapshot,
 )
 from startupai_controller.domain.scheduling_policy import (
     PROTECTED_QUEUE_ROUTING_STATUSES,
@@ -56,8 +60,9 @@ def route_protected_queue_executors(
     assert automation_config is not None
 
     for status in statuses:
+        items: Sequence[IssueSnapshot | ProjectItemSnapshot]
         if board_snapshot is not None:
-            items = board_snapshot.items_with_status(status)
+            items = list(board_snapshot.items_with_status(status))
         elif review_state_port is not None:
             items = review_state_port.list_issues_by_status(status)
         else:
