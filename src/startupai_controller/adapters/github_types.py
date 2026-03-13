@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Literal, TypeAlias, TypedDict
 
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     LinkedIssue,
+    OpenPullRequest,
     ProjectItemSnapshot,
 )
 
@@ -51,6 +52,56 @@ class CodexReviewVerdict:
     checklist: list[str] = field(default_factory=list)
 
 
+class GitHubActorPayload(TypedDict, total=False):
+    """Minimal GitHub actor payload embedded in comment/review nodes."""
+
+    login: str
+
+
+class GitHubCommentNode(TypedDict, total=False):
+    """Normalized PR comment payload used by review-state helpers."""
+
+    body: str
+    createdAt: str
+    author: GitHubActorPayload
+    user: GitHubActorPayload
+
+
+class GitHubReviewNode(TypedDict, total=False):
+    """Normalized PR review payload used by review-state helpers."""
+
+    body: str
+    submittedAt: str
+    state: str
+    author: GitHubActorPayload
+    user: GitHubActorPayload
+
+
+class GitHubCheckRunNode(TypedDict):
+    """Normalized GraphQL CheckRun node from a status-check rollup."""
+
+    __typename: Literal["CheckRun"]
+    name: str
+    status: str
+    conclusion: str
+    detailsUrl: str
+    completedAt: str
+    startedAt: str
+
+
+class GitHubStatusContextNode(TypedDict):
+    """Normalized GraphQL StatusContext node from a status-check rollup."""
+
+    __typename: Literal["StatusContext"]
+    context: str
+    state: str
+    targetUrl: str
+    startedAt: str
+
+
+GitHubStatusCheckRollupNode: TypeAlias = GitHubCheckRunNode | GitHubStatusContextNode
+
+
 @dataclass(frozen=True)
 class PullRequestViewPayload:
     """Expanded PR payload used to make one review decision without requerying."""
@@ -68,9 +119,9 @@ class PullRequestViewPayload:
     base_ref_name: str
     merged_at: str
     auto_merge_enabled: bool
-    comments: tuple[dict[str, Any], ...] = ()
-    reviews: tuple[dict[str, Any], ...] = ()
-    status_check_rollup: tuple[dict[str, Any], ...] = ()
+    comments: tuple[GitHubCommentNode, ...] = ()
+    reviews: tuple[GitHubReviewNode, ...] = ()
+    status_check_rollup: tuple[GitHubStatusCheckRollupNode, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,7 +140,7 @@ class PullRequestStateProbe:
     updated_at: str
     latest_comment_at: str
     latest_review_at: str
-    status_check_rollup: tuple[dict[str, Any], ...] = ()
+    status_check_rollup: tuple[GitHubStatusCheckRollupNode, ...] = ()
 
 
 # Transitional compatibility aliases while legacy callers still expect underscored names.

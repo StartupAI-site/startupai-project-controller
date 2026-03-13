@@ -12,6 +12,9 @@ from startupai_controller.adapters.board_mutation import GitHubBoardMutationAdap
 from startupai_controller.adapters.github_transport import _run_gh
 from startupai_controller.adapters.github_types import (
     CycleGitHubMemo,
+    GitHubCommentNode,
+    GitHubReviewNode,
+    GitHubStatusCheckRollupNode,
     _ProjectItemSnapshot,
 )
 from startupai_controller.adapters.review_state import (
@@ -233,7 +236,9 @@ def _extract_run_id(details_url: str) -> int | None:
         return None
 
 
-def _normalize_graphql_rollup_node(node: dict[str, Any]) -> dict[str, Any] | None:
+def _normalize_graphql_rollup_node(
+    node: dict[str, object],
+) -> GitHubStatusCheckRollupNode | None:
     """Normalize GraphQL status-check nodes into the shared rollup shape."""
     typename = str(node.get("__typename") or "")
     if typename == "CheckRun":
@@ -257,7 +262,10 @@ def _normalize_graphql_rollup_node(node: dict[str, Any]) -> dict[str, Any] | Non
     return None
 
 
-def _latest_node_timestamp(nodes: Sequence[dict[str, Any]], *keys: str) -> str:
+def _latest_node_timestamp(
+    nodes: Sequence[GitHubCommentNode | GitHubReviewNode],
+    *keys: str,
+) -> str:
     """Return the latest available timestamp from a list of GraphQL nodes."""
     timestamps: list[str] = []
     for node in nodes:
