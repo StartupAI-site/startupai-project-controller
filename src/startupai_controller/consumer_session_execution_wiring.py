@@ -13,6 +13,7 @@ import startupai_controller.consumer_execution_support_helpers as _execution_sup
 import startupai_controller.consumer_resolution_helpers as _resolution_helpers
 import startupai_controller.consumer_review_handoff_helpers as _review_handoff_helpers
 import startupai_controller.consumer_review_queue_helpers as _review_queue_helpers
+import startupai_controller.consumer_runtime_support_wiring as _runtime_support_wiring
 import startupai_controller.consumer_session_completion_helpers as _session_completion_helpers
 import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.board_automation_config import BoardAutomationConfig
@@ -56,6 +57,37 @@ from startupai_controller.validate_critical_path_promotion import CriticalPathCo
 
 CodexResultPayload = CodexSessionResult
 SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _queue_status_transition(
+    db: ConsumerRuntimeStatePort,
+    issue_ref: str,
+    *,
+    to_status: str,
+    from_statuses: set[str],
+    blocked_reason: str | None = None,
+) -> None:
+    """Adapt the deferred status queue helper to the runtime-state protocol."""
+    _support_wiring.queue_status_transition(
+        cast(_runtime_support_wiring.DeferredActionStorePort, db),
+        issue_ref,
+        to_status=to_status,
+        from_statuses=from_statuses,
+        blocked_reason=blocked_reason,
+    )
+
+
+def _queue_verdict_marker(
+    db: ConsumerRuntimeStatePort,
+    pr_url: str,
+    session_id: str,
+) -> None:
+    """Adapt the deferred verdict helper to the runtime-state protocol."""
+    _support_wiring.queue_verdict_marker(
+        cast(_runtime_support_wiring.DeferredActionStorePort, db),
+        pr_url,
+        session_id,
+    )
 
 
 def create_pr_for_execution_result(
@@ -114,7 +146,7 @@ def transition_claimed_session_to_review(
         transition_issue_to_review=_board_state_helpers.transition_issue_to_review_from_shell,
         record_successful_github_mutation=_record_successful_github_mutation,
         mark_degraded=_mark_degraded,
-        queue_status_transition=_support_wiring.queue_status_transition,
+        queue_status_transition=_queue_status_transition,
         logger=logger,
     )
 
@@ -136,7 +168,7 @@ def post_claimed_session_verdict_marker(
         post_pr_codex_verdict=_codex_comment_wiring.post_pr_codex_verdict,
         record_successful_github_mutation=_record_successful_github_mutation,
         mark_degraded=_mark_degraded,
-        queue_verdict_marker=_support_wiring.queue_verdict_marker,
+        queue_verdict_marker=_queue_verdict_marker,
         logger=logger,
     )
 

@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 import subprocess
+from typing import Any
 
 import startupai_controller.consumer_claimed_session_wiring as _claimed_session_wiring
 import startupai_controller.consumer_cycle_wiring as _cycle_wiring
 import startupai_controller.consumer_launch_claim_wiring as _launch_claim_wiring
+import startupai_controller.consumer_launch_preparation_wiring as _launch_preparation_wiring
 from startupai_controller.application.consumer.cycle import PreparedCycleDeps
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
@@ -16,6 +18,7 @@ from startupai_controller.consumer_types import (
     PreparedCycleContext,
     PreparedLaunchContext,
     PrCreationOutcome,
+    SelectedLaunchCandidate,
     SessionExecutionOutcome,
 )
 from startupai_controller.domain.models import (
@@ -36,28 +39,137 @@ from startupai_controller.ports.ready_flow import (
     StatusResolverFn,
 )
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 SubprocessRunnerFn = _launch_claim_wiring.SubprocessRunnerFn
-block_prelaunch_issue = _launch_claim_wiring.block_prelaunch_issue
-select_launch_candidate_for_cycle = (
-    _launch_claim_wiring.select_launch_candidate_for_cycle
-)
-prepare_selected_launch_candidate = (
-    _launch_claim_wiring.prepare_selected_launch_candidate
-)
-handle_selected_launch_query_error = (
-    _launch_claim_wiring.handle_selected_launch_query_error
-)
-handle_selected_launch_workflow_config_error = (
-    _launch_claim_wiring.handle_selected_launch_workflow_config_error
-)
-handle_selected_launch_worktree_error = (
-    _launch_claim_wiring.handle_selected_launch_worktree_error
-)
-handle_selected_launch_runtime_error = (
-    _launch_claim_wiring.handle_selected_launch_runtime_error
-)
-resolve_launch_context_for_cycle = _launch_claim_wiring.resolve_launch_context_for_cycle
+
+
+def block_prelaunch_issue(
+    issue_ref: str,
+    blocked_reason: str,
+    *,
+    config: ConsumerConfig,
+    cp_config: CriticalPathConfig,
+    db: ConsumerRuntimeStatePort,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
+    gh_runner: GitHubRunnerFn | None = None,
+) -> None:
+    """Move a launch-unready issue to Blocked before claim."""
+    _launch_claim_wiring.block_prelaunch_issue(
+        issue_ref,
+        blocked_reason,
+        config=config,
+        cp_config=cp_config,
+        db=db,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+
+
+def select_launch_candidate_for_cycle(
+    *,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    prepared: PreparedCycleContext,
+    target_issue: str | None,
+    review_state_port: ReviewStatePort | None = None,
+    status_resolver: StatusResolverFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[SelectedLaunchCandidate | None, CycleResult | None]:
+    """Select a launch candidate and validate its immediate launchability."""
+    return _launch_claim_wiring.select_launch_candidate_for_cycle(
+        config=config,
+        db=db,
+        prepared=prepared,
+        target_issue=target_issue,
+        review_state_port=review_state_port,
+        status_resolver=status_resolver,
+        gh_runner=gh_runner,
+    )
+
+
+def handle_selected_launch_query_error(
+    *,
+    candidate: str,
+    err: Exception,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+) -> tuple[None, CycleResult]:
+    """Handle GitHub/query failures during selected launch preparation."""
+    return _launch_claim_wiring.handle_selected_launch_query_error(
+        candidate=candidate,
+        err=err,
+        config=config,
+        db=db,
+    )
+
+
+def handle_selected_launch_workflow_config_error(
+    *,
+    candidate: str,
+    err: Exception,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[None, CycleResult]:
+    """Handle invalid workflow configuration during launch preparation."""
+    return _launch_claim_wiring.handle_selected_launch_workflow_config_error(
+        candidate=candidate,
+        err=err,
+        config=config,
+        db=db,
+        cp_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+
+
+def handle_selected_launch_worktree_error(
+    *,
+    candidate: str,
+    err: Exception,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+) -> tuple[None, CycleResult]:
+    """Handle worktree preparation failures for a selected launch candidate."""
+    return _launch_claim_wiring.handle_selected_launch_worktree_error(
+        candidate=candidate,
+        err=err,
+        config=config,
+        db=db,
+    )
+
+
+def handle_selected_launch_runtime_error(
+    *,
+    candidate: str,
+    err: RuntimeError,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    cp_config: CriticalPathConfig,
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+) -> tuple[None, CycleResult]:
+    """Handle workflow-hook runtime failures during launch preparation."""
+    return _launch_claim_wiring.handle_selected_launch_runtime_error(
+        candidate=candidate,
+        err=err,
+        config=config,
+        db=db,
+        cp_config=cp_config,
+        board_info_resolver=board_info_resolver,
+        board_mutator=board_mutator,
+        gh_runner=gh_runner,
+    )
+
+
 open_pending_claim_session = _launch_claim_wiring.open_pending_claim_session
 enforce_claim_retry_ceiling = _launch_claim_wiring.enforce_claim_retry_ceiling
 attempt_launch_context_claim = _launch_claim_wiring.attempt_launch_context_claim
@@ -75,34 +187,46 @@ claim_suppression_state: Callable[..., dict[str, str] | None] = (
 next_available_slot: Callable[..., int | None] = (
     _launch_claim_wiring.next_available_slot
 )
+prepare_selected_launch_candidate = (
+    _launch_preparation_wiring.prepare_selected_launch_candidate
+)
+resolve_launch_context_for_cycle = (
+    _launch_preparation_wiring.resolve_launch_context_for_cycle
+)
 
-create_pr_for_execution_result = _claimed_session_wiring.create_pr_for_execution_result
-transition_claimed_session_to_review = (
+create_pr_for_execution_result: Callable[..., PrCreationOutcome] = (
+    _claimed_session_wiring.create_pr_for_execution_result
+)
+transition_claimed_session_to_review: Callable[..., None] = (
     _claimed_session_wiring.transition_claimed_session_to_review
 )
-post_claimed_session_verdict_marker = (
+post_claimed_session_verdict_marker: Callable[..., None] = (
     _claimed_session_wiring.post_claimed_session_verdict_marker
 )
-queue_claimed_session_for_review = (
+queue_claimed_session_for_review: Callable[..., Any] = (
     _claimed_session_wiring.queue_claimed_session_for_review
 )
-run_immediate_review_handoff = _claimed_session_wiring.run_immediate_review_handoff
-handle_non_review_execution_outcome = (
-    _claimed_session_wiring.handle_non_review_execution_outcome
+run_immediate_review_handoff: Callable[..., ReviewQueueDrainSummary] = (
+    _claimed_session_wiring.run_immediate_review_handoff
 )
-final_phase_for_claimed_session = (
+handle_non_review_execution_outcome: Callable[
+    ..., tuple[str, ResolutionEvaluation | None, str | None]
+] = _claimed_session_wiring.handle_non_review_execution_outcome
+final_phase_for_claimed_session: Callable[..., str] = (
     _claimed_session_wiring.final_phase_for_claimed_session
 )
-persist_claimed_session_completion = (
+persist_claimed_session_completion: Callable[..., None] = (
     _claimed_session_wiring.persist_claimed_session_completion
 )
-post_claimed_session_result_comment = (
+post_claimed_session_result_comment: Callable[..., None] = (
     _claimed_session_wiring.post_claimed_session_result_comment
 )
-maybe_escalate_claimed_session_failure = (
+maybe_escalate_claimed_session_failure: Callable[..., None] = (
     _claimed_session_wiring.maybe_escalate_claimed_session_failure
 )
-handoff_execution_to_review = _claimed_session_wiring.handoff_execution_to_review
+handoff_execution_to_review: Callable[..., ReviewQueueDrainSummary] = (
+    _claimed_session_wiring.handoff_execution_to_review
+)
 
 
 def execute_claimed_session(

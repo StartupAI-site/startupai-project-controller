@@ -434,7 +434,7 @@ def apply_resolution_action(
     gh_runner: Callable[..., str] | None = None,
     resolve_issue_coordinates: Callable[[str, Any], tuple[str, str, int]],
     build_resolution_comment: Callable[..., str],
-    mark_issues_done: Callable[..., None],
+    mark_issues_done: Callable[..., object],
     record_successful_github_mutation: Callable[[Any], None],
     mark_degraded: Callable[[Any, str], None],
     gh_reason_code: Callable[[Exception], str],

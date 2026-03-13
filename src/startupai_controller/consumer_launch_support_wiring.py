@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections.abc import Callable
+from typing import cast
 
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
@@ -236,7 +237,12 @@ def resolve_launch_candidate_metadata(
         gh_runner=gh_runner,
         parse_issue_ref=parse_issue_ref,
         resolve_issue_coordinates=_resolve_issue_coordinates,
-        snapshot_for_issue=_support_wiring.snapshot_for_issue,
+        snapshot_for_issue=cast(
+            Callable[
+                [CycleBoardSnapshot, str, CriticalPathConfig], IssueSnapshot | None
+            ],
+            _support_wiring.snapshot_for_issue,
+        ),
         classify_open_pr_candidates=_codex_comment_wiring.classify_open_pr_candidates,
         launch_session_kind=_launch_session_kind,
     )

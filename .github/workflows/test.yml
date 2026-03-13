@@ -17,5 +17,5 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --group dev
       - run: uv run black --check .
-      - run: uv run mypy src/startupai_controller/domain/ src/startupai_controller/ports/
+      - run: uv run mypy src/startupai_controller
       - run: uv run pytest tests/ -v

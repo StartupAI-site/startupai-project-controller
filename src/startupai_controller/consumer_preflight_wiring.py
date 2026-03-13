@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import startupai_controller.consumer_operational_wiring as _operational_wiring
 import startupai_controller.consumer_support_wiring as _support_wiring
@@ -19,6 +19,7 @@ from startupai_controller.application.consumer.preflight_runtime import (
     InitializeCycleRuntimeDeps,
     PhaseHelperDeps,
     PrepareCycleDeps,
+    ReconcileBoardTruthResult,
     initialize_cycle_runtime as _initialize_cycle_runtime_use_case,
     load_board_snapshot_phase as _load_board_snapshot_phase_use_case,
     prepare_cycle as _prepare_cycle_use_case,
@@ -77,7 +78,10 @@ def build_phase_helper_deps() -> PhaseHelperDeps:
     return PhaseHelperDeps(
         replay_deferred_actions=_replay_deferred_actions,
         drain_review_queue=_drain_review_queue,
-        reconcile_board_truth=_operational_wiring.reconcile_board_truth,
+        reconcile_board_truth=cast(
+            Callable[..., ReconcileBoardTruthResult],
+            _operational_wiring.reconcile_board_truth,
+        ),
         record_successful_github_mutation=_record_successful_github_mutation,
         record_successful_board_sync=_record_successful_board_sync,
         clear_degraded=_clear_degraded,

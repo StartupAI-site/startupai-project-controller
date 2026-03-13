@@ -307,7 +307,7 @@ def select_launch_candidate_for_cycle(
     parse_issue_ref: Callable[[str], Any],
     effective_retry_backoff: Callable[..., tuple[int, int]],
     retry_backoff_active: Callable[..., bool],
-    maybe_activate_claim_suppression: Callable[..., None],
+    maybe_activate_claim_suppression: Callable[..., bool],
     mark_degraded: Callable[..., None],
     gh_reason_code: Callable[..., str],
     gh_query_error_type: type[Exception],
