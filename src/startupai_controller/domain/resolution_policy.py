@@ -107,9 +107,7 @@ def normalize_resolution_payload(raw: Any) -> ResolutionPayload | None:
 
     raw_validation_exit_code = raw.get("validation_exit_code")
     validation_exit_code = (
-        raw_validation_exit_code
-        if isinstance(raw_validation_exit_code, int)
-        else None
+        raw_validation_exit_code if isinstance(raw_validation_exit_code, int) else None
     )
 
     payload: ResolutionPayload = {

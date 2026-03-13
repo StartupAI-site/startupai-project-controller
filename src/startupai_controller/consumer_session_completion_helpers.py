@@ -246,7 +246,9 @@ def maybe_escalate_claimed_session_failure(
     try:
         escalation_reason = ""
         if codex_result:
-            escalation_reason = codex_result["blocker_reason"] or codex_result["summary"]
+            escalation_reason = (
+                codex_result["blocker_reason"] or codex_result["summary"]
+            )
         escalate_to_claude(
             issue_ref,
             cp_config,
