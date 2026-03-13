@@ -86,6 +86,39 @@ def test_run_github_command_fails_fast_on_timeout(
     assert calls["count"] == 1
 
 
+def test_run_github_command_records_request_stats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(github_http.time, "sleep", lambda *_: None)
+    calls = {"count": 0}
+
+    def fake_urlopen(request, timeout=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise urllib_error.URLError(OSError("error connecting to api.github.com"))
+        return _FakeResponse({"ok": True})
+
+    monkeypatch.setattr(github_http.urllib_request, "urlopen", fake_urlopen)
+    token = github_http.begin_request_stats()
+    try:
+        result = github_http.run_github_command(
+            ["api", "graphql", "-f", "query=query { viewer { login } }"],
+            operation_type="query",
+            timeout_seconds=8.0,
+            retry_delays=(1.0, 2.0, 4.0),
+        )
+    finally:
+        stats = github_http.end_request_stats(token)
+
+    assert result == '{"ok": true}'
+    assert stats.graphql == 2
+    assert stats.rest == 0
+    assert stats.retries == 1
+    assert stats.error_counts == {"network": 1}
+    assert stats.latency_le_250_ms >= 1
+
+
 def test_run_github_command_paginated_body_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

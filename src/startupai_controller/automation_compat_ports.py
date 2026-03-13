@@ -7,6 +7,7 @@ wrapping mechanics.
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -26,6 +27,36 @@ class _DelegatingPort:
 def _split_repo_slug(repo: str) -> tuple[str, str]:
     owner, repo_name = repo.split("/", 1)
     return owner, repo_name
+
+
+def _supports_keyword_argument(fn: Callable[..., Any], name: str) -> bool:
+    """Return True when one compatibility callable accepts a keyword argument."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == name:
+            return True
+    return False
+
+
+def _positional_parameter_count(fn: Callable[..., Any]) -> int | None:
+    """Return the number of declared positional parameters when introspectable."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    return sum(
+        parameter.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        for parameter in signature.parameters.values()
+    )
 
 
 def wrap_review_state_port(
@@ -72,12 +103,25 @@ def wrap_review_state_port(
         def comment_exists(self, repo: str, issue_number: int, marker: str) -> bool:
             if comment_exists is not None:
                 owner, repo_name = _split_repo_slug(repo)
+                kwargs = (
+                    {"gh_runner": gh_runner}
+                    if _supports_keyword_argument(comment_exists, "gh_runner")
+                    else {}
+                )
+                positional_count = _positional_parameter_count(comment_exists)
+                if positional_count is not None and positional_count <= 3:
+                    return comment_exists(
+                        repo,
+                        issue_number,
+                        marker,
+                        **kwargs,
+                    )
                 return comment_exists(
                     owner,
                     repo_name,
                     issue_number,
                     marker,
-                    gh_runner=gh_runner,
+                    **kwargs,
                 )
             return self._base.comment_exists(repo, issue_number, marker)
 
@@ -119,13 +163,27 @@ def wrap_board_port(
         def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
             if post_comment is not None:
                 owner, repo_name = _split_repo_slug(repo)
-                post_comment(
-                    owner,
-                    repo_name,
-                    issue_number,
-                    body,
-                    gh_runner=gh_runner,
+                kwargs = (
+                    {"gh_runner": gh_runner}
+                    if _supports_keyword_argument(post_comment, "gh_runner")
+                    else {}
                 )
+                positional_count = _positional_parameter_count(post_comment)
+                if positional_count is not None and positional_count <= 3:
+                    post_comment(
+                        repo,
+                        issue_number,
+                        body,
+                        **kwargs,
+                    )
+                else:
+                    post_comment(
+                        owner,
+                        repo_name,
+                        issue_number,
+                        body,
+                        **kwargs,
+                    )
                 return
             self._base.post_issue_comment(repo, issue_number, body)
 

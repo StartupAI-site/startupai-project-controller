@@ -113,6 +113,7 @@ def _cmd_report_slo(
         "reliability_metrics": data["reliability_metrics"],
         "context_cache_metrics": data["context_cache_metrics"],
         "worktree_reuse_metrics": data["worktree_reuse_metrics"],
+        "transport_metrics": data["transport_metrics"],
     }
     if as_json:
         print(json.dumps(report, indent=2))

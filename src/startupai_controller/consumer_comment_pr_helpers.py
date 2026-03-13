@@ -11,6 +11,7 @@ from startupai_controller.domain.models import OpenPullRequest, OpenPullRequestM
 from startupai_controller.domain.resolution_policy import ResolutionPayload
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.ready_flow import GitHubBundleView, GitHubRunnerFn
+from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.status_store import StatusStorePort
 from startupai_controller.runtime.wiring import GitHubRuntimeMemo
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
@@ -56,6 +57,25 @@ class BuildGitHubPortBundleFn(Protocol):
         github_memo: GitHubRuntimeMemo | None = None,
         gh_runner: GitHubRunnerFn | None = None,
     ) -> GitHubBundleView: ...
+
+
+def comment_checker_from_review_state_port(
+    review_state_port: ReviewStatePort,
+) -> CommentMarkerCheckerFn:
+    """Adapt ReviewStatePort.comment_exists to the consumer marker-checker shape."""
+
+    def checker(
+        owner: str,
+        repo: str,
+        number: int,
+        marker: str,
+        *,
+        gh_runner: GitHubRunnerFn | None = None,
+    ) -> bool:
+        del gh_runner
+        return review_state_port.comment_exists(f"{owner}/{repo}", number, marker)
+
+    return checker
 
 
 def post_consumer_claim_comment(

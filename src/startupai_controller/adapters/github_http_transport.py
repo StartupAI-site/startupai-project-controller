@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextvars import ContextVar, Token
 import json
 import os
@@ -104,6 +104,12 @@ class GitHubRequestStats:
 
     graphql: int = 0
     rest: int = 0
+    retries: int = 0
+    cli_fallbacks: int = 0
+    latency_le_250_ms: int = 0
+    latency_le_1000_ms: int = 0
+    latency_gt_1000_ms: int = 0
+    error_counts: dict[str, int] = field(default_factory=dict)
 
 
 def begin_request_stats() -> Token:
@@ -124,6 +130,40 @@ def _record_request(url: str) -> None:
         stats.graphql += 1
     else:
         stats.rest += 1
+
+
+def record_transport_retry() -> None:
+    stats = _REQUEST_STATS.get()
+    if stats is None:
+        return
+    stats.retries += 1
+
+
+def record_transport_cli_fallback() -> None:
+    stats = _REQUEST_STATS.get()
+    if stats is None:
+        return
+    stats.cli_fallbacks += 1
+
+
+def record_transport_latency(duration_seconds: float) -> None:
+    stats = _REQUEST_STATS.get()
+    if stats is None:
+        return
+    duration_ms = duration_seconds * 1000.0
+    if duration_ms <= 250.0:
+        stats.latency_le_250_ms += 1
+    elif duration_ms <= 1000.0:
+        stats.latency_le_1000_ms += 1
+    else:
+        stats.latency_gt_1000_ms += 1
+
+
+def record_transport_failure(failure_kind: str) -> None:
+    stats = _REQUEST_STATS.get()
+    if stats is None:
+        return
+    stats.error_counts[failure_kind] = stats.error_counts.get(failure_kind, 0) + 1
 
 
 def classify_failure_kind(detail: str, *, status_code: int | None = None) -> str:
@@ -328,6 +368,7 @@ def _read_json_response(
         body = json.dumps(payload).encode("utf-8")
 
     for attempt in range(len(retry_delays) + 1):
+        started_at = time.monotonic()
         try:
             _record_request(url)
             request = urllib_request.Request(
@@ -338,9 +379,11 @@ def _read_json_response(
             )
             with urllib_request.urlopen(request, timeout=timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
+                record_transport_latency(time.monotonic() - started_at)
                 try:
                     parsed = json.loads(raw) if raw else {}
                 except json.JSONDecodeError as error:
+                    record_transport_failure("invalid_response")
                     raise _transport_error(
                         operation_type=operation_type,
                         command_excerpt=command_excerpt,
@@ -348,11 +391,14 @@ def _read_json_response(
                     ) from error
                 return parsed, dict(response.headers.items())
         except urllib_error.HTTPError as error:
+            record_transport_latency(time.monotonic() - started_at)
             raw = error.read().decode("utf-8", errors="replace")
             detail = _http_error_detail(raw, error.code)
             failure_kind = classify_failure_kind(detail, status_code=error.code)
+            record_transport_failure(failure_kind)
             reset_at = _rate_limit_reset_at(dict(error.headers.items()))
             if failure_kind in RETRYABLE_FAILURE_KINDS and attempt < len(retry_delays):
+                record_transport_retry()
                 time.sleep(retry_delays[attempt])
                 continue
             raise _transport_error(
@@ -363,15 +409,20 @@ def _read_json_response(
                 rate_limit_reset_at=reset_at,
             ) from error
         except urllib_error.URLError as error:
+            record_transport_latency(time.monotonic() - started_at)
             reason = getattr(error, "reason", error)
             if isinstance(reason, (socket.timeout, TimeoutError)):
+                record_transport_failure("network")
                 raise _transport_error(
                     operation_type=operation_type,
                     command_excerpt=command_excerpt,
                     detail=f"timed out after {timeout_seconds:.1f}s",
                 ) from error
             detail = str(reason)
+            failure_kind = classify_failure_kind(detail, status_code=None)
+            record_transport_failure(failure_kind)
             if attempt < len(retry_delays):
+                record_transport_retry()
                 time.sleep(retry_delays[attempt])
                 continue
             raise _transport_error(
@@ -381,6 +432,8 @@ def _read_json_response(
                 status_code=None,
             ) from error
         except (TimeoutError, socket.timeout) as error:
+            record_transport_latency(time.monotonic() - started_at)
+            record_transport_failure("network")
             raise _transport_error(
                 operation_type=operation_type,
                 command_excerpt=command_excerpt,
@@ -388,8 +441,12 @@ def _read_json_response(
                 status_code=None,
             ) from error
         except OSError as error:
+            record_transport_latency(time.monotonic() - started_at)
             detail = str(getattr(error, "reason", error))
+            failure_kind = classify_failure_kind(detail, status_code=None)
+            record_transport_failure(failure_kind)
             if attempt < len(retry_delays):
+                record_transport_retry()
                 time.sleep(retry_delays[attempt])
                 continue
             raise _transport_error(

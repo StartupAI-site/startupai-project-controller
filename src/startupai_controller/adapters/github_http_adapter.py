@@ -13,5 +13,9 @@ from startupai_controller.adapters.github_http_transport import (  # noqa: F401
     GitHubTransportError,
     begin_request_stats,
     end_request_stats,
+    record_transport_cli_fallback,
+    record_transport_failure,
+    record_transport_latency,
+    record_transport_retry,
     run_github_command,
 )

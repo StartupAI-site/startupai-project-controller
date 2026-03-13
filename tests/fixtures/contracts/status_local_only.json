@@ -53,6 +53,36 @@
   "local_only": true,
   "oldest_deferred_action_age_seconds": "<positive-float>",
   "poll_interval_seconds": 180,
+  "transport_metrics": {
+    "windows": {
+      "1h": {
+        "cli_fallbacks": 0,
+        "error_counts": {},
+        "graphql_requests": 0,
+        "hours": 1,
+        "latency_gt_1000_ms": 0,
+        "latency_le_1000_ms": 0,
+        "latency_le_250_ms": 0,
+        "observations": 0,
+        "rest_requests": 0,
+        "retry_attempts": 0,
+        "total_requests": 0
+      },
+      "24h": {
+        "cli_fallbacks": 0,
+        "error_counts": {},
+        "graphql_requests": 0,
+        "hours": 24,
+        "latency_gt_1000_ms": 0,
+        "latency_le_1000_ms": 0,
+        "latency_le_250_ms": 0,
+        "observations": 0,
+        "rest_requests": 0,
+        "retry_attempts": 0,
+        "total_requests": 0
+      }
+    }
+  },
   "recent_sessions": [
     {
       "branch_reconcile_error": null,

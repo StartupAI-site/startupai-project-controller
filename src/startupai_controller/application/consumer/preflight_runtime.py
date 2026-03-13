@@ -71,6 +71,12 @@ class GitHubRequestStatsView(Protocol):
 
     graphql: int
     rest: int
+    retries: int
+    cli_fallbacks: int
+    latency_le_250_ms: int
+    latency_le_1000_ms: int
+    latency_gt_1000_ms: int
+    error_counts: dict[str, int]
 
 
 class ExecutePrepareCyclePhasesResult(Protocol):
@@ -594,6 +600,33 @@ def prepare_cycle(
                 "degraded": db.get_control_value(deps.control_key_degraded) == "true",
             },
         )
+        if any(
+            (
+                request_stats.graphql,
+                request_stats.rest,
+                request_stats.retries,
+                request_stats.cli_fallbacks,
+                request_stats.latency_le_250_ms,
+                request_stats.latency_le_1000_ms,
+                request_stats.latency_gt_1000_ms,
+                bool(request_stats.error_counts),
+            )
+        ):
+            deps.record_metric(
+                db,
+                config,
+                "github_transport_observation",
+                payload={
+                    "graphql_requests": request_stats.graphql,
+                    "rest_requests": request_stats.rest,
+                    "retry_attempts": request_stats.retries,
+                    "cli_fallbacks": request_stats.cli_fallbacks,
+                    "latency_le_250_ms": request_stats.latency_le_250_ms,
+                    "latency_le_1000_ms": request_stats.latency_le_1000_ms,
+                    "latency_gt_1000_ms": request_stats.latency_gt_1000_ms,
+                    "error_counts": dict(sorted(request_stats.error_counts.items())),
+                },
+            )
 
     return prepared_cycle_context_factory(
         cp_config=runtime.cp_config,

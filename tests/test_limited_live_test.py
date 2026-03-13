@@ -93,6 +93,7 @@ class FakeBackend:
         systemd_active: bool = False,
         local_processes: list[str] | None = None,
         failures: dict[tuple[str, bool | None], int] | None = None,
+        timeouts: dict[tuple[str, bool | None], bool] | None = None,
     ) -> None:
         self.clock = clock
         self.process = process
@@ -104,11 +105,20 @@ class FakeBackend:
         self._systemd_active = systemd_active
         self._local_processes = local_processes or []
         self.failures = failures or {}
+        self.timeouts = timeouts or {}
         self.commands: list[list[str]] = []
+        self.timeout_requests: list[tuple[list[str], float | None]] = []
 
-    def run(self, argv: list[str]) -> CommandResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
         self.commands.append(list(argv))
+        self.timeout_requests.append((list(argv), timeout_seconds))
         key = self._command_key(argv)
+        timed_out = self.timeouts.get(key, False)
         returncode = self.failures.get(key, 0)
         stdout = ""
         stderr = ""
@@ -142,8 +152,16 @@ class FakeBackend:
             stdout = "inactive\n"
         else:
             stdout = "{}\n"
+        if timed_out:
+            returncode = 124
+            stderr = (
+                f"command timed out after {timeout_seconds} seconds"
+                if timeout_seconds is not None
+                else "command timed out"
+            )
         if returncode != 0:
-            stderr = f"simulated failure for {key}\n"
+            if not stderr:
+                stderr = f"simulated failure for {key}\n"
         started_at = self.clock.now_utc().isoformat()
         completed_at = self.clock.now_utc().isoformat()
         return CommandResult(
@@ -153,6 +171,8 @@ class FakeBackend:
             stderr=stderr,
             started_at=started_at,
             completed_at=completed_at,
+            timed_out=timed_out,
+            timeout_seconds=timeout_seconds,
         )
 
     def start_consumer(self, argv: list[str], log_path: Path) -> FakeProcess:
@@ -242,6 +262,7 @@ def _config(tmp_path: Path) -> LimitedLiveTestConfig:
         shutdown_poll_seconds=2,
         drain_timeout_seconds=6,
         post_quiesce_exit_seconds=2,
+        command_timeout_seconds=60,
         consumer_interval_seconds=None,
         confirm_single_consumer=True,
         confirmation_note="verified no other host is running the consumer",
@@ -377,4 +398,50 @@ def test_limited_live_test_records_snapshot_failure_and_continues(
 
     assert summary.snapshot_failures
     assert any("tick" in item for item in summary.snapshot_failures)
+    assert (harness.run_dir / "summary.json").exists()
+
+
+def test_limited_live_test_preflight_timeout_is_fatal(tmp_path: Path) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload()],
+        status_full=[_status_payload()],
+        report_slo=[_report_payload()],
+        tick_payloads=[_tick_payload()],
+        timeouts={("status", False): True},
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    with pytest.raises(HarnessError, match="timed out"):
+        harness.run()
+
+
+def test_limited_live_test_records_snapshot_timeout_and_continues(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    active_status = _status_payload(
+        active_leases=1,
+        workers=[{"issue_ref": "crew#84"}],
+        recent_sessions=[{"issue_ref": "crew#84"}],
+        last_successful_github_mutation_at="2026-03-13T12:05:00+00:00",
+    )
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[active_status, active_status, _status_payload()],
+        status_full=[active_status, active_status],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        timeouts={("tick", None): True},
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert any("timed out after" in item for item in summary.snapshot_failures)
     assert (harness.run_dir / "summary.json").exists()

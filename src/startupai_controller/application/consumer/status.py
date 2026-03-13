@@ -59,6 +59,22 @@ class MetricWindowPayload(TypedDict):
     occupied_slots_per_ready_hour_ge_4: float | None
 
 
+class TransportWindowPayload(TypedDict):
+    """Rolling transport-observation summary emitted in status/report outputs."""
+
+    hours: int
+    observations: int
+    graphql_requests: int
+    rest_requests: int
+    total_requests: int
+    retry_attempts: int
+    cli_fallbacks: int
+    latency_le_250_ms: int
+    latency_le_1000_ms: int
+    latency_gt_1000_ms: int
+    error_counts: ObjectPayload
+
+
 class CurrentMainWorkflowsFn(Protocol):
     """Load the canonical workflow definitions/statuses for status reporting."""
 
@@ -131,6 +147,8 @@ class CollectedStatusRuntimeState:
     admission_summary: AdmissionSummaryPayload
     throughput_1h: MetricWindowPayload
     throughput_24h: MetricWindowPayload
+    transport_1h: TransportWindowPayload
+    transport_24h: TransportWindowPayload
 
 
 @dataclass(frozen=True)
@@ -430,6 +448,62 @@ def _worktree_reuse_status_payload(
     }
 
 
+def _transport_window_payload(
+    db: StatusStorePort,
+    *,
+    hours: int,
+    now: datetime,
+) -> TransportWindowPayload:
+    """Summarize persisted transport observations over a rolling window."""
+    since = now - timedelta(hours=hours)
+    observations = db.metric_events_since(
+        since,
+        event_types=("github_transport_observation",),
+    )
+    error_counts: dict[str, int] = {}
+    graphql_requests = 0
+    rest_requests = 0
+    retry_attempts = 0
+    cli_fallbacks = 0
+    latency_le_250_ms = 0
+    latency_le_1000_ms = 0
+    latency_gt_1000_ms = 0
+    for observation in observations:
+        payload = observation.payload
+        graphql_requests += int(payload.get("graphql_requests", 0) or 0)
+        rest_requests += int(payload.get("rest_requests", 0) or 0)
+        retry_attempts += int(payload.get("retry_attempts", 0) or 0)
+        cli_fallbacks += int(payload.get("cli_fallbacks", 0) or 0)
+        latency_le_250_ms += int(payload.get("latency_le_250_ms", 0) or 0)
+        latency_le_1000_ms += int(payload.get("latency_le_1000_ms", 0) or 0)
+        latency_gt_1000_ms += int(payload.get("latency_gt_1000_ms", 0) or 0)
+        raw_error_counts = payload.get("error_counts", {})
+        if isinstance(raw_error_counts, dict):
+            for key, value in raw_error_counts.items():
+                error_counts[str(key)] = error_counts.get(str(key), 0) + int(value or 0)
+    return {
+        "hours": hours,
+        "observations": len(observations),
+        "graphql_requests": graphql_requests,
+        "rest_requests": rest_requests,
+        "total_requests": graphql_requests + rest_requests,
+        "retry_attempts": retry_attempts,
+        "cli_fallbacks": cli_fallbacks,
+        "latency_le_250_ms": latency_le_250_ms,
+        "latency_le_1000_ms": latency_le_1000_ms,
+        "latency_gt_1000_ms": latency_gt_1000_ms,
+        "error_counts": dict(sorted(error_counts.items())),
+    }
+
+
+def _transport_status_payload(
+    transport_1h: TransportWindowPayload,
+    transport_24h: TransportWindowPayload,
+) -> ObjectPayload:
+    """Render transport-observation payload for status JSON."""
+    return {"windows": {"1h": transport_1h, "24h": transport_24h}}
+
+
 def _recent_session_status_payload(
     session: SessionInfo,
     *,
@@ -542,6 +616,8 @@ def _collect_status_runtime_state(
         now=status_now,
         parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
     )
+    transport_1h = _transport_window_payload(db, hours=1, now=status_now)
+    transport_24h = _transport_window_payload(db, hours=24, now=status_now)
 
     return CollectedStatusRuntimeState(
         leases=leases,
@@ -556,6 +632,8 @@ def _collect_status_runtime_state(
         admission_summary=admission_summary,
         throughput_1h=throughput_1h,
         throughput_24h=throughput_24h,
+        transport_1h=transport_1h,
+        transport_24h=transport_24h,
     )
 
 
@@ -580,6 +658,8 @@ def _build_status_payload(
     admission_summary: AdmissionSummaryPayload,
     throughput_1h: MetricWindowPayload,
     throughput_24h: MetricWindowPayload,
+    transport_1h: TransportWindowPayload,
+    transport_24h: TransportWindowPayload,
     local_only: bool,
     deps: CollectStatusPayloadDeps,
 ) -> StatusPayload:
@@ -639,6 +719,7 @@ def _build_status_payload(
         "worktree_reuse_metrics": _worktree_reuse_status_payload(
             throughput_1h, throughput_24h
         ),
+        "transport_metrics": _transport_status_payload(transport_1h, transport_24h),
         "review_summary": review_summary,
         "review_queue": review_queue,
         "admission": admission_summary,
@@ -708,4 +789,6 @@ def collect_status_payload(
         admission_summary=status_state.admission_summary,
         throughput_1h=status_state.throughput_1h,
         throughput_24h=status_state.throughput_24h,
+        transport_1h=status_state.transport_1h,
+        transport_24h=status_state.transport_24h,
     )

@@ -134,7 +134,7 @@ class ReconcileActiveRepairReviewItemsFn(Protocol):
         consumer_config: ConsumerConfig,
         critical_path_config: CriticalPathConfig,
         *,
-        active_repair_issue_refs: set[str],
+        active_repair_sessions_by_issue: dict[str, str],
         review_state_port: ReviewStatePort,
         board_port: BoardMutationPort,
         board_snapshot: CycleBoardSnapshot | None,
@@ -292,8 +292,10 @@ def reconcile_board_truth(
     store = session_store
     active_workers = store.active_workers()
     active_issue_refs = {worker.issue_ref for worker in active_workers}
-    active_repair_issue_refs = {
-        worker.issue_ref for worker in active_workers if worker.session_kind == "repair"
+    active_repair_sessions_by_issue = {
+        worker.issue_ref: worker.id
+        for worker in active_workers
+        if worker.session_kind == "repair"
     }
     moved_ready: list[str] = []
     moved_in_progress: list[str] = []
@@ -304,7 +306,7 @@ def reconcile_board_truth(
         deps.reconcile_active_repair_review_items(
             consumer_config,
             critical_path_config,
-            active_repair_issue_refs=active_repair_issue_refs,
+            active_repair_sessions_by_issue=active_repair_sessions_by_issue,
             review_state_port=review_state_port,
             board_port=board_port,
             board_snapshot=board_snapshot,

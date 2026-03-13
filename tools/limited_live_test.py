@@ -68,6 +68,8 @@ class CommandResult:
     stderr: str
     started_at: str
     completed_at: str
+    timed_out: bool = False
+    timeout_seconds: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -115,6 +117,7 @@ class LimitedLiveTestConfig:
     shutdown_poll_seconds: int
     drain_timeout_seconds: int
     post_quiesce_exit_seconds: int
+    command_timeout_seconds: int
     consumer_interval_seconds: int | None
     confirm_single_consumer: bool
     confirmation_note: str
@@ -161,14 +164,41 @@ class SubprocessBackend:
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
 
-    def run(self, argv: list[str]) -> CommandResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
         started_at = self._clock.now_utc().isoformat()
-        completed = subprocess.run(
-            argv,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            completed_at = self._clock.now_utc().isoformat()
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            timeout_note = (
+                f"command timed out after {timeout_seconds} seconds"
+                if timeout_seconds is not None
+                else "command timed out"
+            )
+            stderr = f"{stderr}\n{timeout_note}".strip()
+            return CommandResult(
+                argv=list(argv),
+                returncode=124,
+                stdout=stdout,
+                stderr=stderr,
+                started_at=started_at,
+                completed_at=completed_at,
+                timed_out=True,
+                timeout_seconds=timeout_seconds,
+            )
         completed_at = self._clock.now_utc().isoformat()
         return CommandResult(
             argv=list(argv),
@@ -177,6 +207,7 @@ class SubprocessBackend:
             stderr=completed.stderr,
             started_at=started_at,
             completed_at=completed_at,
+            timeout_seconds=timeout_seconds,
         )
 
     def start_consumer(self, argv: list[str], log_path: Path) -> ManagedProcess:
@@ -308,13 +339,16 @@ class LimitedLiveTestHarness:
             raise HarnessError("Local startupai-consumer systemd unit is active.")
         if self.backend.local_consumer_processes():
             raise HarnessError("Another local board_consumer run process is active.")
-        self._require_ok(self.backend.run(["gh", "auth", "status"]), "gh auth status")
         self._require_ok(
-            self.backend.run(self._consumer_status_command(local_only=False)),
+            self._run_aux_command(["gh", "auth", "status"]),
+            "gh auth status",
+        )
+        self._require_ok(
+            self._run_aux_command(self._consumer_status_command(local_only=False)),
             "board_consumer status --json",
         )
         self._require_ok(
-            self.backend.run(self._consumer_one_shot_command()),
+            self._run_aux_command(self._consumer_one_shot_command()),
             "board_consumer one-shot --dry-run",
         )
 
@@ -379,7 +413,7 @@ class LimitedLiveTestHarness:
             self._shutdown_mode = "unexpected-exit"
             return
         drain_requested_at = self.clock.monotonic()
-        drain_result = self.backend.run(self._consumer_drain_command())
+        drain_result = self._run_aux_command(self._consumer_drain_command())
         if not drain_result.ok:
             self.snapshot_failures.append("drain command failed")
             self.issues.append("Drain request failed; forcing shutdown escalation.")
@@ -510,7 +544,7 @@ class LimitedLiveTestHarness:
         reason: str | None = None,
     ) -> SnapshotRecord:
         directory.mkdir(parents=True, exist_ok=True)
-        result = self.backend.run(command)
+        result = self._run_aux_command(command)
         base = directory / name
         payload = _parse_json(result.stdout)
         if payload is not None:
@@ -527,6 +561,8 @@ class LimitedLiveTestHarness:
                 "started_at": result.started_at,
                 "completed_at": result.completed_at,
                 "reason": reason,
+                "timed_out": result.timed_out,
+                "timeout_seconds": result.timeout_seconds,
             },
         )
         record = SnapshotRecord(
@@ -546,6 +582,8 @@ class LimitedLiveTestHarness:
             self.slo_records.append(record)
         if result.returncode != 0:
             message = f"{name} failed with exit code {result.returncode}"
+            if result.timed_out:
+                message = f"{name} timed out after {result.timeout_seconds} seconds"
             self.snapshot_failures.append(message)
             self.issues.append(message)
         return record
@@ -818,15 +856,25 @@ class LimitedLiveTestHarness:
     def _require_ok(self, result: CommandResult, label: str) -> None:
         if result.ok:
             return
+        if result.timed_out:
+            raise HarnessError(
+                f"{label} timed out after {result.timeout_seconds} seconds."
+            )
         raise HarnessError(
             f"{label} failed with exit code {result.returncode}: {result.stderr or result.stdout}"
         )
 
     def _git_commit(self) -> str | None:
-        result = self.backend.run(["git", "rev-parse", "HEAD"])
+        result = self._run_aux_command(["git", "rev-parse", "HEAD"])
         if result.ok:
             return result.stdout.strip()
         return None
+
+    def _run_aux_command(self, argv: list[str]) -> CommandResult:
+        return self.backend.run(
+            argv,
+            timeout_seconds=float(self.config.command_timeout_seconds),
+        )
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -968,6 +1016,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra wait after local quiescence before escalation.",
     )
     parser.add_argument(
+        "--command-timeout-seconds",
+        type=int,
+        default=300,
+        help="Timeout for auxiliary snapshot and preflight commands.",
+    )
+    parser.add_argument(
         "--consumer-interval-seconds",
         type=int,
         default=None,
@@ -998,6 +1052,7 @@ def config_from_args(args: argparse.Namespace) -> LimitedLiveTestConfig:
         shutdown_poll_seconds=args.shutdown_poll_seconds,
         drain_timeout_seconds=args.drain_timeout_seconds,
         post_quiesce_exit_seconds=args.post_quiesce_exit_seconds,
+        command_timeout_seconds=args.command_timeout_seconds,
         consumer_interval_seconds=args.consumer_interval_seconds,
         confirm_single_consumer=args.confirm_single_consumer,
         confirmation_note=args.confirmation_note,

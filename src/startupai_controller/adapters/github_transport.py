@@ -8,6 +8,10 @@ from collections.abc import Callable, Sequence
 
 from startupai_controller.adapters.github_http_adapter import (
     GitHubTransportError,
+    record_transport_cli_fallback,
+    record_transport_failure,
+    record_transport_latency,
+    record_transport_retry,
     run_github_command,
 )
 from startupai_controller.gh_cli_timeout import gh_command_timeout_seconds
@@ -137,15 +141,21 @@ def _run_gh(
         ) from error
 
     gh_command = ["gh"] + args
+    record_transport_cli_fallback()
     for attempt in range(len(_GH_RETRY_DELAYS_SECONDS) + 1):
+        started_at = time.monotonic()
         try:
-            return subprocess.check_output(
+            output = subprocess.check_output(
                 gh_command,
                 text=True,
                 stderr=subprocess.STDOUT,
                 timeout=_GH_COMMAND_TIMEOUT_SECONDS,
             )
+            record_transport_latency(time.monotonic() - started_at)
+            return output
         except OSError as error:
+            record_transport_latency(time.monotonic() - started_at)
+            record_transport_failure("network")
             raise GhCommandError(
                 operation_type=operation_type,
                 failure_kind="network",
@@ -153,6 +163,8 @@ def _run_gh(
                 detail=str(error),
             ) from error
         except subprocess.TimeoutExpired as error:
+            record_transport_latency(time.monotonic() - started_at)
+            record_transport_failure("network")
             detail = f"timed out after {_GH_COMMAND_TIMEOUT_SECONDS:.1f}s"
             raise GhCommandError(
                 operation_type=operation_type,
@@ -161,10 +173,13 @@ def _run_gh(
                 detail=detail,
             ) from error
         except subprocess.CalledProcessError as error:
+            record_transport_latency(time.monotonic() - started_at)
             output = error.output.strip()
             failure_kind = _classify_gh_failure_kind(output)
+            record_transport_failure(failure_kind)
             is_retryable = failure_kind in {"network", "rate_limit", "github_outage"}
             if is_retryable and attempt < len(_GH_RETRY_DELAYS_SECONDS):
+                record_transport_retry()
                 time.sleep(_GH_RETRY_DELAYS_SECONDS[attempt])
                 continue
             raise GhCommandError(
