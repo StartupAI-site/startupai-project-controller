@@ -32,6 +32,8 @@ HOTSPOT_MODULES = {
     / "consumer_operational_wiring.py",
     "startupai_controller.consumer_prepared_cycle_wiring": SRC_ROOT
     / "consumer_prepared_cycle_wiring.py",
+    "startupai_controller.consumer_claimed_session_wiring": SRC_ROOT
+    / "consumer_claimed_session_wiring.py",
     "startupai_controller.consumer_review_queue_preparation_processing": SRC_ROOT
     / "consumer_review_queue_preparation_processing.py",
     "startupai_controller.application.automation.ready_wiring": APPLICATION_ROOT
@@ -494,6 +496,28 @@ def test_consumer_operational_wiring_routes_prepared_cycle_through_wiring_module
     assert offending == [], (
         "consumer_operational_wiring.py still owns prepared-cycle wiring imports: "
         f"{offending}"
+    )
+
+
+def test_consumer_prepared_cycle_wiring_routes_claimed_session_through_module() -> None:
+    imported = _controller_runtime_imports(
+        SRC_ROOT / "consumer_prepared_cycle_wiring.py"
+    )
+    assert (
+        "startupai_controller.consumer_claimed_session_wiring" in imported
+    ), "consumer_prepared_cycle_wiring.py should depend on consumer_claimed_session_wiring"
+    offending = sorted(
+        module
+        for module in imported
+        if module
+        in {
+            "startupai_controller.consumer_session_completion_helpers",
+            "startupai_controller.consumer_session_execution_wiring",
+        }
+    )
+    assert offending == [], (
+        "consumer_prepared_cycle_wiring.py still owns claimed-session execution "
+        f"imports directly: {offending}"
     )
 
 
