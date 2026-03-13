@@ -32,6 +32,8 @@ HOTSPOT_MODULES = {
     / "consumer_operational_wiring.py",
     "startupai_controller.consumer_prepared_cycle_wiring": SRC_ROOT
     / "consumer_prepared_cycle_wiring.py",
+    "startupai_controller.consumer_review_queue_preparation_processing": SRC_ROOT
+    / "consumer_review_queue_preparation_processing.py",
     "startupai_controller.application.automation.ready_wiring": APPLICATION_ROOT
     / "automation"
     / "ready_wiring.py",
@@ -527,6 +529,33 @@ def test_consumer_review_queue_processing_routes_due_drain_through_module() -> N
     assert (
         "startupai_controller.consumer_review_queue_drain_processing" in imported
     ), "consumer_review_queue_processing.py should depend on consumer_review_queue_drain_processing"
+
+
+def test_consumer_review_queue_processing_routes_preparation_through_module() -> None:
+    imported = _controller_runtime_imports(
+        SRC_ROOT / "consumer_review_queue_processing.py"
+    )
+    assert (
+        "startupai_controller.consumer_review_queue_preparation_processing" in imported
+    ), (
+        "consumer_review_queue_processing.py should depend on "
+        "consumer_review_queue_preparation_processing"
+    )
+    assert "startupai_controller.domain.verdict_policy" not in imported, (
+        "consumer_review_queue_processing.py still owns verdict-backfill policy "
+        "imports directly"
+    )
+    source = _source_text(SRC_ROOT / "consumer_review_queue_processing.py")
+    forbidden_defs = [
+        "def build_review_snapshots_for_queue_entries(",
+        "def backfill_review_verdicts_from_snapshots(",
+        "def pre_backfill_verdicts_for_due_prs(",
+    ]
+    offending = [token for token in forbidden_defs if token in source]
+    assert offending == [], (
+        "consumer_review_queue_processing.py still defines preparation helper "
+        f"entry points inline: {offending}"
+    )
 
 
 def test_consumer_support_wiring_routes_runtime_control_helpers_through_module() -> (
