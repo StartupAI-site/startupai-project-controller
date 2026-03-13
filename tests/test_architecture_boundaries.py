@@ -239,6 +239,37 @@ def test_control_plane_rescue_routes_review_queue_through_wiring_module() -> Non
     ), "control_plane_rescue.py should depend on review-queue wiring"
 
 
+def test_control_plane_rescue_routes_deferred_actions_through_wiring_module() -> None:
+    imported = _controller_runtime_imports(SRC_ROOT / "control_plane_rescue.py")
+    assert (
+        "startupai_controller.consumer_deferred_action_helpers" not in imported
+    ), "control_plane_rescue.py still imports deferred-action helpers directly"
+    assert (
+        "startupai_controller.consumer_deferred_action_wiring" in imported
+    ), "control_plane_rescue.py should depend on deferred-action wiring"
+
+
+def test_consumer_deferred_action_helpers_stay_shell_agnostic() -> None:
+    imported = _controller_runtime_imports(
+        SRC_ROOT / "consumer_deferred_action_helpers.py"
+    )
+    offending = sorted(
+        module
+        for module in imported
+        if module
+        in {
+            "startupai_controller.consumer_automation_bridge",
+            "startupai_controller.consumer_board_state_helpers",
+            "startupai_controller.consumer_codex_comment_wiring",
+            "startupai_controller.board_graph",
+        }
+    )
+    assert offending == [], (
+        "consumer_deferred_action_helpers.py still owns shell wiring imports: "
+        f"{offending}"
+    )
+
+
 def test_board_automation_does_not_cross_into_consumer_or_control_plane_stacks() -> (
     None
 ):
