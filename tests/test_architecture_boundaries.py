@@ -1056,8 +1056,6 @@ KNOWN_SHIM_IMPORTERS = {}
 # When a PR shrinks a shim, update the baseline downward in the same PR.
 SHIM_SIZE_BASELINES = {
     "board_io.py": 1461,
-    "consumer_db.py": 11,
-    "github_http.py": 11,
 }
 
 SHIM_FILENAMES = {m.rsplit(".", 1)[-1] + ".py" for m in SHIM_MODULES}
@@ -1094,3 +1092,26 @@ def test_shim_size_ratchet() -> None:
             "Shims must shrink monotonically. If you shrank it, update "
             "SHIM_SIZE_BASELINES in this test."
         )
+
+
+def test_consumer_db_and_github_http_shims_are_absent() -> None:
+    assert not (SRC_ROOT / "consumer_db.py").exists()
+    assert not (SRC_ROOT / "github_http.py").exists()
+
+
+def test_no_runtime_or_test_imports_consumer_db_or_github_http_shims() -> None:
+    forbidden = {
+        "startupai_controller.consumer_db",
+        "startupai_controller.github_http",
+    }
+    violations: dict[str, set[str]] = {}
+    for root in (SRC_ROOT, REPO_ROOT / "tests"):
+        for path in sorted(root.rglob("*.py")):
+            imported = _runtime_imported_modules(path)
+            hits = imported & forbidden
+            if hits:
+                violations[str(path.relative_to(REPO_ROOT))] = hits
+    assert violations == {}, (
+        "consumer_db/github_http shim imports remain after deletion: "
+        f"{violations}"
+    )

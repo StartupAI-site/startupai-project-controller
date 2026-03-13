@@ -10,7 +10,7 @@ from urllib import error as urllib_error
 
 import pytest
 
-import startupai_controller.github_http as github_http
+import startupai_controller.adapters.github_http_transport as github_http
 
 
 class _FakeResponse:

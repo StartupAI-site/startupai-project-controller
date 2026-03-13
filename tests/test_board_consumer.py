@@ -131,12 +131,12 @@ from startupai_controller.domain.review_queue_policy import (
 from startupai_controller.consumer_comment_pr_wiring import (
     extract_acceptance_criteria as _extract_acceptance_criteria,
 )
-from startupai_controller.board_io import (
-    CycleBoardSnapshot,
-    GhCommandError,
+from startupai_controller.adapters.github_transport import GhCommandError
+from startupai_controller.adapters.github_types import (
     _ProjectItemSnapshot,
+    CycleBoardSnapshot,
 )
-from startupai_controller.consumer_db import ConsumerDB
+from startupai_controller.adapters.consumer_db_store import ConsumerDB
 from startupai_controller.promote_ready import BoardInfo
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,

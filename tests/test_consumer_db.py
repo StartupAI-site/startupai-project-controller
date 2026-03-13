@@ -1,4 +1,4 @@
-"""Unit tests for consumer_db module.
+"""Unit tests for the canonical consumer DB adapter.
 
 Real SQLite with tmp_path -- no mocks needed.
 """
@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from startupai_controller.consumer_db import (
+from startupai_controller.adapters.consumer_db_store import (
     ConsumerDB,
-    SessionInfo,
     VALID_SESSION_STATUSES,
 )
+from startupai_controller.domain.models import SessionInfo
 
 # -- Fixtures -----------------------------------------------------------------
 
