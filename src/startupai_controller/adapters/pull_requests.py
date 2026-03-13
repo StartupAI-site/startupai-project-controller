@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import json
-import time
 from typing import cast
 
 import startupai_controller.adapters.pull_request_batch_queries as _pull_request_batch_queries
 import startupai_controller.adapters.pull_request_board_helpers as _pull_request_board_helpers
+import startupai_controller.adapters.pull_request_compat as _pull_request_compat
 import startupai_controller.adapters.pull_request_query_helpers as _pull_request_query_helpers
 from startupai_controller.adapters.github_base import GitHubAdapterBase
 from startupai_controller.adapters import (
@@ -66,13 +66,6 @@ class _PullRequestListItem:
     is_draft: bool
     body: str
     author: str
-
-
-_REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS = 900
-_required_status_checks_ttl_cache: dict[
-    tuple[str, str],
-    tuple[float, set[str]],
-] = {}
 
 
 def _is_copilot_coding_agent_actor(login: str) -> bool:
@@ -543,11 +536,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
     def has_copilot_review_signal(self, pr_repo: str, pr_number: int) -> bool:
         payload = self._query_pull_request_view_payload(pr_repo, pr_number)
-        from startupai_controller.adapters.github_cli import (
-            has_copilot_review_signal_from_payload as _compat_has_copilot_review_signal_from_payload,
-        )
-
-        return _compat_has_copilot_review_signal_from_payload(payload)
+        return has_copilot_review_signal_from_payload(payload)
 
     def get_gate_status(self, pr_repo: str, pr_number: int) -> PrGateStatus:
         payload = self._query_pull_request_view_payload(pr_repo, pr_number)
@@ -588,57 +577,30 @@ query($owner: String!, $repo: String!, $number: Int!) {
     def enable_automerge(
         self, pr_repo: str, pr_number: int, *, delete_branch: bool = False
     ) -> str:
-        args = ["pr", "merge", str(pr_number), "--repo", pr_repo, "--auto", "--squash"]
-        if delete_branch:
-            args.append("--delete-branch")
-        _run_gh(
-            args,
+        return _pull_request_compat.enable_pull_request_automerge(
+            pr_repo,
+            pr_number,
+            delete_branch=delete_branch,
             gh_runner=self._gh_runner,
-            operation_type="automerge",
         )
-        for _attempt in range(3):
-            time.sleep(1.0)
-            try:
-                payload = self._gh_json(
-                    [
-                        "pr",
-                        "view",
-                        str(pr_number),
-                        "--repo",
-                        pr_repo,
-                        "--json",
-                        "autoMergeRequest",
-                    ],
-                    error_message=(
-                        f"Failed querying automerge state for {pr_repo}#{pr_number}: invalid JSON."
-                    ),
-                )
-                if (
-                    isinstance(payload, dict)
-                    and payload.get("autoMergeRequest") is not None
-                ):
-                    return "confirmed"
-            except GhQueryError:
-                continue
-        return "pending"
 
     def rerun_failed_check(self, pr_repo: str, check_name: str, run_id: int) -> bool:
         del check_name  # run id is the actual rerun handle
         try:
-            _run_gh(
-                ["run", "rerun", str(run_id), "--repo", pr_repo],
+            _pull_request_compat.rerun_actions_run(
+                pr_repo,
+                run_id,
                 gh_runner=self._gh_runner,
-                operation_type="check_rerun",
             )
             return True
         except Exception:
             return False
 
     def update_branch(self, pr_repo: str, pr_number: int) -> None:
-        _run_gh(
-            ["pr", "update-branch", str(pr_number), "--repo", pr_repo],
+        _pull_request_compat.update_pull_request_branch(
+            pr_repo,
+            pr_number,
             gh_runner=self._gh_runner,
-            operation_type="mutation",
         )
 
     def is_pull_request_open(self, pr_repo: str, pr_number: int) -> bool:
@@ -684,7 +646,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
         *,
         comment: str | None = None,
     ) -> None:
-        close_pull_request(
+        _pull_request_compat.close_pull_request(
             pr_repo,
             pr_number,
             comment=comment,
@@ -793,294 +755,28 @@ _list_project_items = _pull_request_board_helpers._list_project_items
 
 GitHubCliAdapter = GitHubPullRequestAdapter
 
-
-def query_open_pull_requests(
-    pr_repo: str,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> list[OpenPullRequest]:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    return adapter.list_open_prs(pr_repo)
-
-
-def _post_comment(
-    owner: str,
-    repo: str,
-    number: int,
-    body: str,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Compatibility wrapper implemented on the adapter-owned comment path."""
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    adapter._post_issue_comment(owner, repo, number, body)
-
-
-def query_pull_request_view_payload(
-    pr_repo: str,
-    pr_number: int,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> PullRequestViewPayload:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    return adapter._query_pull_request_view_payload(pr_repo, pr_number)
-
-
-def query_pull_request_view_payloads(
-    pr_repo: str,
-    pr_numbers: Sequence[int],
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> dict[int, PullRequestViewPayload]:
-    """Compatibility wrapper for batched PR payload reads."""
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    return adapter._query_pull_request_view_payloads(pr_repo, pr_numbers)
-
-
-def memoized_query_pull_request_view_payloads(
-    memo: CycleGitHubMemo,
-    pr_repo: str,
-    pr_numbers: Sequence[int],
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> dict[int, PullRequestViewPayload]:
-    """Compatibility wrapper for memoized batched PR payload reads."""
-    adapter = GitHubCliAdapter(
-        project_owner="",
-        project_number=0,
-        github_memo=memo,
-        gh_runner=gh_runner,
-    )
-    return adapter._memoized_pull_request_view_payloads(pr_repo, pr_numbers)
-
-
-def query_pull_request_state_probes(
-    pr_repo: str,
-    pr_numbers: Sequence[int],
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> dict[int, _PullRequestStateProbe]:
-    """Compatibility wrapper for batched PR state-probe reads."""
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    return adapter._query_pull_request_state_probes(pr_repo, pr_numbers)
-
-
-def memoized_query_pull_request_state_probes(
-    memo: CycleGitHubMemo,
-    pr_repo: str,
-    pr_numbers: Sequence[int],
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> dict[int, _PullRequestStateProbe]:
-    """Compatibility wrapper for memoized batched PR state-probe reads."""
-    adapter = GitHubCliAdapter(
-        project_owner="",
-        project_number=0,
-        github_memo=memo,
-        gh_runner=gh_runner,
-    )
-    return adapter._memoized_pull_request_state_probes(pr_repo, pr_numbers)
-
-
-def query_latest_codex_verdict(
-    pr_repo: str,
-    pr_number: int,
-    *,
-    trusted_actors: set[str] | frozenset[str] | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> CodexReviewVerdict | None:
-    """Compatibility wrapper implemented on the adapter-owned PR payload path."""
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    payload = adapter._query_pull_request_view_payload(pr_repo, pr_number)
-    return latest_codex_verdict_from_payload(
-        payload,
-        trusted_actors=trusted_actors,
-    )
-
-
-def query_required_status_checks(
-    pr_repo: str,
-    base_ref_name: str = "main",
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> set[str]:
-    """Compatibility wrapper with process TTL cache and stale-on-error fallback."""
-    cache_key = (pr_repo, base_ref_name)
-    cached = _required_status_checks_ttl_cache.get(cache_key)
-    now_monotonic = time.monotonic()
-    if cached is not None:
-        expires_at, required = cached
-        if expires_at > now_monotonic:
-            return set(required)
-
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    try:
-        required = adapter._query_required_status_checks(pr_repo, base_ref_name)
-    except GhQueryError:
-        if cached is not None:
-            return set(cached[1])
-        raise
-
-    _required_status_checks_ttl_cache[cache_key] = (
-        now_monotonic + _REQUIRED_STATUS_CHECKS_CACHE_TTL_SECONDS,
-        set(required),
-    )
-    return set(required)
-
-
-def clear_required_status_checks_cache() -> None:
-    """Clear the process-local required-check TTL cache."""
-    _required_status_checks_ttl_cache.clear()
-
-
-def query_closing_issues(
-    pr_owner: str,
-    pr_repo: str,
-    pr_number: int,
-    config: CriticalPathConfig,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> list[LinkedIssue]:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    adapter = GitHubCliAdapter(
-        project_owner="",
-        project_number=0,
-        config=config,
-        gh_runner=gh_runner,
-    )
-    refs = adapter._query_closing_issue_refs(f"{pr_owner}/{pr_repo}", pr_number)
-    issues: list[LinkedIssue] = []
-    for ref in refs:
-        parsed = parse_issue_ref(ref)
-        repo_slug = config.issue_prefixes.get(parsed.prefix)
-        if not repo_slug:
-            continue
-        owner, repo = repo_slug.split("/", maxsplit=1)
-        issues.append(
-            LinkedIssue(
-                owner=owner,
-                repo=repo,
-                number=parsed.number,
-                ref=ref,
-            )
-        )
-    return issues
-
-
-def close_pull_request(
-    pr_repo: str,
-    pr_number: int,
-    *,
-    comment: str | None = None,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    args = ["pr", "close", str(pr_number), "--repo", pr_repo]
-    if comment is not None:
-        args.extend(["--comment", comment])
-    _run_gh(
-        args,
-        gh_runner=gh_runner,
-        operation_type="mutation",
-    )
-
-
-def close_issue(
-    owner: str,
-    repo: str,
-    number: int,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    _run_gh(
-        [
-            "api",
-            f"repos/{owner}/{repo}/issues/{number}",
-            "-X",
-            "PATCH",
-            "-f",
-            "state=closed",
-        ],
-        gh_runner=gh_runner,
-        operation_type="mutation",
-    )
-
-
-def rerun_actions_run(
-    pr_repo: str,
-    run_id: int,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    _run_gh(
-        ["run", "rerun", str(run_id), "--repo", pr_repo],
-        gh_runner=gh_runner,
-        operation_type="check_rerun",
-    )
-
-
-def update_pull_request_branch(
-    pr_repo: str,
-    pr_number: int,
-    *,
-    gh_runner: Callable[..., str] | None = None,
-) -> None:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    _run_gh(
-        ["pr", "update-branch", str(pr_number), "--repo", pr_repo],
-        gh_runner=gh_runner,
-        operation_type="mutation",
-    )
-
-
-def enable_pull_request_automerge(
-    pr_repo: str,
-    pr_number: int,
-    *,
-    delete_branch: bool = False,
-    confirm_retries: int = 3,
-    confirm_delay_seconds: float = 1.0,
-    gh_runner: Callable[..., str] | None = None,
-) -> str:
-    """Compatibility wrapper implemented on the adapter-owned mechanism."""
-    args = ["pr", "merge", str(pr_number), "--repo", pr_repo, "--auto", "--squash"]
-    if delete_branch:
-        args.append("--delete-branch")
-    _run_gh(
-        args,
-        gh_runner=gh_runner,
-        operation_type="automerge",
-    )
-    adapter = GitHubCliAdapter(project_owner="", project_number=0, gh_runner=gh_runner)
-    for _attempt in range(confirm_retries):
-        time.sleep(confirm_delay_seconds)
-        try:
-            payload = adapter._gh_json(
-                [
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--repo",
-                    pr_repo,
-                    "--json",
-                    "autoMergeRequest",
-                ],
-                error_message=(
-                    f"Failed querying automerge state for {pr_repo}#{pr_number}: invalid JSON."
-                ),
-            )
-            if (
-                isinstance(payload, dict)
-                and payload.get("autoMergeRequest") is not None
-            ):
-                return "confirmed"
-        except GhQueryError:
-            continue
-    return "pending"
+query_open_pull_requests = _pull_request_compat.query_open_pull_requests
+_post_comment = _pull_request_compat._post_comment
+query_pull_request_view_payload = _pull_request_compat.query_pull_request_view_payload
+query_pull_request_view_payloads = _pull_request_compat.query_pull_request_view_payloads
+memoized_query_pull_request_view_payloads = (
+    _pull_request_compat.memoized_query_pull_request_view_payloads
+)
+query_pull_request_state_probes = _pull_request_compat.query_pull_request_state_probes
+memoized_query_pull_request_state_probes = (
+    _pull_request_compat.memoized_query_pull_request_state_probes
+)
+query_latest_codex_verdict = _pull_request_compat.query_latest_codex_verdict
+query_required_status_checks = _pull_request_compat.query_required_status_checks
+clear_required_status_checks_cache = (
+    _pull_request_compat.clear_required_status_checks_cache
+)
+query_closing_issues = _pull_request_compat.query_closing_issues
+close_pull_request = _pull_request_compat.close_pull_request
+close_issue = _pull_request_compat.close_issue
+rerun_actions_run = _pull_request_compat.rerun_actions_run
+update_pull_request_branch = _pull_request_compat.update_pull_request_branch
+enable_pull_request_automerge = _pull_request_compat.enable_pull_request_automerge
 
 
 _codex_gate_from_payload = _review_state_builders.codex_gate_from_payload

@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-49`
-- Active branch: `refactor/controller-10-10-phase-49`
-- Fresh-main baseline already includes merged work through `origin/main` commit `56e487a`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-50`
+- Active branch: `refactor/controller-10-10-phase-50`
+- Fresh-main baseline already includes merged work through `origin/main` commit `bc136de`
 
-Do not resume from the main checkout. Continue from the phase-49 worktree.
+Do not resume from the main checkout. Continue from the phase-50 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -81,38 +81,40 @@ Recent merged phases:
 - `PR #88` `refactor: split resolution support cluster`
 - `PR #89` `refactor: split prepared cycle wiring cluster`
 - `PR #90` `refactor: split review queue preparation cluster`
+- `PR #91` `refactor: split claimed session wiring cluster`
 
-Current unmerged phase-49 batch:
+Current unmerged phase-50 batch:
 
-- `src/startupai_controller/consumer_claimed_session_wiring.py`
-- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
+- `src/startupai_controller/adapters/pull_request_compat.py`
+- `src/startupai_controller/adapters/pull_requests.py`
 - `tests/test_architecture_boundaries.py`
+- `docs/runbooks/codex-resume-hardening.md`
 
-Phase-49 batch summary:
+Phase-50 batch summary:
 
-- extracts the claimed-session execution and finalization lifecycle from `consumer_prepared_cycle_wiring.py` into the new `consumer_claimed_session_wiring.py` module
-- preserves the existing `consumer_prepared_cycle_wiring.py` surface as the launch/claim shell with compatibility wrappers for execution and finalization entry points
-- extends architecture-boundary coverage so `consumer_prepared_cycle_wiring.py` must route claimed-session execution through the dedicated module
-- reduces `consumer_prepared_cycle_wiring.py` from `1144` to `917` lines while keeping both `consumer_prepared_cycle_wiring.py` and `consumer_claimed_session_wiring.py` at `0` literal `Any` usages
+- extracts the pull-request function-level compatibility surface from `adapters/pull_requests.py` into the new `adapters/pull_request_compat.py` module
+- keeps `adapters/pull_requests.py` as the canonical adapter module with re-exported compatibility entry points
+- removes the canonical adapter's runtime dependency on `adapters/github_cli.py`
+- extends architecture-boundary coverage so `adapters/pull_requests.py` must route legacy wrapper entry points through the dedicated compatibility module
 
-Latest successful validation on the current phase-49 worktree:
+Latest successful validation on the current phase-50 worktree:
 
-- `python3 -m py_compile` on `consumer_claimed_session_wiring.py`, `consumer_prepared_cycle_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
-- targeted `mypy --follow-imports=silent` on `consumer_claimed_session_wiring.py` and `consumer_prepared_cycle_wiring.py`: passed
-- targeted `pytest` on architecture-boundary and board-consumer slices: `179 passed`
-- `uv run black --target-version py312` on `consumer_claimed_session_wiring.py`, `consumer_prepared_cycle_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
+- `python3 -m py_compile` on `adapters/pull_request_compat.py`, `adapters/pull_requests.py`, and `tests/test_architecture_boundaries.py`: passed
+- targeted `mypy --follow-imports=silent` on `adapters/pull_request_compat.py` and `adapters/pull_requests.py`: passed
+- targeted `pytest` on architecture-boundary, board-io, and GitHub-cli slices: `99 passed`
+- `uv run black --target-version py312` on `adapters/pull_request_compat.py`, `adapters/pull_requests.py`, and `tests/test_architecture_boundaries.py`: passed
 - full suite: `885 passed`
 
-No PR is open yet for phase 49. No poller should be running until the next PR
+No PR is open yet for phase 50. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining structural hotspots after the phase-49 claimed-session extraction:
+Remaining structural hotspots after the phase-50 pull-request compatibility split:
 
-- `1090` lines in `src/startupai_controller/adapters/pull_requests.py`
-- `917` lines in `src/startupai_controller/consumer_prepared_cycle_wiring.py`
 - `623` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
+- `917` lines in `src/startupai_controller/consumer_prepared_cycle_wiring.py`
+- `0` runtime imports of `adapters/github_cli.py` from `src/startupai_controller/adapters/pull_requests.py`
 - `596` lines in `src/startupai_controller/consumer_review_queue_processing.py`
 - `488` lines in `src/startupai_controller/consumer_cycle_wiring.py`
 - `475` lines in `src/startupai_controller/consumer_operational_wiring.py`
@@ -128,28 +130,29 @@ Remaining structural hotspots after the phase-49 claimed-session extraction:
 Bounded-context completion estimate at handoff time:
 
 - consumer/control-plane: about 99%
-- automation/review: about 98%
+- automation/review: about 99%
 - field sync: about 60-65%
 - overall program: about 98%
 
 ## Recommended Next Batch
 
-If phase 49 is not yet merged, finish shipping the claimed-session extraction:
+If phase 50 is not yet merged, finish shipping the pull-request compatibility split:
 
-- `src/startupai_controller/consumer_claimed_session_wiring.py`
-- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
+- `src/startupai_controller/adapters/pull_request_compat.py`
+- `src/startupai_controller/adapters/pull_requests.py`
 - `tests/test_architecture_boundaries.py`
 
-If phase 49 is already merged, the strongest next target is the remaining
-adapter and review-shell split:
+If phase 50 is already merged, the strongest next target is the remaining
+prepared-cycle and review-shell split:
 
-- `src/startupai_controller/adapters/pull_requests.py`
+- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
 - `src/startupai_controller/consumer_review_queue_wiring.py`
 - `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 
 After that, the biggest structural work still pending is:
 
 - finishing the remaining payload/probe split inside `src/startupai_controller/adapters/pull_requests.py`
+- finishing the remaining launch/claim shell split inside `src/startupai_controller/consumer_prepared_cycle_wiring.py`
 - finishing the remaining review-queue orchestration split inside `src/startupai_controller/consumer_review_queue_processing.py`
 - finishing the remaining launch/runtime typing cleanup inside `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 - finishing the remaining resolution typing cleanup inside `src/startupai_controller/consumer_resolution_support_wiring.py`
@@ -164,8 +167,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-49
-- active branch: refactor/controller-10-10-phase-49
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-50
+- active branch: refactor/controller-10-10-phase-50
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -184,8 +187,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66 through #90
-- no PR is open yet for phase 49
-- latest full local validation on phase 49 was 885 passed
-- current batch is the claimed-session extraction; next batch after merge is the remaining adapter and review-shell split
+- latest merged PRs: #66 through #91
+- no PR is open yet for phase 50
+- latest full local validation on phase 50 was 885 passed
+- current batch is the pull-request compatibility split; next batch after merge is the remaining prepared-cycle and review-shell split
 ```
