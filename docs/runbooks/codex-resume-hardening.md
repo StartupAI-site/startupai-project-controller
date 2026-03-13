@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-47`
-- Active branch: `refactor/controller-10-10-phase-47`
-- Fresh-main baseline already includes merged work through `origin/main` commit `c0c0ef6`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-48`
+- Active branch: `refactor/controller-10-10-phase-48`
+- Fresh-main baseline already includes merged work through `origin/main` commit `937f117`
 
-Do not resume from the main checkout. Continue from the phase-47 worktree.
+Do not resume from the main checkout. Continue from the phase-48 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -79,92 +79,81 @@ Recent merged phases:
 - `PR #86` `refactor: split runtime support helper cluster`
 - `PR #87` `refactor: split launch runtime support cluster`
 - `PR #88` `refactor: split resolution support cluster`
+- `PR #89` `refactor: split prepared cycle wiring cluster`
 
-Current unmerged phase-47 batch:
+Current unmerged phase-48 batch:
 
-- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
-- `src/startupai_controller/consumer_operational_wiring.py`
-- `src/startupai_controller/consumer_resolution_support_wiring.py`
+- `src/startupai_controller/consumer_review_queue_preparation_processing.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
 - `tests/test_architecture_boundaries.py`
 
-Phase-47 batch summary:
+Phase-48 batch summary:
 
-- extracts the full prepared-cycle lifecycle seam from `consumer_operational_wiring.py` into the new `consumer_prepared_cycle_wiring.py` module
-- preserves the existing `consumer_operational_wiring.py` surface as a reconciliation-first compatibility shell with monkeypatchable wrapper entry points for selection, claim, execution, and finalization
-- extends architecture-boundary coverage so `consumer_operational_wiring.py` must route the prepared-cycle stack through the dedicated module
-- reduces `consumer_operational_wiring.py` from `1206` to `475` lines while keeping both `consumer_operational_wiring.py` and `consumer_prepared_cycle_wiring.py` at `0` literal `Any` usages
+- extracts the review-queue preparation and verdict-backfill slice from `consumer_review_queue_processing.py` into the new `consumer_review_queue_preparation_processing.py` module
+- preserves the existing `consumer_review_queue_processing.py` surface as the rescue/result orchestration shell with compatibility wrappers for queue preparation entry points
+- extends architecture-boundary coverage so `consumer_review_queue_processing.py` must route the preparation stack through the dedicated module
+- reduces `consumer_review_queue_processing.py` from `829` to `596` lines while keeping both `consumer_review_queue_processing.py` and `consumer_review_queue_preparation_processing.py` at `0` literal `Any` usages
 
-Latest successful validation on the current phase-47 worktree:
+Latest successful validation on the current phase-48 worktree:
 
-- `python3 -m py_compile` on `consumer_prepared_cycle_wiring.py`, `consumer_operational_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
-- targeted `mypy --follow-imports=silent` on `consumer_prepared_cycle_wiring.py` and `consumer_operational_wiring.py`: passed
-- targeted `pytest` on architecture-boundary and board-consumer slices: `177 passed`
-- `uv run black --target-version py312` on `consumer_prepared_cycle_wiring.py`, `consumer_operational_wiring.py`, and `tests/test_architecture_boundaries.py`: passed
-- full suite: `883 passed`
+- `python3 -m py_compile` on `consumer_review_queue_preparation_processing.py`, `consumer_review_queue_processing.py`, and `tests/test_architecture_boundaries.py`: passed
+- targeted `mypy --follow-imports=silent` on `consumer_review_queue_preparation_processing.py` and `consumer_review_queue_processing.py`: passed
+- targeted `pytest` on architecture-boundary and board-consumer slices: `178 passed`
+- `uv run black --target-version py312` on `consumer_review_queue_preparation_processing.py`, `consumer_review_queue_processing.py`, and `tests/test_architecture_boundaries.py`: passed
+- full suite: `884 passed`
 
-No PR is open yet for phase 47. No poller should be running until the next PR
+No PR is open yet for phase 48. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
 
-Remaining structural hotspots after the phase-47 prepared-cycle extraction:
+Remaining structural hotspots after the phase-48 review-queue preparation extraction:
 
 - `1144` lines in `src/startupai_controller/consumer_prepared_cycle_wiring.py`
 - `1090` lines in `src/startupai_controller/adapters/pull_requests.py`
-- `830` lines in `src/startupai_controller/consumer_review_queue_processing.py`
-- `475` lines in `src/startupai_controller/consumer_operational_wiring.py`
 - `623` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
+- `596` lines in `src/startupai_controller/consumer_review_queue_processing.py`
 - `488` lines in `src/startupai_controller/consumer_cycle_wiring.py`
+- `475` lines in `src/startupai_controller/consumer_operational_wiring.py`
 - `466` lines in `src/startupai_controller/application/consumer/launch.py`
 - `438` lines in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `433` lines in `src/startupai_controller/consumer_review_queue_drain_processing.py`
-- `371` lines in `src/startupai_controller/consumer_runtime_support_wiring.py`
 - `379` lines in `src/startupai_controller/consumer_codex_helpers.py`
-- `273` lines in `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
-- `121` lines in `src/startupai_controller/consumer_resolution_support_wiring.py`
 - `375` lines in `src/startupai_controller/adapters/pull_request_query_helpers.py`
+- `374` lines in `src/startupai_controller/consumer_review_queue_preparation_processing.py`
+- `371` lines in `src/startupai_controller/consumer_runtime_support_wiring.py`
 - `367` lines in `src/startupai_controller/adapters/pull_request_board_helpers.py`
 - `339` lines in `src/startupai_controller/adapters/pull_request_batch_queries.py`
 - `291` lines in `src/startupai_controller/consumer_launch_support_wiring.py`
-- `311` lines in `src/startupai_controller/consumer_launch_helpers.py`
-- `183` lines in `src/startupai_controller/consumer_worktree_helpers.py`
-- `168` lines in `src/startupai_controller/consumer_codex_runtime_wiring.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_codex_comment_wiring.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_codex_runtime_wiring.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_codex_helpers.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_cycle_wiring.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_operational_wiring.py`
+- `273` lines in `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
+- `121` lines in `src/startupai_controller/consumer_resolution_support_wiring.py`
 - `0` `Any` usages in `src/startupai_controller/consumer_prepared_cycle_wiring.py`
+- `0` `Any` usages in `src/startupai_controller/consumer_review_queue_processing.py`
+- `0` `Any` usages in `src/startupai_controller/consumer_review_queue_preparation_processing.py`
+- `0` `Any` usages in `src/startupai_controller/consumer_operational_wiring.py`
 - `0` `Any` usages in `src/startupai_controller/adapters/pull_requests.py`
-- `0` `Any` usages in `src/startupai_controller/application/consumer/launch.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_launch_helpers.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_launch_support_wiring.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_worktree_helpers.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_runtime_support_wiring.py`
-- `0` `Any` usages in `src/startupai_controller/consumer_support_wiring.py`
 - remaining `Any` pockets are still concentrated in `consumer_launch_runtime_support_wiring.py`, `consumer_resolution_support_wiring.py`, and `consumer_context_helpers.py`
 
 Bounded-context completion estimate at handoff time:
 
 - consumer/control-plane: about 98-99%
-- automation/review: about 97%
+- automation/review: about 98%
 - field sync: about 60-65%
 - overall program: about 98%
 
 ## Recommended Next Batch
 
-If phase 47 is not yet merged, finish shipping the prepared-cycle extraction:
+If phase 48 is not yet merged, finish shipping the review-queue preparation extraction:
 
-- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
-- `src/startupai_controller/consumer_operational_wiring.py`
+- `src/startupai_controller/consumer_review_queue_preparation_processing.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
 - `tests/test_architecture_boundaries.py`
 
-If phase 47 is already merged, the strongest next target is the still-large
-review/adapter split:
+If phase 48 is already merged, the strongest next target is the still-large
+prepared-cycle and PR-adapter split:
 
-- `src/startupai_controller/consumer_review_queue_processing.py`
+- `src/startupai_controller/consumer_prepared_cycle_wiring.py`
 - `src/startupai_controller/adapters/pull_requests.py`
-- `src/startupai_controller/consumer_resolution_support_wiring.py`
 - `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 
 After that, the biggest structural work still pending is:
@@ -173,6 +162,7 @@ After that, the biggest structural work still pending is:
 - finishing the remaining typing cleanup inside `src/startupai_controller/consumer_resolution_support_wiring.py`
 - finishing the remaining typing cleanup inside `src/startupai_controller/consumer_launch_runtime_support_wiring.py`
 - finishing the remaining prepared-cycle sub-splits inside `src/startupai_controller/consumer_prepared_cycle_wiring.py`
+- finishing the remaining review-queue orchestration split inside `src/startupai_controller/consumer_review_queue_processing.py`
 - any final field-sync follow-up if the operations/query modules still need another ratchet
 
 ## Fresh-Session Prompt
@@ -184,8 +174,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-47
-- active branch: refactor/controller-10-10-phase-47
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-48
+- active branch: refactor/controller-10-10-phase-48
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -204,8 +194,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66, #67, #68, #69, #70, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81, #82, #83, #84, #85, #86, #87, and #88
-- no PR is open yet for phase 47
-- latest full local validation on phase 47 was 883 passed
-- current batch is the prepared-cycle extraction; next batch after merge is the remaining review-processing and PR-adapter split
+- latest merged PRs: #66, #67, #68, #69, #70, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81, #82, #83, #84, #85, #86, #87, #88, and #89
+- no PR is open yet for phase 48
+- latest full local validation on phase 48 was 884 passed
+- current batch is the review-queue preparation extraction; next batch after merge is the remaining prepared-cycle and PR-adapter split
 ```
