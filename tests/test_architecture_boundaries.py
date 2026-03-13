@@ -486,6 +486,15 @@ def test_consumer_codex_comment_wiring_routes_comment_pr_shell_through_wiring_mo
     )
 
 
+def test_consumer_review_queue_processing_routes_due_drain_through_module() -> None:
+    imported = _controller_runtime_imports(
+        SRC_ROOT / "consumer_review_queue_processing.py"
+    )
+    assert (
+        "startupai_controller.consumer_review_queue_drain_processing" in imported
+    ), "consumer_review_queue_processing.py should depend on consumer_review_queue_drain_processing"
+
+
 def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
     source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
     forbidden = [

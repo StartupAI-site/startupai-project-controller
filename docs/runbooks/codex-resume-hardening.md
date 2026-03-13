@@ -14,11 +14,11 @@ The authoritative plan and execution rules are:
 ## Resume From Here
 
 - Main checkout: `/home/chris/projects/startupai-project-controller`
-- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-38`
-- Active branch: `refactor/controller-10-10-phase-38`
-- Fresh-main baseline already includes merged work through `origin/main` commit `4e47b90`
+- Active worktree: `/home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-39`
+- Active branch: `refactor/controller-10-10-phase-39`
+- Fresh-main baseline already includes merged work through `origin/main` commit `1551cb9`
 
-Do not resume from the main checkout. Continue from the phase-38 worktree.
+Do not resume from the main checkout. Continue from the phase-39 worktree.
 
 For this repository, continue using the existing manual `git worktree` flow
 under `/home/chris/projects/worktrees/controller/...`. Do not assume the shared
@@ -70,46 +70,29 @@ Recent merged phases:
 - `PR #77` `refactor: split deferred replay wiring cluster`
 - `PR #78` `refactor: split reconciliation recovery wiring cluster`
 - `PR #79` `refactor: split comment pr shell wiring cluster`
+- `PR #80` `refactor: type codex session result cluster`
 
-Current unmerged phase-38 batch:
+Current unmerged phase-39 batch:
 
-- `src/startupai_controller/application/consumer/execution.py`
-- `src/startupai_controller/consumer_execution_outcome_wiring.py`
-- `src/startupai_controller/consumer_session_execution_wiring.py`
-- `src/startupai_controller/consumer_session_completion_helpers.py`
-- `src/startupai_controller/consumer_comment_pr_helpers.py`
-- `src/startupai_controller/consumer_comment_pr_wiring.py`
-- `src/startupai_controller/consumer_comment_pr_shell_wiring.py`
-- `src/startupai_controller/consumer_codex_comment_wiring.py`
-- `src/startupai_controller/consumer_codex_runtime_wiring.py`
-- `src/startupai_controller/consumer_codex_helpers.py`
-- `src/startupai_controller/consumer_types.py`
-- `src/startupai_controller/domain/resolution_policy.py`
-- `tests/test_board_consumer.py`
+- `src/startupai_controller/consumer_review_queue_drain_processing.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
+- `tests/test_architecture_boundaries.py`
 
-Phase-38 batch summary:
+Phase-39 batch summary:
 
-- introduces shared typed `CodexSessionResult` and `ResolutionPayload` contracts
-- threads the typed result payload through execution/finalization and result-comment wiring
-- removes raw result-payload `Any` usage from:
-  - `application/consumer/execution.py`
-  - `consumer_execution_outcome_wiring.py`
-  - `consumer_session_execution_wiring.py`
-  - `consumer_session_completion_helpers.py`
-  - `consumer_comment_pr_helpers.py`
-  - `consumer_comment_pr_wiring.py`
-  - `consumer_comment_pr_shell_wiring.py`
-- leaves only the prompt/input-context `Any` seam in `consumer_codex_comment_wiring.py`
-- hardens `parse_codex_result()` so non-object JSON returns `None`
+- extracts the due-review drain orchestration into `consumer_review_queue_drain_processing.py`
+- keeps `consumer_review_queue_processing.py` as the compatibility surface so existing monkeypatch-heavy tests still patch the legacy module names
+- adds an architecture-boundary guard asserting `consumer_review_queue_processing.py` now depends on the new drain module
+- reduces `consumer_review_queue_processing.py` from `984` lines to `829` lines while preserving the public helper surface
 
-Latest successful validation on the current phase-38 worktree:
+Latest successful validation on the current phase-39 worktree:
 
-- `python3 -m py_compile` on the 12 touched source files plus `tests/test_board_consumer.py`: passed
-- targeted `mypy` on the 12 touched source files: passed
-- targeted `pytest` on architecture-boundary, board-consumer, resolution-policy, and contract-output slices: `215 passed`
-- full suite: `877 passed`
+- `python3 -m py_compile` on `consumer_review_queue_drain_processing.py`, `consumer_review_queue_processing.py`, and `tests/test_architecture_boundaries.py`: passed
+- targeted `mypy` on `consumer_review_queue_drain_processing.py` and `consumer_review_queue_processing.py`: passed
+- targeted `pytest` on architecture-boundary, board-consumer, board-control-plane, and contract-output slices: `179 passed`
+- full suite: `878 passed`
 
-No PR is open yet for phase 38. No poller should be running until the next PR
+No PR is open yet for phase 39. No poller should be running until the next PR
 is opened.
 
 ## Most Important Remaining Hotspots
@@ -117,10 +100,11 @@ is opened.
 Remaining structural hotspots after the phase-34 session-execution split:
 
 - `1321` lines in `src/startupai_controller/adapters/pull_requests.py`
-- `984` lines in `src/startupai_controller/consumer_review_queue_processing.py`
 - `1206` lines in `src/startupai_controller/consumer_operational_wiring.py`
+- `829` lines in `src/startupai_controller/consumer_review_queue_processing.py`
 - `698` lines in `src/startupai_controller/adapters/pull_request_support.py`
 - `623` lines in `src/startupai_controller/consumer_review_queue_wiring.py`
+- `433` lines in `src/startupai_controller/consumer_review_queue_drain_processing.py`
 - `441` lines in `src/startupai_controller/consumer_comment_pr_shell_wiring.py`
 - `439` lines in `src/startupai_controller/consumer_codex_comment_wiring.py`
 - `882` lines in `src/startupai_controller/consumer_execution_outcome_wiring.py`
@@ -162,23 +146,18 @@ Remaining structural hotspots after the phase-34 session-execution split:
 Bounded-context completion estimate at handoff time:
 
 - consumer/control-plane: about 97-98%
-- automation/review: about 94-95%
+- automation/review: about 95%
 - field sync: about 60-65%
-- overall program: about 96%
+- overall program: about 96-97%
 
 ## Recommended Next Batch
 
-If phase 38 is not yet merged, finish shipping the typed Codex-result
-execution/comment batch:
+If phase 39 is not yet merged, finish shipping the review-queue drain split:
 
-- `src/startupai_controller/application/consumer/execution.py`
-- `src/startupai_controller/consumer_execution_outcome_wiring.py`
-- `src/startupai_controller/consumer_session_execution_wiring.py`
-- `src/startupai_controller/consumer_session_completion_helpers.py`
-- `src/startupai_controller/consumer_comment_pr_helpers.py`
-- `src/startupai_controller/consumer_comment_pr_wiring.py`
+- `src/startupai_controller/consumer_review_queue_drain_processing.py`
+- `src/startupai_controller/consumer_review_queue_processing.py`
 
-Once phase 38 is merged, the strongest next target is still the remaining
+Once phase 39 is merged, the strongest next target is still the remaining
 review-processing and operational/adapter shell cluster:
 
 - `src/startupai_controller/consumer_review_queue_processing.py`
@@ -204,8 +183,8 @@ Continue the approved hard-end-state refactor plan for startupai-project-control
 
 Resume from:
 - main checkout: /home/chris/projects/startupai-project-controller
-- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-38
-- active branch: refactor/controller-10-10-phase-38
+- active worktree: /home/chris/projects/worktrees/controller/refactor/controller-10-10-phase-39
+- active branch: refactor/controller-10-10-phase-39
 
 Read first:
 - /home/chris/projects/startupai-project-controller/docs/adr/002-hard-end-state-hardening.md
@@ -224,8 +203,8 @@ Operating rules already approved:
 - continue immediately without asking for routine confirmation
 
 Current state:
-- latest merged PRs: #66, #67, #68, #69, #70, #71, #72, #73, #74, #75, #76, #77, #78, and #79
-- no PR is open yet for phase 38
-- latest full local validation on phase 38 was 877 passed
-- current batch is the typed Codex-result execution/comment cluster; next batch after merge is still the review-processing and operational/adapter shell cluster
+- latest merged PRs: #66, #67, #68, #69, #70, #71, #72, #73, #74, #75, #76, #77, #78, #79, and #80
+- no PR is open yet for phase 39
+- latest full local validation on phase 39 was 878 passed
+- current batch is the review-queue drain split; next batch after merge is still the remaining review-processing and operational/adapter shell cluster
 ```
