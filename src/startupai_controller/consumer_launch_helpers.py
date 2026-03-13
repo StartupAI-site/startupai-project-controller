@@ -4,9 +4,39 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, cast
+import subprocess
+from collections.abc import Callable
+from typing import cast
 
+from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import IssueContextPayload
+from startupai_controller.consumer_types import (
+    PreparedCycleContext,
+    WorktreePrepareError,
+)
+from startupai_controller.consumer_workflow import WorkflowDefinition
+from startupai_controller.domain.models import (
+    CycleBoardSnapshot,
+    IssueSnapshot,
+    OpenPullRequestMatch,
+    RepairBranchReconcileOutcome,
+)
+from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
+from startupai_controller.ports.issue_context import IssueContextPort
+from startupai_controller.ports.ready_flow import (
+    BoardInfoResolverFn,
+    BoardStatusMutatorFn,
+)
+from startupai_controller.ports.pull_requests import PullRequestPort
+from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.ports.worktrees import WorktreePort
+from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
+    IssueRef,
+)
+
+SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def setup_launch_worktree(
@@ -15,19 +45,19 @@ def setup_launch_worktree(
     session_kind: str,
     repair_branch_name: str | None,
     *,
-    config: Any,
-    cp_config: Any,
-    db: Any,
+    config: ConsumerConfig,
+    cp_config: CriticalPathConfig,
+    db: ConsumerRuntimeStatePort,
     prepare_worktree: Callable[..., tuple[str, str]],
     record_metric: Callable[..., None],
     block_prelaunch_issue: Callable[..., None],
-    reconcile_repair_branch: Callable[..., Any],
-    worktree_error_cls: type[Exception],
-    session_store: Any | None = None,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., Any] | None = None,
-    board_info_resolver: Callable[..., Any] | None = None,
-    board_mutator: Callable[..., None] | None = None,
+    reconcile_repair_branch: Callable[..., RepairBranchReconcileOutcome],
+    worktree_error_cls: type[WorktreePrepareError],
+    session_store: SessionStorePort | None = None,
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
+    board_info_resolver: BoardInfoResolverFn | None = None,
+    board_mutator: BoardStatusMutatorFn | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[str, str, str | None, str | None]:
     """Set up worktree and reconcile repair branch if needed."""
@@ -43,7 +73,7 @@ def setup_launch_worktree(
             subprocess_runner=subprocess_runner,
         )
     except worktree_error_cls as err:
-        typed_err = cast(Any, err)
+        typed_err = cast(WorktreePrepareError, err)
         record_metric(
             db,
             config,
@@ -130,10 +160,10 @@ def resolve_launch_runtime(
     candidate_prefix: str,
     worktree_path: str,
     *,
-    config: Any,
-    prepared: Any,
-    load_worktree_workflow: Callable[..., Any],
-) -> tuple[Any, Any]:
+    config: ConsumerConfig,
+    prepared: PreparedCycleContext,
+    load_worktree_workflow: Callable[..., WorkflowDefinition],
+) -> tuple[WorkflowDefinition, ConsumerConfig]:
     """Load worktree workflow and compute effective runtime config."""
     workflow_definition = load_worktree_workflow(
         candidate_prefix,
@@ -169,17 +199,23 @@ def resolve_launch_runtime(
 def resolve_launch_candidate_metadata(
     issue_ref: str,
     *,
-    cp_config: Any,
-    auto_config: Any,
-    board_snapshot: Any,
-    pr_port: Any,
+    cp_config: CriticalPathConfig,
+    auto_config: BoardAutomationConfig | None,
+    board_snapshot: CycleBoardSnapshot,
+    pr_port: PullRequestPort,
     gh_runner: Callable[..., str] | None,
-    parse_issue_ref: Callable[[str], Any],
-    resolve_issue_coordinates: Callable[..., tuple[str, str, int]],
-    snapshot_for_issue: Callable[..., Any],
-    classify_open_pr_candidates: Callable[..., tuple[str, Any | None, str]],
-    launch_session_kind: Callable[..., str],
-) -> tuple[str, str, str, int, Any, str, str | None, str | None]:
+    parse_issue_ref: Callable[[str], IssueRef],
+    resolve_issue_coordinates: Callable[
+        [str, CriticalPathConfig], tuple[str, str, int]
+    ],
+    snapshot_for_issue: Callable[
+        [CycleBoardSnapshot, str, CriticalPathConfig], IssueSnapshot | None
+    ],
+    classify_open_pr_candidates: Callable[
+        ..., tuple[str, OpenPullRequestMatch | None, str]
+    ],
+    launch_session_kind: Callable[[str, OpenPullRequestMatch | None], str],
+) -> tuple[str, str, str, int, IssueSnapshot | None, str, str | None, str | None]:
     """Resolve launch candidate identity and repair-session metadata."""
     candidate_prefix = parse_issue_ref(issue_ref).prefix
     owner, repo, number = resolve_issue_coordinates(issue_ref, cp_config)
@@ -219,10 +255,10 @@ def resolve_launch_issue_context(
     owner: str,
     repo: str,
     number: int,
-    snapshot: Any,
-    config: Any,
-    db: Any,
-    issue_context_port: Any,
+    snapshot: IssueSnapshot | None,
+    config: ConsumerConfig,
+    db: ConsumerRuntimeStatePort,
+    issue_context_port: IssueContextPort,
     gh_runner: Callable[..., str] | None,
     hydrate_issue_context: Callable[..., IssueContextPayload],
 ) -> tuple[IssueContextPayload, str]:
@@ -246,13 +282,13 @@ def resolve_launch_issue_context(
 
 
 def run_launch_workspace_hooks(
-    workflow_definition: Any,
+    workflow_definition: WorkflowDefinition,
     *,
     worktree_path: str,
     issue_ref: str,
     branch_name: str,
-    worktree_port: Any,
-    subprocess_runner: Callable[..., Any] | None,
+    worktree_port: WorktreePort,
+    subprocess_runner: SubprocessRunnerFn | None,
     run_workspace_hooks: Callable[..., None],
 ) -> None:
     """Run launch workspace hooks around the prepared worktree."""

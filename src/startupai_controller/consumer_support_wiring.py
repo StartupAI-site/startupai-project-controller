@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import subprocess
 from typing import Any, Callable
 
 import startupai_controller.consumer_runtime_wiring as _runtime_wiring
@@ -33,6 +35,8 @@ from startupai_controller.control_plane_runtime import (
     _record_control_timestamp,
 )
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
+from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.domain.repair_policy import parse_pr_url as _parse_pr_url
 from startupai_controller.domain.models import CycleBoardSnapshot, ResolutionEvaluation
 from startupai_controller.domain.resolution_policy import (
@@ -61,6 +65,8 @@ from startupai_controller.validate_critical_path_promotion import (
     ConfigError,
     parse_issue_ref,
 )
+
+SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def record_metric(
@@ -454,10 +460,10 @@ def snapshot_for_issue(
 
 
 def list_repo_worktrees(
-    repo_root: Any,
+    repo_root: Path | str,
     *,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., Any] | None = None,
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
 ) -> list[tuple[str, str]]:
     """Return (worktree_path, branch_name) pairs for a repo root."""
     return _list_repo_worktrees_helper(
@@ -471,8 +477,8 @@ def list_repo_worktrees(
 def worktree_is_clean(
     worktree_path: str,
     *,
-    worktree_port: Any | None = None,
-    subprocess_runner: Callable[..., Any] | None = None,
+    worktree_port: WorktreePort | None = None,
+    subprocess_runner: SubprocessRunnerFn | None = None,
 ) -> bool:
     """Return True when a worktree has no local changes."""
     return _worktree_is_clean_helper(
@@ -484,7 +490,7 @@ def worktree_is_clean(
 
 
 def worktree_ownership_is_safe(
-    store: Any,
+    store: SessionStorePort,
     issue_ref: str,
     worktree_path: str,
 ) -> bool:

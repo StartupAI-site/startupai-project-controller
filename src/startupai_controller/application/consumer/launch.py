@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
@@ -31,6 +32,11 @@ from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+if TYPE_CHECKING:
+    import subprocess
+
+SubprocessRunnerFn = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 class SelectLaunchCandidateForCycleFn(Protocol):
@@ -107,7 +113,7 @@ class SetupLaunchWorktreeFn(Protocol):
         db: ConsumerRuntimeStatePort,
         session_store: SessionStorePort,
         worktree_port: WorktreePort,
-        subprocess_runner: Callable[..., Any] | None = None,
+        subprocess_runner: SubprocessRunnerFn | None = None,
     ) -> tuple[str, str, str | None, str | None]: ...
 
 
@@ -135,7 +141,7 @@ class RunLaunchWorkspaceHooksFn(Protocol):
         issue_ref: str,
         branch_name: str,
         worktree_port: WorktreePort,
-        subprocess_runner: Callable[..., Any] | None,
+        subprocess_runner: SubprocessRunnerFn | None,
     ) -> None: ...
 
 
