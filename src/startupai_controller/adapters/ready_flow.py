@@ -26,7 +26,6 @@ from startupai_controller.ports.review_state import ReviewStatePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 if TYPE_CHECKING:
-    from startupai_controller.automation_port_helpers import BoardInfo
     from startupai_controller.runtime.wiring import GitHubPortBundle, GitHubRuntimeMemo
 
 
@@ -143,10 +142,7 @@ class BoardAutomationReadyFlowAdapter:
             review_state_port=review_state_port,
             board_port=board_port,
             status_resolver=status_resolver,
-            board_info_resolver=cast(
-                "Callable[..., BoardInfo] | None",
-                board_info_resolver,
-            ),
+            board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
             comment_checker=comment_checker,
             comment_poster=comment_poster,

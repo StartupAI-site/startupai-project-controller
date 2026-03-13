@@ -16,6 +16,7 @@ import startupai_controller.consumer_operational_wiring as _operational_wiring
 import startupai_controller.consumer_preflight_wiring as _preflight_wiring
 import startupai_controller.consumer_selection_retry_wiring as _selection_retry_wiring
 import startupai_controller.consumer_support_wiring as _support_wiring
+import startupai_controller.consumer_runtime_support_wiring as _runtime_support_wiring
 from startupai_controller.application.consumer.cycle import (
     PreparedCycleDeps,
     run_prepared_cycle as _run_prepared_cycle_use_case,
@@ -67,6 +68,7 @@ from startupai_controller.application.consumer.recovery import (
 )
 from startupai_controller.application.consumer.status import (
     CollectStatusPayloadDeps,
+    SessionRetryStateFn,
     collect_status_payload as _collect_status_payload_use_case,
 )
 from startupai_controller.automation_port_helpers import _list_project_items_by_status
@@ -102,7 +104,8 @@ from startupai_controller.control_plane_runtime import (
     _current_main_workflows,
     _mark_degraded,
 )
-from startupai_controller.domain.models import CycleResult
+from startupai_controller.domain.models import CycleResult, SessionInfo
+from startupai_controller.payload_types import SessionRetryStatePayload
 from startupai_controller.domain.review_queue_policy import (
     parse_iso8601_timestamp as _parse_iso8601_timestamp,
 )
@@ -116,6 +119,7 @@ from startupai_controller.runtime.wiring import (
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
 from startupai_controller.validate_critical_path_promotion import (
+    CriticalPathConfig,
     ConfigError,
     GhQueryError,
     load_config,
@@ -224,7 +228,7 @@ class StatusRuntimeWiringDeps:
     control_plane_health_summary: Callable[..., Any]
     drain_requested: Callable[[Any], bool]
     workflow_status_payload: Callable[[Any], dict[str, Any]]
-    session_retry_state: Callable[..., dict[str, Any]]
+    session_retry_state: SessionRetryStateFn
     parse_iso8601_timestamp: Callable[[str], Any]
     control_key_degraded: str
     control_key_degraded_reason: str
@@ -245,6 +249,16 @@ def _daemon_runtime_wiring_deps(
     comment_poster: Callable[..., None] | None = None,
 ) -> DaemonRuntimeWiringDeps:
     """Build daemon-loop wiring deps without reaching back into compat."""
+
+    def _claim_suppression_state(
+        db: ConsumerRuntimeStatePort,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, str] | None:
+        return _support_wiring.claim_suppression_state(
+            cast(_runtime_support_wiring.ClaimSuppressionStatePort, db),
+            now=now,
+        )
 
     def _run_worker_cycle(*args: Any, **kwargs: Any) -> CycleResult:
         run_worker_cycle_fn = _support_wiring.run_worker_cycle
@@ -342,7 +356,7 @@ def _daemon_runtime_wiring_deps(
             issue_ref,
             blocked_reason,
             config=config,
-            cp_config=cp_config,
+            cp_config=cast(CriticalPathConfig, cp_config),
             db=db,
             board_info_resolver=board_info_resolver,
             board_mutator=board_mutator,
@@ -411,7 +425,7 @@ def _daemon_runtime_wiring_deps(
         mark_degraded=_mark_degraded,
         gh_reason_code=gh_reason_code,
         logger=logger,
-        claim_suppression_state=_support_wiring.claim_suppression_state,
+        claim_suppression_state=_claim_suppression_state,
         parse_iso8601_timestamp=_parse_iso8601_timestamp,
         record_metric=cast(RecordMetricFn, _support_wiring.record_metric),
         prepare_launch_candidate=_prepare_launch_candidate,
@@ -441,6 +455,21 @@ def _daemon_runtime_wiring_deps(
 
 def _status_runtime_wiring_deps() -> StatusRuntimeWiringDeps:
     """Build status wiring deps without reaching back into compat."""
+
+    def _session_retry_state(
+        session: SessionInfo,
+        *,
+        config: ConsumerConfig,
+        workflows: dict[str, WorkflowDefinition],
+        now: datetime | None = None,
+    ) -> SessionRetryStatePayload:
+        return _support_wiring.session_retry_state(
+            session,
+            config=config,
+            workflows=workflows,
+            now=now,
+        )
+
     return StatusRuntimeWiringDeps(
         config_error_type=ConfigError,
         load_automation_config=load_automation_config,
@@ -453,7 +482,7 @@ def _status_runtime_wiring_deps() -> StatusRuntimeWiringDeps:
         control_plane_health_summary=_control_plane_health_summary,
         drain_requested=_drain_requested,
         workflow_status_payload=workflow_status_payload,
-        session_retry_state=_support_wiring.session_retry_state,
+        session_retry_state=_session_retry_state,
         parse_iso8601_timestamp=_parse_iso8601_timestamp,
         control_key_degraded=CONTROL_KEY_DEGRADED,
         control_key_degraded_reason=CONTROL_KEY_DEGRADED_REASON,

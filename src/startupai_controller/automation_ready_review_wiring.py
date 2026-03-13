@@ -46,7 +46,6 @@ from startupai_controller.runtime.wiring import (
 )
 
 from startupai_controller.automation_port_helpers import (
-    BoardInfo,
     _default_board_mutation_port,
     _default_pr_port,
     _default_review_state_port,
@@ -74,6 +73,7 @@ from startupai_controller.application.automation.event_resolution import (
     resolve_issues_from_event as _app_resolve_issues_from_event,
     resolve_pr_to_issues as _app_resolve_pr_to_issues,
 )
+from startupai_controller.ports.ready_flow import BoardInfoView
 
 # ---------------------------------------------------------------------------
 # Lazy import to break circular dependency with board_automation
@@ -106,7 +106,7 @@ def schedule_ready_items(
     review_state_port: _ReviewStatePort | None = None,
     board_port: _BoardMutationPort | None = None,
     status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> SchedulingDecision:
@@ -151,7 +151,7 @@ def claim_ready_issue(
     review_state_port: _ReviewStatePort | None = None,
     board_port: _BoardMutationPort | None = None,
     status_resolver: Callable[..., str] | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     board_mutator: Callable[..., None] | None = None,
     comment_checker: Callable[..., bool] | None = None,
     comment_poster: Callable[..., None] | None = None,
@@ -196,7 +196,7 @@ def enforce_ready_dependency_guard(
     status_resolver: Callable[..., str] | None = None,
     review_state_port: _ReviewStatePort | None = None,
     board_port: _BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> list[str]:
@@ -320,7 +320,7 @@ def sync_review_state(
     pr_port: _PullRequestPort | None = None,
     review_state_port: _ReviewStatePort | None = None,
     board_port: _BoardMutationPort | None = None,
-    board_info_resolver: Callable[..., BoardInfo] | None = None,
+    board_info_resolver: Callable[..., BoardInfoView] | None = None,
     board_mutator: Callable[..., None] | None = None,
     gh_runner: Callable[..., str] | None = None,
 ) -> tuple[int, str]:

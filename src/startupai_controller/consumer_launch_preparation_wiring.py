@@ -108,7 +108,7 @@ def select_launch_candidate_for_cycle(
         effective_retry_backoff=_selection_retry_wiring.effective_retry_backoff,
         retry_backoff_active=_selection_retry_wiring.retry_backoff_active,
         maybe_activate_claim_suppression=cast(
-            Callable[..., None],
+            Callable[..., bool],
             _support_wiring.maybe_activate_claim_suppression,
         ),
         mark_degraded=_mark_degraded,
