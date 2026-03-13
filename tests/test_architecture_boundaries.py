@@ -1112,6 +1112,5 @@ def test_no_runtime_or_test_imports_consumer_db_or_github_http_shims() -> None:
             if hits:
                 violations[str(path.relative_to(REPO_ROOT))] = hits
     assert violations == {}, (
-        "consumer_db/github_http shim imports remain after deletion: "
-        f"{violations}"
+        "consumer_db/github_http shim imports remain after deletion: " f"{violations}"
     )
