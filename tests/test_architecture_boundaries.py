@@ -461,6 +461,31 @@ def test_consumer_operational_wiring_routes_recovery_reconciliation_through_wiri
     )
 
 
+def test_consumer_codex_comment_wiring_routes_comment_pr_shell_through_wiring_module() -> (
+    None
+):
+    imported = _controller_runtime_imports(
+        SRC_ROOT / "consumer_codex_comment_wiring.py"
+    )
+    assert (
+        "startupai_controller.consumer_comment_pr_shell_wiring" in imported
+    ), "consumer_codex_comment_wiring.py should depend on consumer_comment_pr_shell_wiring"
+    offending = sorted(
+        module
+        for module in imported
+        if module
+        in {
+            "startupai_controller.consumer_comment_pr_helpers",
+            "startupai_controller.consumer_comment_pr_wiring",
+            "startupai_controller.consumer_review_queue_processing",
+        }
+    )
+    assert offending == [], (
+        "consumer_codex_comment_wiring.py still owns comment/review shell wiring: "
+        f"{offending}"
+    )
+
+
 def test_consumer_preflight_runtime_module_has_no_port_builder_fields() -> None:
     source = _source_text(APPLICATION_ROOT / "consumer" / "preflight_runtime.py")
     forbidden = [
