@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_workflow import WorkflowDefinition
+from startupai_controller.domain.resolution_policy import ResolutionPayload
 from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     CycleResult,
@@ -20,6 +21,22 @@ from startupai_controller.domain.models import (
 from startupai_controller.ports.ready_flow import ReadyFlowPort
 from startupai_controller.runtime.wiring import GitHubRuntimeMemo
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
+
+
+class CodexSessionResult(TypedDict):
+    """Structured Codex session result matching the output schema contract."""
+
+    outcome: Literal["success", "failed", "blocked"]
+    summary: str
+    tests_run: int | None
+    tests_passed: int | None
+    changed_files: list[str]
+    commit_shas: list[str]
+    pr_url: str | None
+    resolution: ResolutionPayload | None
+    blocker_reason: str | None
+    needs_handoff_to: Literal["claude"] | None
+    duration_seconds: float
 
 
 @dataclass(frozen=True)
@@ -101,7 +118,7 @@ class SessionExecutionOutcome:
     failure_reason: str | None
     pr_url: str | None
     has_commits: bool
-    codex_result: dict[str, Any] | None
+    codex_result: CodexSessionResult | None
     should_transition_to_review: bool
     immediate_review_summary: ReviewQueueDrainSummary
     resolution_evaluation: ResolutionEvaluation | None = None

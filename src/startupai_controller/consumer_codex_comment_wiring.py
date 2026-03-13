@@ -13,6 +13,7 @@ import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiri
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_types import CodexSessionResult
 from startupai_controller.consumer_workflow import render_workflow_prompt
 from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.domain.models import (
@@ -96,7 +97,7 @@ def parse_codex_result(
     output_path: Path,
     *,
     file_reader: Callable[[Path], str] | None = None,
-) -> dict[str, Any] | None:
+) -> CodexSessionResult | None:
     """Parse CodexSessionResult JSON from output file."""
     return _codex_runtime_wiring.parse_codex_result(
         output_path,
@@ -300,7 +301,7 @@ def classify_open_pr_candidates(
 
 def post_result_comment(
     issue_ref: str,
-    result: dict[str, Any],
+    result: CodexSessionResult,
     session_id: str,
     config: CriticalPathConfig,
     *,

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Protocol
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
+from startupai_controller.consumer_types import CodexSessionResult
 from startupai_controller.domain.models import OpenPullRequest, OpenPullRequestMatch
+from startupai_controller.domain.resolution_policy import ResolutionPayload
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.ready_flow import GitHubBundleView, GitHubRunnerFn
 from startupai_controller.ports.status_store import StatusStorePort
@@ -172,7 +174,7 @@ def classify_open_pr_candidates(
 
 def post_result_comment(
     issue_ref: str,
-    result: dict[str, Any],
+    result: CodexSessionResult,
     session_id: str,
     config: CriticalPathConfig,
     *,
@@ -181,7 +183,7 @@ def post_result_comment(
         [str, CriticalPathConfig],
         tuple[str, str, int],
     ],
-    normalize_resolution_payload: Callable[[object], dict[str, Any] | None],
+    normalize_resolution_payload: Callable[[object], ResolutionPayload | None],
     default_review_comment_checker: Callable[..., CommentMarkerCheckerFn],
     runtime_comment_poster: CommentPosterFn,
     comment_checker: CommentMarkerCheckerFn | None = None,
@@ -193,14 +195,14 @@ def post_result_comment(
     owner, repo, number = resolve_issue_coordinates(issue_ref, config)
 
     checker = comment_checker or default_review_comment_checker(gh_runner=gh_runner)
-    outcome = result.get("outcome", "unknown")
-    summary = result.get("summary", "No summary provided.")
-    tests_run = result.get("tests_run")
-    tests_passed = result.get("tests_passed")
-    changed_files = result.get("changed_files", [])
-    pr_url = result.get("pr_url")
-    duration = result.get("duration_seconds")
-    resolution = normalize_resolution_payload(result.get("resolution"))
+    outcome = result["outcome"]
+    summary = result["summary"]
+    tests_run = result["tests_run"]
+    tests_passed = result["tests_passed"]
+    changed_files = result["changed_files"]
+    pr_url = result["pr_url"]
+    duration = result["duration_seconds"]
+    resolution = normalize_resolution_payload(result["resolution"])
 
     lines = [
         marker,

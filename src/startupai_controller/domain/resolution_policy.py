@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, TypedDict, cast
 
 RESOLUTION_COMMENT_KIND = "consumer-resolution"
 VALID_RESOLUTION_KINDS = {
@@ -55,7 +55,33 @@ class ParsedResolutionComment:
     payload: dict[str, Any]
 
 
-def normalize_resolution_payload(raw: Any) -> dict[str, Any] | None:
+ResolutionKind = Literal[
+    "already_on_main",
+    "superseded_by_existing_solution",
+    "duplicate",
+    "superseded",
+    "no_action_needed",
+]
+EquivalenceClaim = Literal["exact_match", "strict_superset", "unknown"]
+
+
+class ResolutionPayload(TypedDict):
+    """Normalized no-op resolution payload emitted by Codex."""
+
+    kind: ResolutionKind
+    summary: str
+    code_refs: list[str]
+    commit_shas: list[str]
+    pr_urls: list[str]
+    validated_on_main: bool
+    validation_command: str | None
+    validation_exit_code: int | None
+    acceptance_criteria_met: bool
+    acceptance_criteria_notes: str
+    equivalence_claim: EquivalenceClaim
+
+
+def normalize_resolution_payload(raw: Any) -> ResolutionPayload | None:
     """Return a normalized resolution payload or None when absent/invalid."""
     if not isinstance(raw, dict):
         return None
@@ -79,8 +105,15 @@ def normalize_resolution_payload(raw: Any) -> dict[str, Any] | None:
                 normalized.append(text)
         return normalized
 
-    return {
-        "kind": kind,
+    raw_validation_exit_code = raw.get("validation_exit_code")
+    validation_exit_code = (
+        raw_validation_exit_code
+        if isinstance(raw_validation_exit_code, int)
+        else None
+    )
+
+    payload: ResolutionPayload = {
+        "kind": cast(ResolutionKind, kind),
         "summary": str(raw.get("summary") or "").strip(),
         "code_refs": _string_list("code_refs"),
         "commit_shas": _string_list("commit_shas"),
@@ -91,16 +124,17 @@ def normalize_resolution_payload(raw: Any) -> dict[str, Any] | None:
             if raw.get("validation_command") is not None
             else None
         ),
-        "validation_exit_code": raw.get("validation_exit_code"),
+        "validation_exit_code": validation_exit_code,
         "acceptance_criteria_met": bool(raw.get("acceptance_criteria_met")),
         "acceptance_criteria_notes": str(
             raw.get("acceptance_criteria_notes") or ""
         ).strip(),
-        "equivalence_claim": equivalence_claim,
+        "equivalence_claim": cast(EquivalenceClaim, equivalence_claim),
     }
+    return payload
 
 
-def resolution_has_meaningful_signal(resolution: dict[str, Any] | None) -> bool:
+def resolution_has_meaningful_signal(resolution: ResolutionPayload | None) -> bool:
     """Return True when a resolution payload contains actionable signal."""
     if resolution is None:
         return False
@@ -114,7 +148,7 @@ def resolution_has_meaningful_signal(resolution: dict[str, Any] | None) -> bool:
     )
 
 
-def resolution_allows_autoclose(resolution: dict[str, Any] | None) -> bool:
+def resolution_allows_autoclose(resolution: ResolutionPayload | None) -> bool:
     """Return True when the claimed resolution kind is auto-close eligible."""
     if resolution is None:
         return False

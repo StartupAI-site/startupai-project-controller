@@ -9,7 +9,9 @@ import shutil
 import subprocess
 import tempfile
 import time
-from typing import Any, Callable
+from typing import Any, Callable, cast
+
+from startupai_controller.consumer_types import CodexSessionResult
 
 
 def assemble_codex_prompt(
@@ -221,13 +223,16 @@ def parse_codex_result(
     output_path: Path,
     *,
     file_reader: Callable[[Path], str] | None = None,
-) -> dict[str, Any] | None:
+) -> CodexSessionResult | None:
     """Parse the codex result JSON. Return None on read/parse failure."""
     reader = file_reader or (lambda path: path.read_text(encoding="utf-8"))
     try:
-        return json.loads(reader(output_path))
+        payload = json.loads(reader(output_path))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
+    return cast(CodexSessionResult, payload)
 
 
 def build_pr_body(

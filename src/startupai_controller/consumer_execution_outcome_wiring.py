@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
-from typing import Any, Callable, Protocol, cast
+from typing import Callable, Protocol, cast
 
 import startupai_controller.consumer_review_handoff_helpers as _review_handoff_helpers
 from startupai_controller.application.consumer.execution import (
@@ -22,6 +22,7 @@ from startupai_controller.consumer_config import ConsumerConfig
 import startupai_controller.consumer_session_completion_helpers as _session_completion_helpers
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    CodexSessionResult,
     PrCreationOutcome,
     PreparedCycleContext,
     PreparedLaunchContext,
@@ -34,6 +35,7 @@ from startupai_controller.domain.models import (
     ReviewQueueDrainSummary,
     ReviewQueueEntry,
 )
+from startupai_controller.domain.resolution_policy import ResolutionPayload
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.consumer_runtime_state import ConsumerRuntimeStatePort
 from startupai_controller.ports.process_runner import GhRunnerPort, ProcessRunnerPort
@@ -56,7 +58,7 @@ from startupai_controller.runtime.wiring import (
 )
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
-CodexResultPayload = dict[str, Any]
+CodexResultPayload = CodexSessionResult
 SubprocessRunnerFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -453,7 +455,7 @@ def handle_non_review_execution_outcome(
 
     def _verify_resolution_payload(
         issue_ref: str,
-        resolution: CodexResultPayload | None,
+        resolution: ResolutionPayload | None,
         *,
         config: ConsumerConfig,
         workflows: dict[str, WorkflowDefinition],

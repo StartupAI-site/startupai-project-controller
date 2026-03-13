@@ -9,6 +9,7 @@ import time
 from typing import Any, Callable
 
 from startupai_controller import consumer_codex_helpers as _codex_helpers
+from startupai_controller.consumer_types import CodexSessionResult
 
 
 def assemble_codex_prompt(
@@ -92,7 +93,7 @@ def parse_codex_result(
     output_path: Path,
     *,
     file_reader: Callable[[Path], str] | None = None,
-) -> dict[str, Any] | None:
+) -> CodexSessionResult | None:
     """Parse the Codex result JSON."""
     return _codex_helpers.parse_codex_result(
         output_path,
