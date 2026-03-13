@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from typing import Any, Callable
 
@@ -31,6 +32,21 @@ from startupai_controller.project_field_sync_queries import (
     query_project_schema,
 )
 from startupai_controller.validate_critical_path_promotion import ConfigError
+
+
+@dataclass(frozen=True)
+class RunSingleSyncDeps:
+    """Dependency bundle for one shell-triggered field-sync run."""
+
+    query_project_schema: Callable[..., ProjectSchema]
+    list_project_issue_items: Callable[..., list[IssueItem]]
+    build_audit_report: Callable[[list[IssueItem]], dict[str, Any]]
+    sync_custom_fields: Callable[..., SyncStats]
+    sync_milestones: Callable[..., SyncStats]
+    sync_dates: Callable[..., SyncStats]
+    sync_assignees: Callable[..., SyncStats]
+    sync_pr_ci: Callable[..., SyncStats]
+    sync_stats_factory: type[SyncStats]
 
 
 def sync_custom_fields(
@@ -330,48 +346,74 @@ def print_sync_stats(
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
-def _run_single_sync(
+def run_single_sync(
     command: str,
     project_owner: str,
     project_number: int,
     sync_config: SyncConfig,
     *,
     dry_run: bool,
+    deps: RunSingleSyncDeps | None = None,
 ) -> tuple[int, str]:
     """Execute one sync command and return (exit_code, output_json)."""
-    schema = query_project_schema(project_owner, project_number)
-    items = list_project_issue_items(project_owner, project_number)
+    effective_deps = deps or RunSingleSyncDeps(
+        query_project_schema=query_project_schema,
+        list_project_issue_items=list_project_issue_items,
+        build_audit_report=build_audit_report,
+        sync_custom_fields=sync_custom_fields,
+        sync_milestones=sync_milestones,
+        sync_dates=sync_dates,
+        sync_assignees=sync_assignees,
+        sync_pr_ci=sync_pr_ci,
+        sync_stats_factory=SyncStats,
+    )
+    schema = effective_deps.query_project_schema(project_owner, project_number)
+    items = effective_deps.list_project_issue_items(project_owner, project_number)
 
     if command == "audit-completeness":
-        report = build_audit_report(items)
+        report = effective_deps.build_audit_report(items)
         output = json.dumps(report, indent=2, sort_keys=True)
         return 0, output
 
-    stats = SyncStats(processed_issues=len(items))
+    stats = effective_deps.sync_stats_factory(processed_issues=len(items))
 
     if command == "sync-custom-fields":
-        stats = sync_custom_fields(items, schema, sync_config, dry_run=dry_run)
+        stats = effective_deps.sync_custom_fields(
+            items, schema, sync_config, dry_run=dry_run
+        )
     elif command == "sync-milestones":
-        stats = sync_milestones(items, sync_config, dry_run=dry_run)
+        stats = effective_deps.sync_milestones(items, sync_config, dry_run=dry_run)
     elif command == "sync-dates":
-        stats = sync_dates(items, schema, sync_config, dry_run=dry_run)
+        stats = effective_deps.sync_dates(items, schema, sync_config, dry_run=dry_run)
     elif command == "sync-assignees":
-        stats = sync_assignees(items, sync_config, dry_run=dry_run)
+        stats = effective_deps.sync_assignees(items, sync_config, dry_run=dry_run)
     elif command == "sync-pr-ci":
-        stats = sync_pr_ci(items, schema, sync_config, dry_run=dry_run)
+        stats = effective_deps.sync_pr_ci(items, schema, sync_config, dry_run=dry_run)
     elif command == "sync-all":
-        all_stats = SyncStats(processed_issues=len(items))
-        all_stats.merge(sync_custom_fields(items, schema, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_milestones(items, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_dates(items, schema, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_assignees(items, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_pr_ci(items, schema, sync_config, dry_run=dry_run))
+        all_stats = effective_deps.sync_stats_factory(processed_issues=len(items))
+        all_stats.merge(
+            effective_deps.sync_custom_fields(
+                items, schema, sync_config, dry_run=dry_run
+            )
+        )
+        all_stats.merge(
+            effective_deps.sync_milestones(items, sync_config, dry_run=dry_run)
+        )
+        all_stats.merge(
+            effective_deps.sync_dates(items, schema, sync_config, dry_run=dry_run)
+        )
+        all_stats.merge(
+            effective_deps.sync_assignees(items, sync_config, dry_run=dry_run)
+        )
+        all_stats.merge(
+            effective_deps.sync_pr_ci(items, schema, sync_config, dry_run=dry_run)
+        )
         all_stats.processed_issues = len(items)
         stats = all_stats
     else:
         raise ConfigError(f"Unknown command '{command}'")
 
-    report = build_audit_report(items)
+    report = effective_deps.build_audit_report(items)
     summary = {
         "command": command,
         "processed_issues": stats.processed_issues,

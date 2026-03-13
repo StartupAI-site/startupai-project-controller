@@ -164,6 +164,21 @@ def sync_pr_ci(
 print_sync_stats = _project_field_sync_operations.print_sync_stats
 
 
+def _run_single_sync_deps() -> _project_field_sync_operations.RunSingleSyncDeps:
+    """Build the patch-friendly field-sync execution bundle for one CLI run."""
+    return _project_field_sync_operations.RunSingleSyncDeps(
+        query_project_schema=query_project_schema,
+        list_project_issue_items=list_project_issue_items,
+        build_audit_report=build_audit_report,
+        sync_custom_fields=sync_custom_fields,
+        sync_milestones=sync_milestones,
+        sync_dates=sync_dates,
+        sync_assignees=sync_assignees,
+        sync_pr_ci=sync_pr_ci,
+        sync_stats_factory=SyncStats,
+    )
+
+
 def _run_single_sync(
     command: str,
     project_owner: str,
@@ -173,49 +188,14 @@ def _run_single_sync(
     dry_run: bool,
 ) -> tuple[int, str]:
     """Execute one sync command and return (exit_code, output_json)."""
-    schema = query_project_schema(project_owner, project_number)
-    items = list_project_issue_items(project_owner, project_number)
-
-    if command == "audit-completeness":
-        report = build_audit_report(items)
-        output = json.dumps(report, indent=2, sort_keys=True)
-        return 0, output
-
-    stats = SyncStats(processed_issues=len(items))
-
-    if command == "sync-custom-fields":
-        stats = sync_custom_fields(items, schema, sync_config, dry_run=dry_run)
-    elif command == "sync-milestones":
-        stats = sync_milestones(items, sync_config, dry_run=dry_run)
-    elif command == "sync-dates":
-        stats = sync_dates(items, schema, sync_config, dry_run=dry_run)
-    elif command == "sync-assignees":
-        stats = sync_assignees(items, sync_config, dry_run=dry_run)
-    elif command == "sync-pr-ci":
-        stats = sync_pr_ci(items, schema, sync_config, dry_run=dry_run)
-    elif command == "sync-all":
-        all_stats = SyncStats(processed_issues=len(items))
-        all_stats.merge(sync_custom_fields(items, schema, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_milestones(items, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_dates(items, schema, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_assignees(items, sync_config, dry_run=dry_run))
-        all_stats.merge(sync_pr_ci(items, schema, sync_config, dry_run=dry_run))
-        all_stats.processed_issues = len(items)
-        stats = all_stats
-    else:
-        raise ConfigError(f"Unknown command '{command}'")
-
-    report = build_audit_report(items)
-    summary = {
-        "command": command,
-        "processed_issues": stats.processed_issues,
-        "changed_fields": stats.changed_fields,
-        "changed_issue_assignees": stats.changed_issue_assignees,
-        "changed_issue_milestones": stats.changed_issue_milestones,
-        "created_milestones": stats.created_milestones,
-        "audit": report,
-    }
-    return 0, json.dumps(summary, indent=2, sort_keys=True)
+    return _project_field_sync_operations.run_single_sync(
+        command,
+        project_owner,
+        project_number,
+        sync_config,
+        dry_run=dry_run,
+        deps=_run_single_sync_deps(),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
