@@ -398,6 +398,7 @@ def _read_json_response(
                 detail=detail,
                 status_code=None,
             ) from error
+    raise AssertionError("transport retry loop exited without returning or raising")
 
 
 def _http_error_detail(raw: str, status_code: int) -> str:
@@ -523,9 +524,10 @@ def _rest_paginated(
     command_excerpt: str,
 ) -> list[Any]:
     pages: list[Any] = []
-    next_url: str | None = f"{API_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    base_url = f"{API_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    next_url: str | None = _append_query(base_url, query)
     if query:
-        next_url = _append_query(next_url, query)
+        next_url = _append_query(base_url, query)
 
     while next_url:
         page, headers = _rest_json(
@@ -559,11 +561,11 @@ def _run_api_command(
 
     if parsed.endpoint == "graphql":
         variables = dict(parsed.fields)
-        query = str(variables.pop("query", ""))
-        if not query:
+        graphql_query = str(variables.pop("query", ""))
+        if not graphql_query:
             return None
         payload = _graphql(
-            query,
+            graphql_query,
             variables,
             operation_type=operation_type,
             timeout_seconds=timeout_seconds,
@@ -574,12 +576,12 @@ def _run_api_command(
 
     method = (parsed.method or ("POST" if parsed.fields else "GET")).upper()
     if parsed.paginate:
-        query = dict(parsed.fields) if method == "GET" else None
-        if query is not None and "per_page" not in query:
-            query["per_page"] = 100
+        rest_query = dict(parsed.fields) if method == "GET" else None
+        if rest_query is not None and "per_page" not in rest_query:
+            rest_query["per_page"] = 100
         pages = _rest_paginated(
             parsed.endpoint,
-            query=query,
+            query=rest_query,
             operation_type=operation_type,
             timeout_seconds=timeout_seconds,
             retry_delays=retry_delays,
@@ -593,12 +595,12 @@ def _run_api_command(
             slurp=parsed.slurp,
         )
 
-    query = dict(parsed.fields) if method == "GET" else None
+    rest_query = dict(parsed.fields) if method == "GET" else None
     body = dict(parsed.fields) if method != "GET" else None
     payload, _headers = _rest_json(
         method,
         parsed.endpoint,
-        query=query,
+        query=rest_query,
         payload=body,
         operation_type=operation_type,
         timeout_seconds=timeout_seconds,
@@ -853,11 +855,19 @@ def _run_pr_list_command(
             retry_delays=retry_delays,
             command_excerpt="api search/issues",
         )
-        numbers = [
-            int(item.get("number"))
-            for item in (search_payload.get("items") or [])
-            if isinstance(item, dict) and item.get("number")
-        ]
+        numbers: list[int] = []
+        for item in search_payload.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            raw_number = item.get("number")
+            if isinstance(raw_number, int):
+                numbers.append(raw_number)
+                continue
+            if isinstance(raw_number, str):
+                try:
+                    numbers.append(int(raw_number))
+                except ValueError:
+                    continue
         for number in numbers[:limit]:
             pull, _headers = _rest_json(
                 "GET",

@@ -110,6 +110,7 @@ def _run_gh_command(command: list[str], error_prefix: str) -> str:
                 time.sleep(_GH_RETRY_DELAYS_SECONDS[attempt])
                 continue
             raise GhQueryError(f"{error_prefix}: {output}") from error
+    raise AssertionError("gh retry loop exited without returning or raising")
 
 
 def parse_issue_ref(value: str) -> IssueRef:

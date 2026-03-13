@@ -696,7 +696,10 @@ class ConsumerDB:
             (scope_key, action_type, payload_json, ts),
         )
         conn.commit()
-        return int(cursor.lastrowid)
+        row_id = cursor.lastrowid
+        if row_id is None:
+            raise RuntimeError("deferred action insert did not return a row id")
+        return row_id
 
     def list_deferred_actions(self) -> list[DeferredAction]:
         conn = self._get_connection()
@@ -1103,7 +1106,10 @@ class ConsumerDB:
             (event_type, issue_ref, payload_json, ts),
         )
         conn.commit()
-        return int(cursor.lastrowid)
+        row_id = cursor.lastrowid
+        if row_id is None:
+            raise RuntimeError("consumer metric insert did not return a row id")
+        return row_id
 
     def count_metric_events_since(
         self,
