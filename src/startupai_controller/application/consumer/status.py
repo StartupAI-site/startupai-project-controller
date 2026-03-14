@@ -527,7 +527,9 @@ def _worker_status_payload(
     now: datetime,
     drain_requested: bool,
     drain_requested_at: str | None = None,
-    parse_iso8601_timestamp: Callable[[str], datetime | None] = _parse_iso8601_best_effort,
+    parse_iso8601_timestamp: Callable[
+        [str], datetime | None
+    ] = _parse_iso8601_best_effort,
 ) -> WorkerStatusPayload:
     """Render one active worker payload."""
     return {
@@ -684,7 +686,9 @@ def _recent_session_status_payload(
     now: datetime,
     drain_requested: bool,
     drain_requested_at: str | None = None,
-    parse_iso8601_timestamp: Callable[[str], datetime | None] = _parse_iso8601_best_effort,
+    parse_iso8601_timestamp: Callable[
+        [str], datetime | None
+    ] = _parse_iso8601_best_effort,
     session_retry_state: SessionRetryStateFn,
 ) -> RecentSessionStatusPayload:
     """Render one recent session payload for status JSON."""
@@ -752,9 +756,7 @@ def _drain_blockers_payload(
                 "external_execution_started": worker["external_execution_started"],
                 "active_seconds": worker["active_seconds"],
                 "drain_observed_at": worker.get("drain_observed_at"),
-                "last_execution_progress_at": worker.get(
-                    "last_execution_progress_at"
-                ),
+                "last_execution_progress_at": worker.get("last_execution_progress_at"),
                 "shutdown_class": worker.get("shutdown_class"),
             }
         )

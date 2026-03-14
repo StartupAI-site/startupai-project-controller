@@ -132,6 +132,7 @@ from startupai_controller.validate_critical_path_promotion import (
 
 logger = logging.getLogger("board-consumer")
 
+
 def _log_completed_worker_results(
     active_tasks: dict[WorkerFuture, ActiveWorkerTask],
 ) -> None:
