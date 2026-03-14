@@ -478,7 +478,7 @@ def test_setup_launch_worktree_blocks_dirty_reused_worktree_and_cleans_local_sta
     assert latest.done_reason == "worktree_dirty_reused_branch"
 
 
-def test_local_review_owned_issue_refs_preserve_review_entry_until_explicit_requeue(
+def test_local_review_owned_issue_refs_preserve_current_review_entry_despite_stale_requeue(
     tmp_path: Path,
 ) -> None:
     db = _make_db(tmp_path)
@@ -512,7 +512,7 @@ def test_local_review_owned_issue_refs_preserve_review_entry_until_explicit_requ
         db.list_review_queue_items(),
         board_status_by_issue={"crew#10": "Ready"},
     )
-    assert refs == ()
+    assert refs == ("crew#10",)
 
 
 def test_locally_review_owned_issue_excludes_latest_pr_until_explicit_requeue(
@@ -533,6 +533,31 @@ def test_locally_review_owned_issue_excludes_latest_pr_until_explicit_requeue(
     db.increment_requeue_count("crew#10", pr_url)
 
     assert selection_retry_wiring.locally_review_owned_issue(db, "crew#10") is False
+
+
+def test_locally_review_owned_issue_preserves_current_review_entry_despite_stale_requeue(
+    tmp_path: Path,
+) -> None:
+    db = _make_db(tmp_path)
+    pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/216"
+    session_id = db.create_session("crew#10", "codex")
+    db.update_session(
+        session_id,
+        status="success",
+        phase="review",
+        pr_url=pr_url,
+    )
+    db.enqueue_review_item(
+        "crew#10",
+        pr_url=pr_url,
+        pr_repo="StartupAI-site/startupai-crew",
+        pr_number=216,
+        source_session_id=session_id,
+        now=datetime.now(timezone.utc),
+    )
+    db.increment_requeue_count("crew#10", pr_url)
+
+    assert selection_retry_wiring.locally_review_owned_issue(db, "crew#10") is True
 
 
 def test_transition_issue_to_in_progress_allows_same_session_ready_race(

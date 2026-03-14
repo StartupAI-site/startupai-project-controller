@@ -720,6 +720,45 @@ def test_limited_live_test_groups_reclaim_loops_and_worktree_blockers(
     ]
 
 
+def test_limited_live_test_surfaces_single_reclaim_after_review_removal(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    log_text = "\n".join(
+        [
+            "2026-03-14 09:15:49,496 board-consumer INFO Review queue: ReviewQueueDrainSummary(queued_count=19, due_count=1, seeded=('crew#23',), removed=('crew#10',), verdict_backfilled=(), rerun=(), auto_merge_enabled=(), requeued=(), blocked=(), skipped=(), escalated=(), partial_failure=False, error=None)",
+            "2026-03-14 09:19:54,396 board-consumer INFO Worker result [slot=2 issue=crew#10]: CycleResult(action='claimed', issue_ref='crew#10', session_id='d97a7d81521c', reason='success', pr_url='https://github.com/StartupAI-site/startupai-crew/pull/216')",
+        ]
+    )
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        log_text=log_text,
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.workflow_issues == [
+        {
+            "kind": "review_reclaimed_after_removal",
+            "issue_ref": "crew#10",
+            "pr_url": "https://github.com/StartupAI-site/startupai-crew/pull/216",
+            "count": 1,
+            "sample": (
+                "2026-03-14 09:19:54,396 board-consumer INFO Worker result [slot=2 issue=crew#10]: "
+                "CycleResult(action='claimed', issue_ref='crew#10', session_id='d97a7d81521c', "
+                "reason='success', pr_url='https://github.com/StartupAI-site/startupai-crew/pull/216')"
+            ),
+        }
+    ]
+
+
 def test_limited_live_test_surfaces_review_summary_parse_failures_from_status_fallback(
     tmp_path: Path,
 ) -> None:
