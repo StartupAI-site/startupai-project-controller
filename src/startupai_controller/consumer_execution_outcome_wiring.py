@@ -8,6 +8,7 @@ from typing import Callable, Protocol, cast
 
 import startupai_controller.consumer_comment_pr_helpers as _comment_pr_helpers
 import startupai_controller.consumer_review_handoff_helpers as _review_handoff_helpers
+import startupai_controller.consumer_automation_bridge as _automation_bridge
 from startupai_controller.application.consumer.execution import (
     ExecutionDeps,
     FinalizeClaimedSessionDeps,
@@ -165,7 +166,7 @@ def create_pr_for_execution_result(
     subprocess_runner: SubprocessRunnerFn | None,
     gh_runner: GitHubRunnerFn | None,
     has_commits_on_branch: Callable[..., bool],
-    validate_branch_publication: Callable[..., None],
+    validate_pr_head_eligibility: Callable[..., None],
     create_or_update_pr: Callable[..., str],
     pr_creation_outcome_factory: type[PrCreationOutcome],
     logger: LoggerLike,
@@ -181,7 +182,7 @@ def create_pr_for_execution_result(
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
         has_commits_on_branch=has_commits_on_branch,
-        validate_branch_publication=validate_branch_publication,
+        validate_pr_head_eligibility=validate_pr_head_eligibility,
         create_or_update_pr=create_or_update_pr,
         pr_creation_outcome_factory=pr_creation_outcome_factory,
         logger=logger,
@@ -420,6 +421,7 @@ def handle_non_review_execution_outcome(
     launch_context: PreparedLaunchContext,
     session_id: str,
     session_status: str,
+    failure_reason: str | None,
     codex_result: CodexResultPayload | None,
     has_commits: bool,
     pr_port: PullRequestPort | None,
@@ -520,6 +522,36 @@ def handle_non_review_execution_outcome(
             gh_runner=gh_runner_fn,
         )
 
+    def _set_blocked_with_reason(
+        issue_ref: str,
+        reason: str,
+        config: CriticalPathConfig,
+        project_owner: str,
+        project_number: int,
+        *,
+        board_port: BoardMutationPort | None = None,
+    ) -> None:
+        _automation_bridge.set_blocked_with_reason(
+            issue_ref,
+            reason,
+            config,
+            project_owner,
+            project_number,
+            board_port=board_port,
+            board_info_resolver=board_info_resolver,
+            board_mutator=board_mutator,
+            gh_runner=gh_runner_fn,
+        )
+
+    def _set_issue_handoff_target(
+        issue_ref: str,
+        target: str,
+        *,
+        board_port: BoardMutationPort | None = None,
+    ) -> None:
+        port = board_port or effective_board_port
+        port.set_issue_field(issue_ref, "Handoff To", target)
+
     return _handle_non_review_execution_outcome_use_case(
         config=config,
         db=db,
@@ -528,6 +560,8 @@ def handle_non_review_execution_outcome(
             verify_resolution_payload=_verify_resolution_payload,
             apply_resolution_action=_apply_resolution_action,
             return_issue_to_ready=_return_issue_to_ready,
+            set_blocked_with_reason=_set_blocked_with_reason,
+            set_issue_handoff_target=_set_issue_handoff_target,
             record_successful_github_mutation=record_successful_github_mutation,
             mark_degraded=mark_degraded,
             queue_status_transition=queue_status_transition,
@@ -536,10 +570,19 @@ def handle_non_review_execution_outcome(
                 "Ready reset failed after non-PR session: %s",
                 err,
             ),
+            log_blocked_transition_failure=lambda err: logger.error(
+                "Blocked transition failed after deterministic PR failure: %s",
+                err,
+            ),
+            log_handoff_target_failure=lambda err: logger.error(
+                "Handoff target update failed after deterministic PR failure: %s",
+                err,
+            ),
         ),
         launch_context=launch_context,
         session_id=session_id,
         session_status=session_status,
+        failure_reason=failure_reason,
         codex_result=codex_result,
         has_commits=has_commits,
         gh_runner=gh_runner_port or gh_runner_fn,
@@ -752,6 +795,7 @@ def execute_claimed_session(
         launch_context: PreparedLaunchContext,
         session_id: str,
         session_status: str,
+        failure_reason: str | None,
         codex_result: CodexResultPayload | None,
         has_commits: bool,
         gh_runner: GitHubRunnerFn | GhRunnerPort | None,
@@ -765,6 +809,7 @@ def execute_claimed_session(
             launch_context=launch_context,
             session_id=session_id,
             session_status=session_status,
+            failure_reason=failure_reason,
             codex_result=codex_result,
             has_commits=has_commits,
             pr_port=effective_pr_port,

@@ -33,6 +33,11 @@ if TYPE_CHECKING:
 
 CodexResultPayload = CodexSessionResult
 SubprocessRunnerFn = Callable[..., "subprocess.CompletedProcess[str]"]
+NON_SELF_HEALING_PR_FAILURES = {
+    "branch_not_published": "PR head branch is not published on origin",
+    "branch_mismatch": "Worktree branch does not match expected PR head",
+    "branch_no_remote_commits": "PR head branch has no commits ahead of origin/main",
+}
 
 
 class CreatePrForExecutionResultFn(Protocol):
@@ -83,6 +88,7 @@ class HandleNonReviewExecutionOutcomeFn(Protocol):
         launch_context: PreparedLaunchContext,
         session_id: str,
         session_status: str,
+        failure_reason: str | None,
         codex_result: CodexResultPayload | None,
         has_commits: bool,
         gh_runner: GhRunnerPort | Callable[..., str] | None,
@@ -323,11 +329,15 @@ class NonReviewOutcomeDeps:
     verify_resolution_payload: VerifyResolutionPayloadFn
     apply_resolution_action: ApplyResolutionActionFn
     return_issue_to_ready: ReturnIssueToReadyFn
+    set_blocked_with_reason: Callable[..., None]
+    set_issue_handoff_target: Callable[..., None]
     record_successful_github_mutation: Callable[[ConsumerRuntimeStatePort], None]
     mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None]
     queue_status_transition: QueueStatusTransitionFn
     record_metric: RecordMetricFn
     log_ready_reset_failure: Callable[[Exception], None]
+    log_blocked_transition_failure: Callable[[Exception], None]
+    log_handoff_target_failure: Callable[[Exception], None]
 
 
 def execute_claimed_session(
@@ -383,6 +393,7 @@ def execute_claimed_session(
             launch_context=launch_context,
             session_id=session_id,
             session_status="aborted",
+            failure_reason="drain_requested_pre_execution",
             codex_result=None,
             has_commits=False,
             gh_runner=gh_runner,
@@ -466,6 +477,7 @@ def execute_claimed_session(
             launch_context=launch_context,
             session_id=session_id,
             session_status=pr_outcome.session_status,
+            failure_reason=pr_outcome.failure_reason,
             codex_result=codex_result,
             has_commits=pr_outcome.has_commits,
             gh_runner=gh_runner,
@@ -554,6 +566,7 @@ def handle_non_review_execution_outcome(
     launch_context: PreparedLaunchContext,
     session_id: str,
     session_status: str,
+    failure_reason: str | None,
     codex_result: CodexResultPayload | None,
     has_commits: bool,
     gh_runner: GhRunnerPort | Callable[..., str] | None,
@@ -594,6 +607,42 @@ def handle_non_review_execution_outcome(
             deps.record_metric(
                 db, config, "session_transition_done", issue_ref=candidate
             )
+        return updated_session_status, resolution_evaluation, done_reason
+
+    blocked_reason = NON_SELF_HEALING_PR_FAILURES.get(failure_reason or "")
+    if blocked_reason is not None:
+        try:
+            deps.set_blocked_with_reason(
+                candidate,
+                blocked_reason,
+                cp_config,
+                config.project_owner,
+                config.project_number,
+                board_port=board_port,
+            )
+            deps.record_successful_github_mutation(db)
+        except Exception as err:
+            deps.log_blocked_transition_failure(err)
+            deps.mark_degraded(db, f"blocked-reset:{err}")
+            deps.queue_status_transition(
+                db,
+                candidate,
+                to_status="Blocked",
+                from_statuses={"In Progress", "Review", "Ready"},
+                blocked_reason=blocked_reason,
+            )
+            return updated_session_status, resolution_evaluation, done_reason
+
+        try:
+            deps.set_issue_handoff_target(
+                candidate,
+                "claude",
+                board_port=board_port,
+            )
+            deps.record_successful_github_mutation(db)
+        except Exception as err:
+            deps.log_handoff_target_failure(err)
+            deps.mark_degraded(db, f"blocked-handoff:{err}")
         return updated_session_status, resolution_evaluation, done_reason
 
     try:

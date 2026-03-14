@@ -15,13 +15,18 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 
 
-class BranchPublicationError(RuntimeError):
-    """Typed PR-head publication failure raised before PR creation."""
+class PrHeadEligibilityError(RuntimeError):
+    """Typed PR-head eligibility failure raised before PR creation."""
 
     def __init__(self, *, reason_code: str, detail: str) -> None:
         self.reason_code = reason_code
         self.detail = detail
         super().__init__(detail)
+
+
+# Compatibility alias kept for existing imports/tests that still use the legacy
+# publication-focused name.
+BranchPublicationError = PrHeadEligibilityError
 
 
 def run_workspace_hooks(
@@ -142,13 +147,13 @@ def has_commits_on_branch(
     return bool(result.stdout.strip())
 
 
-def validate_branch_publication(
+def validate_pr_head_eligibility(
     worktree_path: str,
     branch: str,
     *,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
-    """Require that the PR head branch exists locally and is published on origin."""
+    """Require that the PR head is published and remotely ahead of origin/main."""
     runner = subprocess_runner or (
         lambda args, **kwargs: subprocess.run(args, **kwargs)
     )
@@ -168,12 +173,12 @@ def validate_branch_publication(
             or current_branch.stdout.strip()
             or "unable to resolve current branch"
         )
-        raise BranchPublicationError(
+        raise PrHeadEligibilityError(
             reason_code="branch_not_published",
             detail=f"cannot resolve PR head branch in {worktree_path}: {detail}",
         )
     if current_branch_name != branch:
-        raise BranchPublicationError(
+        raise PrHeadEligibilityError(
             reason_code="branch_mismatch",
             detail=(
                 f"refusing PR creation for {branch}: worktree is on "
@@ -183,14 +188,69 @@ def validate_branch_publication(
 
     local_branch = _git("show-ref", "--verify", f"refs/heads/{branch}")
     if local_branch.returncode != 0:
-        raise BranchPublicationError(
+        raise PrHeadEligibilityError(
             reason_code="branch_not_published",
             detail=f"head branch {branch} does not exist locally",
+        )
+    local_head = _git("rev-parse", f"refs/heads/{branch}")
+    if local_head.returncode != 0 or not local_head.stdout.strip():
+        detail = (
+            local_head.stderr.strip()
+            or local_head.stdout.strip()
+            or "unable to resolve local HEAD"
+        )
+        raise PrHeadEligibilityError(
+            reason_code="branch_not_published",
+            detail=f"cannot resolve local head for {branch}: {detail}",
         )
 
     remote_branch = _git("ls-remote", "--exit-code", "--heads", "origin", branch)
     if remote_branch.returncode != 0 or not remote_branch.stdout.strip():
-        raise BranchPublicationError(
+        raise PrHeadEligibilityError(
             reason_code="branch_not_published",
             detail=f"head branch {branch} is not published on origin",
         )
+    remote_head_sha = remote_branch.stdout.strip().split()[0]
+    local_head_sha = local_head.stdout.strip()
+    if remote_head_sha != local_head_sha:
+        raise PrHeadEligibilityError(
+            reason_code="branch_not_published",
+            detail=(
+                f"head branch {branch} on origin does not match local HEAD "
+                f"({remote_head_sha[:12]} != {local_head_sha[:12]})"
+            ),
+        )
+
+    remote_commit_count = _git(
+        "rev-list",
+        "--count",
+        f"refs/remotes/origin/main..{remote_head_sha}",
+    )
+    if remote_commit_count.returncode != 0:
+        detail = (
+            remote_commit_count.stderr.strip()
+            or remote_commit_count.stdout.strip()
+            or "unable to compare remote branch against origin/main"
+        )
+        raise RuntimeError(
+            f"cannot verify commits between origin/main and {branch}: {detail}"
+        )
+    if int(remote_commit_count.stdout.strip() or "0") < 1:
+        raise PrHeadEligibilityError(
+            reason_code="branch_no_remote_commits",
+            detail=f"head branch {branch} has no commits ahead of origin/main",
+        )
+
+
+def validate_branch_publication(
+    worktree_path: str,
+    branch: str,
+    *,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> None:
+    """Compatibility wrapper for legacy publication-only callers."""
+    validate_pr_head_eligibility(
+        worktree_path,
+        branch,
+        subprocess_runner=subprocess_runner,
+    )

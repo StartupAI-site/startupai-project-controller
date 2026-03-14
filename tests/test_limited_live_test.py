@@ -601,3 +601,66 @@ def test_limited_live_test_applies_timeout_to_preflight_process_checks(
         60.0,
     ) in backend.timeout_requests
     assert (["ps", "-eo", "pid=,command="], 60.0) in backend.timeout_requests
+
+
+def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_conclusion(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    log_text = "\n".join(
+        [
+            "2026-03-13 18:52:27,264 board-consumer ERROR PR creation skipped: head branch feat/129-example is not published on origin",
+            "2026-03-13 18:52:32,537 board-consumer INFO Board reconciliation: ReconciliationResult(moved_ready=('app#129',), moved_in_progress=(), moved_review=(), moved_blocked=())",
+            "2026-03-13 19:03:32,752 board-consumer ERROR PR creation skipped: head branch feat/129-example updated detail is not published on origin",
+            "2026-03-13 19:03:43,896 board-consumer INFO Worker result [slot=3 issue=app#129]: CycleResult(action='claimed', issue_ref='app#129', session_id='709e167f71a8', reason='failed', pr_url=None)",
+        ]
+    )
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[
+            _status_payload(
+                active_leases=1,
+                workers=[{"issue_ref": "app#129"}],
+                recent_sessions=[{"issue_ref": "app#129"}],
+            ),
+            _status_payload(
+                active_leases=1,
+                workers=[{"issue_ref": "app#129"}],
+                recent_sessions=[{"issue_ref": "app#129"}],
+            ),
+            _status_payload(),
+        ],
+        status_full=[
+            _status_payload(
+                active_leases=1,
+                workers=[{"issue_ref": "app#129"}],
+                recent_sessions=[{"issue_ref": "app#129"}],
+            ),
+            _status_payload(),
+        ],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        log_text=log_text,
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.conclusion == "current transport acceptable for live use"
+    assert summary.workflow_issues == [
+        {
+            "kind": "pr_creation_skipped",
+            "issue_ref": "app#129",
+            "count": 2,
+            "sample": (
+                "2026-03-13 18:52:27,264 board-consumer ERROR PR creation skipped: "
+                "head branch feat/129-example is not published on origin"
+            ),
+        }
+    ]
+    assert any(
+        "Workflow issue [pr_creation_skipped app#129 x2]" in item
+        for item in summary.issues
+    )

@@ -176,6 +176,7 @@ def handle_non_review_execution_outcome(
     gh_runner: GitHubRunnerFn | GhRunnerPort | None,
     pr_port: PullRequestPort | None = None,
     board_port: BoardMutationPort | None = None,
+    failure_reason: str | None = None,
 ) -> tuple[str, ResolutionEvaluation | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
     return _session_execution_wiring.handle_non_review_execution_outcome(
@@ -185,6 +186,7 @@ def handle_non_review_execution_outcome(
         launch_context=launch_context,
         session_id=session_id,
         session_status=session_status,
+        failure_reason=failure_reason,
         codex_result=codex_result,
         has_commits=has_commits,
         board_info_resolver=board_info_resolver,

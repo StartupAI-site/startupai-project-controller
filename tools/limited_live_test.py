@@ -22,6 +22,8 @@ TRANSPORT_LOG_PATTERN = re.compile(
     r"(rate limit|github outage|graphql|rest api|gh command|auth|network|timeout|suppressed|degraded)",
     re.IGNORECASE,
 )
+ISSUE_REF_PATTERN = re.compile(r"\b(?:app|crew|site)#\d+\b")
+BRANCH_NUMBER_PATTERN = re.compile(r"feat/(?P<number>\d+)-")
 SUMMARY_CONCLUSIONS = (
     "current transport acceptable for live use",
     "current transport acceptable but needs deeper instrumentation",
@@ -99,11 +101,20 @@ class RunSummary:
     degraded_periods: list[dict[str, Any]]
     claim_suppression_periods: list[dict[str, Any]]
     consumer_transport_log_highlights: list[str]
+    workflow_issues: list[dict[str, Any]]
     control_plane_proxy_counts: list[dict[str, Any]]
     control_plane_health_transitions: list[dict[str, Any]]
     worked: list[str]
     issues: list[str]
     improvements: list[str]
+
+
+@dataclass
+class WorkflowIssue:
+    kind: str
+    issue_ref: str
+    count: int
+    sample: str
 
 
 @dataclass
@@ -619,6 +630,7 @@ class LimitedLiveTestHarness:
             "claim_suppressed_reason",
         )
         log_highlights = self._transport_log_highlights()
+        workflow_issues = self._workflow_log_issues()
         control_plane_counts = []
         for record in self.tick_records:
             payload = record.payload or {}
@@ -655,6 +667,11 @@ class LimitedLiveTestHarness:
                 self.issues.append(
                     "Drain timeout exceeded; sent SIGINT/SIGTERM escalation."
                 )
+        for issue in workflow_issues:
+            self.issues.append(
+                f"Workflow issue [{issue.kind} {issue.issue_ref} x{issue.count}]: "
+                f"{issue.sample}"
+            )
         improvements = list(self.improvements)
         if conclusion == SUMMARY_CONCLUSIONS[1]:
             improvements.append(
@@ -675,6 +692,7 @@ class LimitedLiveTestHarness:
             degraded_periods=degraded_periods,
             claim_suppression_periods=claim_periods,
             consumer_transport_log_highlights=log_highlights,
+            workflow_issues=[asdict(issue) for issue in workflow_issues],
             control_plane_proxy_counts=control_plane_counts,
             control_plane_health_transitions=control_plane_health_transitions,
             worked=_dedupe(self.worked),
@@ -794,6 +812,32 @@ class LimitedLiveTestHarness:
             if TRANSPORT_LOG_PATTERN.search(line):
                 highlights.append(line.strip())
         return highlights[:20]
+
+    def _workflow_log_issues(self) -> list[WorkflowIssue]:
+        log_path = self.logs_dir / "consumer-run.log"
+        if not log_path.exists():
+            return []
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        grouped: dict[tuple[str, str], WorkflowIssue] = {}
+        for index, line in enumerate(lines):
+            kind = _workflow_issue_kind(line)
+            if kind is None:
+                continue
+            issue_ref = _infer_workflow_issue_ref(lines, index)
+            key = (kind, issue_ref)
+            if key not in grouped:
+                grouped[key] = WorkflowIssue(
+                    kind=kind,
+                    issue_ref=issue_ref,
+                    count=1,
+                    sample=line.strip(),
+                )
+                continue
+            grouped[key].count += 1
+        return sorted(
+            grouped.values(),
+            key=lambda issue: (issue.kind, issue.issue_ref, issue.sample),
+        )
 
     def _timeline_name(self, stem: str) -> str:
         self._timeline_counter += 1
@@ -1032,6 +1076,38 @@ def _derive_health_transitions(records: list[SnapshotRecord]) -> list[dict[str, 
             )
             last_health = health
     return transitions
+
+
+def _workflow_issue_kind(line: str) -> str | None:
+    stripped = line.strip()
+    if "PR creation skipped:" in stripped:
+        return "pr_creation_skipped"
+    if "PR creation failed:" in stripped:
+        return "pr_creation_failed"
+    if " ERROR " in line and not TRANSPORT_LOG_PATTERN.search(line):
+        return "workflow_error"
+    return None
+
+
+def _infer_workflow_issue_ref(lines: list[str], index: int) -> str:
+    same_line_match = ISSUE_REF_PATTERN.search(lines[index])
+    if same_line_match is not None:
+        return same_line_match.group(0)
+
+    branch_match = BRANCH_NUMBER_PATTERN.search(lines[index])
+    branch_number = branch_match.group("number") if branch_match is not None else None
+    window_start = max(0, index - 3)
+    window_end = min(len(lines), index + 4)
+    window_refs: list[str] = []
+    for line in lines[window_start:window_end]:
+        for issue_ref in ISSUE_REF_PATTERN.findall(line):
+            if branch_number is None or issue_ref.endswith(f"#{branch_number}"):
+                window_refs.append(issue_ref)
+    if window_refs:
+        return window_refs[0]
+    if branch_number is not None:
+        return f"unknown#{branch_number}"
+    return "unknown"
 
 
 def _dedupe(items: list[str]) -> list[str]:
