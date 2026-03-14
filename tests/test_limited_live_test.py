@@ -33,6 +33,9 @@ class FakeClock:
         self._monotonic += seconds
         self._now += timedelta(seconds=seconds)
 
+    def shift_wall_clock(self, seconds: float) -> None:
+        self._now += timedelta(seconds=seconds)
+
 
 @dataclass
 class FakeProcess:
@@ -95,6 +98,7 @@ class FakeBackend:
         failures: dict[tuple[str, bool | None], int] | None = None,
         timeouts: dict[tuple[str, bool | None], bool] | None = None,
         delays: dict[tuple[str, bool | None], float] | None = None,
+        wall_clock_jumps: dict[tuple[str, bool | None], float] | None = None,
     ) -> None:
         self.clock = clock
         self.process = process
@@ -108,6 +112,7 @@ class FakeBackend:
         self.failures = failures or {}
         self.timeouts = timeouts or {}
         self.delays = delays or {}
+        self.wall_clock_jumps = dict(wall_clock_jumps or {})
         self.commands: list[list[str]] = []
         self.timeout_requests: list[tuple[list[str], float | None]] = []
 
@@ -123,8 +128,15 @@ class FakeBackend:
         timed_out = self.timeouts.get(key, False)
         returncode = self.failures.get(key, 0)
         delay_seconds = self.delays.get(key, 0.0)
+        wall_clock_jump_seconds = self.wall_clock_jumps.pop(key, 0.0)
         if delay_seconds:
-            self.clock.sleep(delay_seconds)
+            if timeout_seconds is not None and delay_seconds > timeout_seconds:
+                self.clock.sleep(timeout_seconds)
+                timed_out = True
+            else:
+                self.clock.sleep(delay_seconds)
+        if wall_clock_jump_seconds:
+            self.clock.shift_wall_clock(wall_clock_jump_seconds)
         stdout = ""
         stderr = ""
         if argv[:3] == ["git", "rev-parse", "HEAD"]:
@@ -899,6 +911,118 @@ def test_limited_live_test_requests_drain_before_near_deadline_full_snapshot(
     summary = harness.run()
 
     assert summary.actual_drain_requested_at is not None
+    assert summary.drain_request_slip_seconds == 0.0
+    assert summary.snapshot_failures == []
+    assert not any(
+        issue["kind"] == "drain_request_late" for issue in summary.workflow_issues
+    )
+
+
+def test_limited_live_test_requests_drain_before_near_deadline_local_snapshot(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    config = _config(tmp_path)
+    config.duration_seconds = 10
+    config.local_snapshot_seconds = 4
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        delays={
+            ("status", True): 30.0,
+        },
+    )
+    harness = LimitedLiveTestHarness(config, backend, clock)
+
+    summary = harness.run()
+
+    assert summary.actual_drain_requested_at is not None
+    assert summary.drain_request_slip_seconds == 0.0
+    assert summary.snapshot_failures == []
+    assert not any(
+        issue["kind"] == "drain_request_late" for issue in summary.workflow_issues
+    )
+    assert (
+        harness._consumer_status_command(local_only=True),
+        6.0,
+    ) in backend.timeout_requests
+
+
+def test_limited_live_test_preempts_near_deadline_full_bundle_command_by_remaining_time(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    config = _config(tmp_path)
+    config.duration_seconds = 45
+    config.full_snapshot_seconds = 24
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        delays={
+            ("status", False): 30.0,
+        },
+    )
+    harness = LimitedLiveTestHarness(config, backend, clock)
+
+    summary = harness.run()
+
+    assert summary.drain_request_slip_seconds == 0.0
+    assert summary.snapshot_failures == []
+    assert (
+        harness._consumer_status_command(local_only=False),
+        21.0,
+    ) in backend.timeout_requests
+
+
+def test_limited_live_test_computes_drain_slip_from_monotonic_time_not_wall_clock(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(
+        clock=clock,
+        drain_exit_delay=None,
+        sigint_stops=False,
+        sigterm_stops=True,
+    )
+    inflight_worker = {
+        "issue_ref": "crew#84",
+        "status": "running",
+        "external_execution_started": True,
+        "drain_wait_class": "finishing_inflight_execution",
+    }
+    active_status = _status_payload(
+        active_leases=1,
+        workers=[inflight_worker],
+        recent_sessions=[inflight_worker],
+        last_successful_github_mutation_at="2026-03-13T12:05:00+00:00",
+    )
+    active_status["local_only"] = True
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[active_status, active_status, active_status, active_status],
+        status_full=[
+            _status_payload(active_leases=1),
+            _status_payload(active_leases=1),
+        ],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        wall_clock_jumps={("status", True): 10.0},
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
     assert summary.drain_request_slip_seconds == 0.0
     assert not any(
         issue["kind"] == "drain_request_late" for issue in summary.workflow_issues
