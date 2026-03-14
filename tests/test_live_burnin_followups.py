@@ -241,9 +241,7 @@ def test_validate_pr_head_eligibility_rejects_remote_head_mismatch() -> None:
             "origin",
             "feat/84-test",
         ]:
-            return _completed_process(
-                args, stdout="def456\trefs/heads/feat/84-test\n"
-            )
+            return _completed_process(args, stdout="def456\trefs/heads/feat/84-test\n")
         raise AssertionError(args)
 
     with pytest.raises(
@@ -274,9 +272,7 @@ def test_validate_pr_head_eligibility_rejects_remote_head_without_commits() -> N
             "origin",
             "feat/84-test",
         ]:
-            return _completed_process(
-                args, stdout="abc123\trefs/heads/feat/84-test\n"
-            )
+            return _completed_process(args, stdout="abc123\trefs/heads/feat/84-test\n")
         if args[3:] == ["rev-list", "--count", "refs/remotes/origin/main..abc123"]:
             return _completed_process(args, stdout="0\n")
         raise AssertionError(args)
@@ -381,7 +377,9 @@ def test_handle_non_review_execution_outcome_blocks_deterministic_pr_failures(
                 set_issue_handoff_target=lambda issue_ref, target, **_kwargs: handoff_calls.append(
                     (issue_ref, target)
                 ),
-                record_successful_github_mutation=lambda _db: metrics.append("mutation"),
+                record_successful_github_mutation=lambda _db: metrics.append(
+                    "mutation"
+                ),
                 mark_degraded=lambda *_args, **_kwargs: pytest.fail(
                     "deterministic PR failures should not degrade when block succeeds"
                 ),

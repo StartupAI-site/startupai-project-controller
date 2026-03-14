@@ -660,4 +660,7 @@ def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_con
             ),
         }
     ]
-    assert any("Workflow issue [pr_creation_skipped app#129 x2]" in item for item in summary.issues)
+    assert any(
+        "Workflow issue [pr_creation_skipped app#129 x2]" in item
+        for item in summary.issues
+    )
