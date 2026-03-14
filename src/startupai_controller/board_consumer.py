@@ -33,6 +33,7 @@ from startupai_controller.consumer_drain_control import (
     request_drain as _request_drain,
 )
 from startupai_controller.consumer_operational_wiring import (
+    recover_interrupted_sessions as _recover_interrupted_sessions,
     reconcile_board_truth as _reconcile_board_truth,
 )
 from startupai_controller import consumer_runtime_wiring as _runtime_wiring

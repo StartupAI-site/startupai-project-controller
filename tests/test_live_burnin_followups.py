@@ -6,6 +6,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -209,6 +210,72 @@ def test_one_shot_json_reports_error_without_changing_error_exit_code(
     assert payload["action"] == "error"
     assert payload["exit_class"] == "error"
     assert payload["reason"] == "synthetic one-shot failure"
+
+
+def test_recover_interrupted_json_reports_recovered_leases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeConfig:
+        def __init__(
+            self,
+            *,
+            db_path: Path,
+            automation_config_path: Path,
+            critical_paths_path: Path,
+            **_kwargs: object,
+        ) -> None:
+            self.db_path = db_path
+            self.automation_config_path = automation_config_path
+            self.critical_paths_path = critical_paths_path
+
+    class FakeDb:
+        def close(self) -> None:
+            return None
+
+    class FakeLogger:
+        def info(self, *_args, **_kwargs) -> None:
+            return None
+
+    fake_core = type(
+        "FakeCore",
+        (),
+        {
+            "DEFAULT_DB_PATH": tmp_path / "consumer.sqlite3",
+            "DEFAULT_CONFIG_PATH": tmp_path / "critical-paths.json",
+            "DEFAULT_AUTOMATION_CONFIG_PATH": tmp_path / "automation.json",
+            "DEFAULT_STATUS_HOST": "127.0.0.1",
+            "DEFAULT_STATUS_PORT": 8765,
+            "DEFAULT_DRAIN_PATH": tmp_path / "consumer.drain",
+            "ConsumerConfig": FakeConfig,
+            "ConfigError": RuntimeError,
+            "load_config": staticmethod(lambda _path: object()),
+            "load_automation_config": staticmethod(lambda _path: None),
+            "_apply_automation_runtime": staticmethod(lambda *_args, **_kwargs: None),
+            "open_consumer_db": staticmethod(lambda _path: FakeDb()),
+            "_recover_interrupted_sessions": staticmethod(
+                lambda *_args, **_kwargs: [
+                    type("Lease", (), {"issue_ref": "crew#84"})(),
+                    type("Lease", (), {"issue_ref": "site#42"})(),
+                ]
+            ),
+            "logger": FakeLogger(),
+        },
+    )()
+
+    monkeypatch.setattr(board_consumer_cli, "_core", lambda: fake_core)
+
+    exit_code = board_consumer_cli.main(
+        ["recover-interrupted", "--db-path", str(tmp_path / "db.sqlite3")]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload == {
+        "recovered_leases": 2,
+        "issue_refs": ["crew#84", "site#42"],
+    }
 
 
 def test_validate_pr_head_eligibility_rejects_branch_mismatch() -> None:
@@ -476,6 +543,71 @@ def test_setup_launch_worktree_blocks_dirty_reused_worktree_and_cleans_local_sta
     assert latest.phase == "blocked"
     assert latest.failure_reason == "worktree_dirty_reused_branch"
     assert latest.done_reason == "worktree_dirty_reused_branch"
+
+
+def test_reconcile_single_in_progress_item_treats_review_conflict_as_review_truth(
+    tmp_path: Path,
+) -> None:
+    config = _make_consumer_config(tmp_path)
+    db = _make_db(tmp_path)
+    store = runtime_wiring.build_session_store(db)
+    pr_url = "https://github.com/StartupAI-site/startupai.site/pull/86"
+    session_id = db.create_session("site#33", "codex", session_kind="repair")
+    db.update_session(
+        session_id,
+        status="failed",
+        pr_url=pr_url,
+        branch_name="feat/33-fix",
+    )
+    ready_calls: list[str] = []
+
+    result = board_state_helpers.reconcile_single_in_progress_item(
+        "site#33",
+        consumer_config=config,
+        critical_path_config=type(
+            "CpConfig",
+            (),
+            {"issue_prefixes": {"site": "StartupAI-site/startupai.site"}},
+        )(),
+        automation_config=object(),
+        store=store,
+        pr_port=object(),
+        review_state_port=object(),
+        board_port=object(),
+        dry_run=False,
+        resolve_issue_coordinates=lambda *_args, **_kwargs: (
+            "StartupAI-site",
+            "startupai.site",
+            33,
+        ),
+        classify_open_pr_candidates=lambda *_args, **_kwargs: (
+            "adoptable",
+            SimpleNamespace(url=pr_url),
+            "qualifying-open-pr",
+        ),
+        reconcile_in_progress_decision=lambda *_args, **_kwargs: "ready",
+        return_issue_to_ready=lambda issue_ref, *_args, **_kwargs: (
+            ready_calls.append(issue_ref),
+            (_ for _ in ()).throw(
+                board_state_helpers.GhQueryError(
+                    "Failed moving site#33 back to Ready: current status=Review"
+                )
+            ),
+        )[1],
+        transition_issue_to_review=lambda *_args, **_kwargs: pytest.fail(
+            "review fallback should not re-run the review mutation"
+        ),
+        set_blocked_with_reason=lambda *_args, **_kwargs: pytest.fail(
+            "review conflict with surviving PR should not block"
+        ),
+    )
+
+    latest = db.latest_session_for_issue("site#33")
+    assert result == "review"
+    assert ready_calls == ["site#33"]
+    assert latest is not None
+    assert latest.phase == "review"
+    assert latest.pr_url == pr_url
 
 
 def test_local_review_owned_issue_refs_preserve_current_review_entry_despite_stale_requeue(

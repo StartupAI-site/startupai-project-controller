@@ -94,6 +94,7 @@ class FakeBackend:
         local_processes: list[str] | None = None,
         failures: dict[tuple[str, bool | None], int] | None = None,
         timeouts: dict[tuple[str, bool | None], bool] | None = None,
+        delays: dict[tuple[str, bool | None], float] | None = None,
     ) -> None:
         self.clock = clock
         self.process = process
@@ -106,6 +107,7 @@ class FakeBackend:
         self._local_processes = local_processes or []
         self.failures = failures or {}
         self.timeouts = timeouts or {}
+        self.delays = delays or {}
         self.commands: list[list[str]] = []
         self.timeout_requests: list[tuple[list[str], float | None]] = []
 
@@ -120,6 +122,9 @@ class FakeBackend:
         key = self._command_key(argv)
         timed_out = self.timeouts.get(key, False)
         returncode = self.failures.get(key, 0)
+        delay_seconds = self.delays.get(key, 0.0)
+        if delay_seconds:
+            self.clock.sleep(delay_seconds)
         stdout = ""
         stderr = ""
         if argv[:3] == ["git", "rev-parse", "HEAD"]:
@@ -156,6 +161,8 @@ class FakeBackend:
                     self.clock.monotonic() + self.process.drain_exit_delay
                 )
             stdout = '{"drain_requested": true}\n'
+        elif self._is_consumer_command(argv) and "recover-interrupted" in argv:
+            stdout = json.dumps({"recovered_leases": 0, "issue_refs": []})
         elif self._is_consumer_command(argv) and "reconcile" in argv:
             stdout = "reconcile dry run\n"
         elif argv[:2] == ["ps", "-eo"]:
@@ -792,7 +799,7 @@ def test_limited_live_test_surfaces_review_summary_parse_failures_from_status_fa
             "kind": "review_summary_parse_error",
             "issue_ref": "global",
             "pr_url": None,
-            "count": 4,
+            "count": 3,
             "sample": (
                 "Invalid issue ref 'StartupAI-site/app.startupai-site#43'. Expected format "
                 "<prefix>#123 where prefix is one of app|crew|site. "
@@ -800,3 +807,88 @@ def test_limited_live_test_surfaces_review_summary_parse_failures_from_status_fa
             ),
         }
     ]
+
+
+def test_limited_live_test_ignores_removed_then_immediate_completion_then_seed(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    log_text = "\n".join(
+        [
+            "2026-03-14 10:42:15,101 board-consumer INFO Review queue: ReviewQueueDrainSummary(queued_count=23, due_count=0, seeded=(), removed=('app#36',), verdict_backfilled=(), rerun=(), auto_merge_enabled=(), requeued=(), blocked=(), skipped=(), escalated=(), partial_failure=False, error=None)",
+            "2026-03-14 10:42:16,114 board-consumer INFO Worker result [slot=4 issue=app#36]: CycleResult(action='claimed', issue_ref='app#36', session_id='3de57805d798', reason='success', pr_url='https://github.com/StartupAI-site/app.startupai-site/pull/224')",
+            "2026-03-14 10:42:31,181 board-consumer INFO Review queue: ReviewQueueDrainSummary(queued_count=24, due_count=1, seeded=('app#36',), removed=(), verdict_backfilled=(), rerun=(), auto_merge_enabled=(), requeued=(), blocked=('StartupAI-site/app.startupai-site#224:missing-copilot-review',), skipped=(), escalated=(), partial_failure=False, error=None)",
+        ]
+    )
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        log_text=log_text,
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.workflow_issues == []
+
+
+def test_limited_live_test_recovers_stale_local_state_during_preflight(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[
+            _status_payload(active_leases=1, workers=[{"issue_ref": "app#41"}]),
+            _status_payload(),
+            _status_payload(),
+            _status_payload(),
+        ],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    harness.run()
+
+    assert any("recover-interrupted" in " ".join(cmd) for cmd in backend.commands)
+
+
+def test_limited_live_test_requests_drain_before_near_deadline_full_snapshot(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    config = _config(tmp_path)
+    config.duration_seconds = 10
+    config.full_snapshot_seconds = 9
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        delays={
+            ("status", False): 30.0,
+            ("report-slo", False): 30.0,
+            ("tick", None): 30.0,
+        },
+    )
+    harness = LimitedLiveTestHarness(config, backend, clock)
+
+    summary = harness.run()
+
+    assert summary.actual_drain_requested_at is not None
+    assert summary.drain_request_slip_seconds == 0.0
+    assert not any(
+        issue["kind"] == "drain_request_late" for issue in summary.workflow_issues
+    )

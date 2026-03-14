@@ -289,6 +289,31 @@ def _cmd_reconcile(config: ConsumerConfig, *, dry_run: bool = False) -> int:
     return 0
 
 
+def _cmd_recover_interrupted(config: ConsumerConfig) -> int:
+    """Recover interrupted local worker state and reconcile board truth."""
+    core = _core()
+    db = core.open_consumer_db(config.db_path)
+    try:
+        try:
+            auto_config = core.load_automation_config(config.automation_config_path)
+        except core.ConfigError:
+            auto_config = None
+        recovered = core._recover_interrupted_sessions(
+            config,
+            db,
+            automation_config=auto_config,
+        )
+    finally:
+        db.close()
+
+    payload = {
+        "recovered_leases": len(recovered),
+        "issue_refs": [lease.issue_ref for lease in recovered],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def _cmd_drain(config: ConsumerConfig) -> int:
     """Request a graceful drain at the next cycle boundary."""
     _core()._request_drain(config.drain_path)
@@ -390,6 +415,13 @@ def build_parser() -> argparse.ArgumentParser:
     rec_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
     rec_p.add_argument("--dry-run", action="store_true")
 
+    recover_p = sub.add_parser(
+        "recover-interrupted",
+        help="Recover interrupted local worker state and reconcile board truth",
+    )
+    recover_p.add_argument("--db-path", type=Path, default=core.DEFAULT_DB_PATH)
+    recover_p.add_argument("--json", action="store_true", dest="as_json")
+
     drain_p = sub.add_parser(
         "drain", help="Request a graceful drain before the next issue claim"
     )
@@ -451,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "reconcile":
         return _cmd_reconcile(config, dry_run=getattr(args, "dry_run", False))
+    if args.command == "recover-interrupted":
+        return _cmd_recover_interrupted(config)
     if args.command == "drain":
         return _cmd_drain(config)
     if args.command == "resume":
