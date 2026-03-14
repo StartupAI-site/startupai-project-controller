@@ -803,7 +803,8 @@ def test_execute_claimed_session_marks_phase_executing_before_codex(
             session_store_updates.append(fields)
 
     def run_codex_session(*_args, **_kwargs) -> int:
-        assert session_store_updates == [{"phase": "executing"}]
+        assert session_store_updates[0]["phase"] == "executing"
+        assert session_store_updates[0]["last_execution_progress_at"] is not None
         return 0
 
     outcome = execution_use_case.execute_claimed_session(
@@ -844,7 +845,8 @@ def test_execute_claimed_session_marks_phase_executing_before_codex(
         pr_port=object(),
     )
 
-    assert session_store_updates == [{"phase": "executing"}]
+    assert session_store_updates[0]["phase"] == "executing"
+    assert session_store_updates[0]["last_execution_progress_at"] is not None
     assert outcome.session_status == "aborted"
 
 
@@ -885,6 +887,7 @@ def test_worker_status_payload_classifies_drain_wait_for_inflight_execution() ->
 
     assert payload["external_execution_started"] is True
     assert payload["drain_wait_class"] == "finishing_inflight_execution"
+    assert payload["shutdown_class"] == "stuck_waiting_on_external_execution"
     assert payload["active_seconds"] == 300
 
 
@@ -937,6 +940,7 @@ def test_recent_session_payload_surfaces_distinct_drain_abort_reason() -> None:
 
     assert payload["drain_abort_reason"] == "drain_requested_pre_execution"
     assert payload["drain_wait_class"] == "not_draining"
+    assert payload["shutdown_class"] == "not_draining"
 
 
 def test_canonical_review_issue_ref_normalizes_fully_qualified_github_refs(

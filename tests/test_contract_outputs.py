@@ -43,6 +43,8 @@ def _load_fixture(name: str) -> dict[str, object]:
 def _normalize_status_payload(payload: dict[str, object]) -> dict[str, object]:
     normalized = deepcopy(payload)
     normalized["drain_path"] = "<drain-path>"
+    if normalized.get("drain_requested_at") is not None:
+        normalized["drain_requested_at"] = "<iso8601>"
     normalized["workflow_state_path"] = "<workflow-state-path>"
     if normalized.get("oldest_deferred_action_age_seconds") is not None:
         normalized["oldest_deferred_action_age_seconds"] = "<positive-float>"
@@ -51,8 +53,22 @@ def _normalize_status_payload(payload: dict[str, object]) -> dict[str, object]:
     for worker in normalized["workers"]:
         rendered = dict(worker)
         rendered["id"] = "<session-id:running>"
+        if rendered.get("drain_observed_at") is not None:
+            rendered["drain_observed_at"] = "<iso8601>"
         workers.append(rendered)
     normalized["workers"] = sorted(workers, key=lambda item: item["issue_ref"])
+
+    drain_blockers = []
+    for blocker in normalized.get("drain_blockers", []):
+        rendered = dict(blocker)
+        if rendered.get("session_id") is not None:
+            rendered["session_id"] = "<session-id:running>"
+        if rendered.get("drain_observed_at") is not None:
+            rendered["drain_observed_at"] = "<iso8601>"
+        drain_blockers.append(rendered)
+    normalized["drain_blockers"] = sorted(
+        drain_blockers, key=lambda item: item["issue_ref"]
+    )
 
     sessions = []
     for session in normalized["recent_sessions"]:
@@ -64,6 +80,8 @@ def _normalize_status_payload(payload: dict[str, object]) -> dict[str, object]:
         )
         if rendered["completed_at"] is not None:
             rendered["completed_at"] = "<iso8601>"
+        if rendered.get("drain_observed_at") is not None:
+            rendered["drain_observed_at"] = "<iso8601>"
         if rendered["next_retry_at"] is not None:
             rendered["next_retry_at"] = "<iso8601>"
         if rendered["retry_remaining_seconds"] is not None:

@@ -118,6 +118,7 @@ class RunSummary:
     drain_request_slip_seconds: float | None
     unexpected_exit: bool
     forced_shutdown: bool
+    forced_shutdown_blockers: list[dict[str, Any]]
     snapshot_failures: list[str]
     degraded_periods: list[dict[str, Any]]
     claim_suppression_periods: list[dict[str, Any]]
@@ -326,6 +327,7 @@ class LimitedLiveTestHarness:
         self._scheduled_drain_at: str | None = None
         self._actual_drain_requested_at: str | None = None
         self._drain_request_slip_seconds: float | None = None
+        self._forced_shutdown_blockers: list[dict[str, Any]] = []
 
     def run(self) -> RunSummary:
         self._prepare_artifacts()
@@ -427,6 +429,9 @@ class LimitedLiveTestHarness:
             "board_consumer one-shot --dry-run --json",
         )
 
+    def _shutdown_state_path(self) -> Path:
+        return self.config.state_root / "shutdown-state.json"
+
     def _capture_baseline_snapshots(self) -> None:
         for name, command in self._baseline_snapshot_commands():
             self._capture_snapshot(name, command, self.baseline_dir)
@@ -512,6 +517,7 @@ class LimitedLiveTestHarness:
         if not drain_result.ok:
             self.snapshot_failures.append("drain command failed")
             self.issues.append("Drain request failed; forcing shutdown escalation.")
+        latest_payload: dict[str, Any] = {}
         while (
             self.clock.monotonic() - drain_requested_at
             < self.config.drain_timeout_seconds
@@ -523,6 +529,7 @@ class LimitedLiveTestHarness:
                 reason="shutdown-poll",
             )
             payload = snapshot.payload or {}
+            latest_payload = payload
             if child.poll() is not None:
                 self._drain_latency_seconds = (
                     self.clock.monotonic() - drain_requested_at
@@ -544,6 +551,10 @@ class LimitedLiveTestHarness:
                         return
                     self.clock.sleep(1.0)
             self.clock.sleep(float(self.config.shutdown_poll_seconds))
+        self._forced_shutdown_blockers = self._extract_forced_shutdown_blockers(
+            latest_payload
+        )
+        self._write_forced_shutdown_state()
         self._forced_shutdown = True
         self._shutdown_mode = "forced"
         child.send_signal(signal.SIGINT)
@@ -574,6 +585,70 @@ class LimitedLiveTestHarness:
             self.worked.append(
                 f"recovered {recovered_leases} interrupted lease(s) after forced shutdown"
             )
+
+    def _extract_forced_shutdown_blockers(
+        self,
+        payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        blockers = payload.get("drain_blockers")
+        if not isinstance(blockers, list) or not blockers:
+            workers = payload.get("workers") or []
+            blockers = [
+                {
+                    "issue_ref": worker.get("issue_ref"),
+                    "session_id": worker.get("id"),
+                    "phase": worker.get("phase"),
+                    "external_execution_started": worker.get(
+                        "external_execution_started"
+                    ),
+                    "active_seconds": worker.get("active_seconds"),
+                    "shutdown_class": worker.get("shutdown_class")
+                    or worker.get("drain_wait_class"),
+                }
+                for worker in workers
+                if isinstance(worker, dict)
+            ]
+        rendered: list[dict[str, Any]] = []
+        for blocker in blockers:
+            if not isinstance(blocker, dict):
+                continue
+            external_execution_started = bool(
+                blocker.get("external_execution_started") is True
+            )
+            shutdown_reason = (
+                "drain_timeout_during_external_execution"
+                if external_execution_started
+                else "drain_timeout_after_graceful_shutdown_escalation"
+            )
+            rendered.append(
+                {
+                    "issue_ref": blocker.get("issue_ref"),
+                    "session_id": blocker.get("session_id"),
+                    "phase": blocker.get("phase"),
+                    "external_execution_started": external_execution_started,
+                    "active_seconds": blocker.get("active_seconds"),
+                    "shutdown_class": blocker.get("shutdown_class"),
+                    "shutdown_reason": shutdown_reason,
+                    "failure_reason_override": (
+                        "drain_timeout_during_external_execution"
+                        if external_execution_started
+                        else None
+                    ),
+                }
+            )
+        return rendered
+
+    def _write_forced_shutdown_state(self) -> None:
+        if not self._forced_shutdown_blockers:
+            return
+        _write_json(
+            self._shutdown_state_path(),
+            {
+                "cause": "harness-forced-drain-timeout",
+                "written_at": self.clock.now_utc().isoformat(),
+                "blockers": self._forced_shutdown_blockers,
+            },
+        )
 
     def _capture_timeline_bundle(self, reason: str) -> None:
         self._capture_snapshot(
@@ -740,6 +815,23 @@ class LimitedLiveTestHarness:
         control_plane_health_transitions = _derive_health_transitions(
             self.status_records
         )
+        public_forced_shutdown_blockers = [
+            {
+                key: value
+                for key, value in blocker.items()
+                if key
+                in {
+                    "issue_ref",
+                    "session_id",
+                    "phase",
+                    "external_execution_started",
+                    "active_seconds",
+                    "shutdown_class",
+                    "shutdown_reason",
+                }
+            }
+            for blocker in self._forced_shutdown_blockers
+        ]
         conclusion = self._determine_conclusion(
             degraded_periods,
             claim_periods,
@@ -790,6 +882,7 @@ class LimitedLiveTestHarness:
             drain_request_slip_seconds=self._drain_request_slip_seconds,
             unexpected_exit=self._unexpected_exit,
             forced_shutdown=self._forced_shutdown,
+            forced_shutdown_blockers=public_forced_shutdown_blockers,
             snapshot_failures=list(self.snapshot_failures),
             degraded_periods=degraded_periods,
             claim_suppression_periods=claim_periods,
@@ -884,17 +977,12 @@ class LimitedLiveTestHarness:
         """Return True when forced shutdown waited only on in-flight execution."""
         if not self._forced_shutdown:
             return False
-        payload = self._latest_local_status_payload()
-        if payload is None:
-            return False
-        workers = payload.get("workers") or []
-        if not workers:
+        if not self._forced_shutdown_blockers:
             return False
         return all(
-            worker.get("status") == "running"
-            and worker.get("external_execution_started") is True
-            and worker.get("drain_wait_class") == "finishing_inflight_execution"
-            for worker in workers
+            blocker.get("external_execution_started") is True
+            and blocker.get("shutdown_class") == "finishing_inflight_execution"
+            for blocker in self._forced_shutdown_blockers
         )
 
     def _latest_local_status_payload(self) -> dict[str, Any] | None:
@@ -940,6 +1028,18 @@ class LimitedLiveTestHarness:
         lines.extend(["", "## Improvements"])
         for item in summary.improvements or ["None recorded."]:
             lines.append(f"- {item}")
+        lines.extend(["", "## Forced Shutdown Blockers"])
+        if summary.forced_shutdown_blockers:
+            for blocker in summary.forced_shutdown_blockers:
+                lines.append(
+                    "- "
+                    f"{blocker.get('issue_ref')} session={blocker.get('session_id')} "
+                    f"class={blocker.get('shutdown_class')} "
+                    f"reason={blocker.get('shutdown_reason')} "
+                    f"active_seconds={blocker.get('active_seconds')}"
+                )
+        else:
+            lines.append("- None recorded.")
         lines.extend(
             [
                 "",

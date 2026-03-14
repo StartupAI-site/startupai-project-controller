@@ -32,6 +32,8 @@ class SessionUpdateFields(TypedDict, total=False):
     repair_pr_url: str | None
     branch_reconcile_state: str | None
     branch_reconcile_error: str | None
+    drain_observed_at: str | None
+    last_execution_progress_at: str | None
     resolution_kind: str | None
     verification_class: str | None
     resolution_evidence_json: str | None

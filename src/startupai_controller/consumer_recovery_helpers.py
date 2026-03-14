@@ -19,6 +19,10 @@ from startupai_controller.application.consumer.recovery import (
 )
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_shutdown_state import (
+    clear_shutdown_state,
+    read_shutdown_state,
+)
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
@@ -93,7 +97,16 @@ def recover_interrupted_sessions(
     set_blocked_with_reason: SetBlockedWithReasonFn,
 ) -> list[RecoveredLeaseInfo]:
     """Recover leases left behind by a previous interrupted daemon process."""
-    recovered = db.recover_interrupted_leases()
+    shutdown_state = read_shutdown_state(config.shutdown_state_path)
+    failure_reasons_by_session_id = {
+        str(item.get("session_id")): str(item.get("failure_reason_override"))
+        for item in (shutdown_state or {}).get("blockers", [])
+        if item.get("session_id") and item.get("failure_reason_override")
+    }
+    recovered = db.recover_interrupted_leases(
+        failure_reasons_by_session_id=failure_reasons_by_session_id or None
+    )
+    clear_shutdown_state(config.shutdown_state_path)
     if not recovered:
         return []
 

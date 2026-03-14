@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol, cast
 
@@ -38,6 +39,11 @@ NON_SELF_HEALING_PR_FAILURES = {
     "branch_mismatch": "Worktree branch does not match expected PR head",
     "branch_no_remote_commits": "PR head branch has no commits ahead of origin/main",
 }
+
+
+def _iso_now() -> str:
+    """Return the current UTC timestamp in ISO-8601 format."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class CreatePrForExecutionResultFn(Protocol):
@@ -412,14 +418,44 @@ def execute_claimed_session(
             done_reason="drain_requested_pre_execution",
         )
 
-    session_store.update_session(session_id, {"phase": "executing"})
+    session_store.update_session(
+        session_id,
+        {
+            "phase": "executing",
+            "last_execution_progress_at": _iso_now(),
+        },
+    )
+    get_session = getattr(session_store, "get_session", None)
+    existing_session = get_session(session_id) if callable(get_session) else None
+    drain_observed = bool(
+        existing_session is not None and existing_session.drain_observed_at
+    )
+
+    def _record_execution_progress() -> None:
+        session_store.update_session(
+            session_id,
+            {"last_execution_progress_at": _iso_now()},
+        )
+
+    def _heartbeat_and_record_drain() -> None:
+        nonlocal drain_observed
+        db.update_heartbeat(candidate)
+        if drain_observed or not deps.drain_requested(config.drain_path):
+            return
+        drain_observed = True
+        session_store.update_session(
+            session_id,
+            {"drain_observed_at": _iso_now()},
+        )
+
     exit_code = deps.run_codex_session(
         launch_context.worktree_path,
         prompt,
         config.schema_path,
         output_path,
         launch_context.effective_consumer_config.codex_timeout_seconds,
-        heartbeat_fn=lambda: db.update_heartbeat(candidate),
+        heartbeat_fn=_heartbeat_and_record_drain,
+        progress_fn=_record_execution_progress,
         subprocess_runner=process_runner.run if process_runner is not None else None,
     )
 

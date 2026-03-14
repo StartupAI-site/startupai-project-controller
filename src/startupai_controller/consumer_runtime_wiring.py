@@ -77,6 +77,10 @@ from startupai_controller.board_automation_config import (
     load_automation_config,
 )
 from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.consumer_drain_control import (
+    drain_requested as _drain_requested,
+    drain_requested_at as _drain_requested_at,
+)
 from startupai_controller.consumer_types import (
     ActiveWorkerTask,
     PreparedCycleContext,
@@ -127,12 +131,6 @@ from startupai_controller.validate_critical_path_promotion import (
 )
 
 logger = logging.getLogger("board-consumer")
-
-
-def _drain_requested(path: Path) -> bool:
-    """Return True when a graceful drain has been requested."""
-    return path.exists()
-
 
 def _log_completed_worker_results(
     active_tasks: dict[WorkerFuture, ActiveWorkerTask],
@@ -227,6 +225,7 @@ class StatusRuntimeWiringDeps:
     load_admission_summary: Callable[[dict[str, str], Any | None], dict[str, Any]]
     control_plane_health_summary: Callable[..., Any]
     drain_requested: Callable[[Any], bool]
+    read_drain_requested_at: Callable[[Any], str | None]
     workflow_status_payload: Callable[[Any], dict[str, Any]]
     session_retry_state: SessionRetryStateFn
     parse_iso8601_timestamp: Callable[[str], Any]
@@ -481,6 +480,7 @@ def _status_runtime_wiring_deps() -> StatusRuntimeWiringDeps:
         load_admission_summary=_support_wiring.load_admission_summary,
         control_plane_health_summary=_control_plane_health_summary,
         drain_requested=_drain_requested,
+        read_drain_requested_at=_drain_requested_at,
         workflow_status_payload=workflow_status_payload,
         session_retry_state=_session_retry_state,
         parse_iso8601_timestamp=_parse_iso8601_timestamp,
@@ -965,6 +965,7 @@ def collect_status_payload(
                 load_admission_summary=deps.load_admission_summary,
                 control_plane_health_summary=deps.control_plane_health_summary,
                 drain_requested=deps.drain_requested,
+                read_drain_requested_at=deps.read_drain_requested_at,
                 workflow_status_payload=deps.workflow_status_payload,
                 session_retry_state=deps.session_retry_state,
                 parse_iso8601_timestamp=deps.parse_iso8601_timestamp,

@@ -28,7 +28,11 @@ class RecoveredLeaseInfo(Protocol):
 class RecoveryStatePort(Protocol):
     """Persistence operations required by interrupted-session recovery."""
 
-    def recover_interrupted_leases(self) -> list[RecoveredLeaseInfo]:
+    def recover_interrupted_leases(
+        self,
+        *,
+        failure_reasons_by_session_id: dict[str, str] | None = None,
+    ) -> list[RecoveredLeaseInfo]:
         """Return and clear interrupted leases from local runtime state."""
         ...
 

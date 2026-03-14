@@ -142,6 +142,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     repair_pr_url TEXT,
     branch_reconcile_state TEXT,
     branch_reconcile_error TEXT,
+    drain_observed_at TEXT,
+    last_execution_progress_at TEXT,
     resolution_kind TEXT,
     verification_class TEXT,
     resolution_evidence_json TEXT,
@@ -264,6 +266,10 @@ class ConsumerDB:
         ConsumerDB._ensure_column(conn, "sessions", "repair_pr_url", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "branch_reconcile_state", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "branch_reconcile_error", "TEXT")
+        ConsumerDB._ensure_column(conn, "sessions", "drain_observed_at", "TEXT")
+        ConsumerDB._ensure_column(
+            conn, "sessions", "last_execution_progress_at", "TEXT"
+        )
         ConsumerDB._ensure_column(conn, "sessions", "resolution_kind", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "verification_class", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "resolution_evidence_json", "TEXT")
@@ -414,6 +420,8 @@ class ConsumerDB:
     def recover_interrupted_leases(
         self,
         now: datetime | None = None,
+        *,
+        failure_reasons_by_session_id: dict[str, str] | None = None,
     ) -> list[RecoveredLease]:
         """Clear leftover leases from a previously interrupted daemon process.
 
@@ -423,6 +431,7 @@ class ConsumerDB:
         """
         current = (now or datetime.now(timezone.utc)).isoformat()
         conn = self._get_connection()
+        reason_overrides = failure_reasons_by_session_id or {}
         rows = conn.execute(
             "SELECT l.issue_ref, l.session_id, s.status, s.pr_url, s.branch_name, "
             "s.provenance_id, s.session_kind, s.repair_pr_url "
@@ -447,10 +456,14 @@ class ConsumerDB:
             conn.execute(
                 "UPDATE sessions "
                 "SET status = 'aborted', "
-                "failure_reason = COALESCE(failure_reason, 'interrupted_restart'), "
+                "failure_reason = COALESCE(failure_reason, ?, 'interrupted_restart'), "
                 "completed_at = COALESCE(completed_at, ?) "
                 "WHERE id = ? AND status IN ('pending', 'running')",
-                (current, row["session_id"]),
+                (
+                    reason_overrides.get(str(row["session_id"])),
+                    current,
+                    row["session_id"],
+                ),
             )
             conn.execute(
                 "DELETE FROM leases WHERE issue_ref = ?",
@@ -526,6 +539,8 @@ class ConsumerDB:
             "repair_pr_url",
             "branch_reconcile_state",
             "branch_reconcile_error",
+            "drain_observed_at",
+            "last_execution_progress_at",
             "resolution_kind",
             "verification_class",
             "resolution_evidence_json",
@@ -1246,6 +1261,8 @@ class ConsumerDB:
             repair_pr_url=row["repair_pr_url"],
             branch_reconcile_state=row["branch_reconcile_state"],
             branch_reconcile_error=row["branch_reconcile_error"],
+            drain_observed_at=row["drain_observed_at"],
+            last_execution_progress_at=row["last_execution_progress_at"],
             resolution_kind=row["resolution_kind"],
             verification_class=row["verification_class"],
             resolution_evidence_json=row["resolution_evidence_json"],

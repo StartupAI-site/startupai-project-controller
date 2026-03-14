@@ -11,6 +11,17 @@ def drain_requested(path: Path) -> bool:
     return path.exists()
 
 
+def drain_requested_at(path: Path) -> str | None:
+    """Return the timestamp recorded in the drain sentinel, if any."""
+    if not path.exists():
+        return None
+    try:
+        payload = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return payload or None
+
+
 def request_drain(path: Path) -> None:
     """Create the drain sentinel file used for graceful maintenance."""
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -509,6 +509,17 @@ def test_limited_live_test_treats_forced_shutdown_as_acceptable_when_only_waitin
         in summary.worked
     )
     assert summary.conclusion == "current transport acceptable for live use"
+    assert summary.forced_shutdown_blockers == [
+        {
+            "issue_ref": "crew#84",
+            "session_id": None,
+            "phase": None,
+            "external_execution_started": True,
+            "active_seconds": None,
+            "shutdown_class": "finishing_inflight_execution",
+            "shutdown_reason": "drain_timeout_during_external_execution",
+        }
+    ]
 
 
 def test_limited_live_test_records_snapshot_failure_and_continues(

@@ -21,6 +21,9 @@ DEFAULT_DRAIN_PATH = Path.home() / ".local" / "share" / "startupai" / "consumer.
 DEFAULT_WORKFLOW_STATE_PATH = (
     Path.home() / ".local" / "share" / "startupai" / "workflow-state.json"
 )
+DEFAULT_SHUTDOWN_STATE_PATH = (
+    Path.home() / ".local" / "share" / "startupai" / "shutdown-state.json"
+)
 DEFAULT_SCHEMA_PATH = _REPO_ROOT / "config" / "codex_session_result.schema.json"
 
 
@@ -38,6 +41,9 @@ class ConsumerConfig:
     drain_path: Path = field(default_factory=lambda: DEFAULT_DRAIN_PATH)
     workflow_state_path: Path = field(
         default_factory=lambda: DEFAULT_WORKFLOW_STATE_PATH
+    )
+    shutdown_state_path: Path = field(
+        default_factory=lambda: DEFAULT_SHUTDOWN_STATE_PATH
     )
     poll_interval_seconds: int = 180
     codex_timeout_seconds: int = 1800
