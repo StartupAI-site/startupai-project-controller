@@ -33,9 +33,7 @@ CLAIMED_RESULT_PATTERN = re.compile(
     r"session_id='[^']*', reason='[^']*', pr_url='(?P<pr_url>[^']+)'"
 )
 REQUEUED_REFS_PATTERN = re.compile(r"requeued=\((?P<refs>[^)]*)\)")
-FULLY_QUALIFIED_ISSUE_REF_PATTERN = re.compile(
-    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+"
-)
+FULLY_QUALIFIED_ISSUE_REF_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+")
 SUMMARY_CONCLUSIONS = (
     "current transport acceptable for live use",
     "current transport acceptable but needs deeper instrumentation",
@@ -834,7 +832,9 @@ class LimitedLiveTestHarness:
     def _workflow_log_issues(self) -> list[WorkflowIssue]:
         log_path = self.logs_dir / "consumer-run.log"
         lines = (
-            log_path.read_text(encoding="utf-8").splitlines() if log_path.exists() else []
+            log_path.read_text(encoding="utf-8").splitlines()
+            if log_path.exists()
+            else []
         )
         grouped: dict[tuple[str, str, str | None], WorkflowIssue] = {}
         claim_streaks: dict[tuple[str, str], int] = {}

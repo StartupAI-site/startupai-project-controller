@@ -211,6 +211,7 @@ def prepare_review_queue_batch(
     ) = None,
 ) -> tuple[PreparedReviewQueueBatch | None, ReviewQueueDrainSummary | None]:
     """Prepare the bounded review-queue workset for one drain cycle."""
+
     def _canonical_issue_ref(snapshot_issue_ref: str) -> str | None:
         if "/" not in snapshot_issue_ref:
             return snapshot_issue_ref
@@ -240,9 +241,7 @@ def prepare_review_queue_batch(
     board_status_by_issue = {
         issue_ref: snapshot.status
         for snapshot in board_snapshot.items
-        for issue_ref in (
-            _canonical_issue_ref(snapshot.issue_ref),
-        )
+        for issue_ref in (_canonical_issue_ref(snapshot.issue_ref),)
         if issue_ref is not None
     }
     review_refs.update(

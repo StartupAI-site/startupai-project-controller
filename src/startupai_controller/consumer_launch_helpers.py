@@ -30,7 +30,10 @@ from startupai_controller.ports.ready_flow import (
     BoardStatusMutatorFn,
 )
 from startupai_controller.ports.pull_requests import PullRequestPort
-from startupai_controller.ports.session_store import SessionStorePort, SessionUpdateFields
+from startupai_controller.ports.session_store import (
+    SessionStorePort,
+    SessionUpdateFields,
+)
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,

@@ -305,7 +305,11 @@ def local_review_owned_issue_refs(
             if latest_session is not None and latest_session.pr_url
             else entry.pr_url
         )
-        if latest_session is None or latest_session.status != "success" or not current_pr_url:
+        if (
+            latest_session is None
+            or latest_session.status != "success"
+            or not current_pr_url
+        ):
             continue
         if _explicit_requeue_for_pr(store, entry.issue_ref, current_pr_url):
             continue
