@@ -10,6 +10,7 @@ from typing import cast
 import startupai_controller.consumer_codex_comment_wiring as _codex_comment_wiring
 import startupai_controller.consumer_execution_support_helpers as _execution_support_helpers
 import startupai_controller.consumer_operational_wiring as _operational_wiring
+import startupai_controller.consumer_resolution_helpers as _resolution_helpers
 import startupai_controller.consumer_support_wiring as _support_wiring
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.board_graph import _resolve_issue_coordinates
@@ -54,7 +55,11 @@ from startupai_controller.ports.ready_flow import (
 )
 from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.ports.worktrees import WorktreePort
-from startupai_controller.runtime.wiring import build_session_store, build_worktree_port
+from startupai_controller.runtime.wiring import (
+    build_github_port_bundle,
+    build_session_store,
+    build_worktree_port,
+)
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
     parse_issue_ref,
@@ -190,6 +195,17 @@ def setup_launch_worktree(
         prepare_worktree=prepare_worktree,
         record_metric=_support_wiring.record_metric,
         block_prelaunch_issue=_operational_wiring.block_prelaunch_issue,
+        set_issue_handoff_target=lambda issue_ref, target, *, gh_runner=None: (
+            _resolution_helpers.set_issue_handoff_target(
+                issue_ref,
+                target,
+                cp_config,
+                config.project_owner,
+                config.project_number,
+                gh_runner=gh_runner,
+                build_github_port_bundle=build_github_port_bundle,
+            )
+        ),
         reconcile_repair_branch=reconcile_repair_branch,
         worktree_error_cls=WorktreePrepareError,
         session_store=session_store,

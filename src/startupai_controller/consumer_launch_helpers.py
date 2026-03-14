@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 import subprocess
@@ -29,7 +30,10 @@ from startupai_controller.ports.ready_flow import (
     BoardStatusMutatorFn,
 )
 from startupai_controller.ports.pull_requests import PullRequestPort
-from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.ports.session_store import (
+    SessionStorePort,
+    SessionUpdateFields,
+)
 from startupai_controller.ports.worktrees import WorktreePort
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -51,6 +55,7 @@ def setup_launch_worktree(
     prepare_worktree: Callable[..., tuple[str, str]],
     record_metric: Callable[..., None],
     block_prelaunch_issue: Callable[..., None],
+    set_issue_handoff_target: Callable[..., None],
     reconcile_repair_branch: Callable[..., RepairBranchReconcileOutcome],
     worktree_error_cls: type[WorktreePrepareError],
     session_store: SessionStorePort | None = None,
@@ -74,6 +79,10 @@ def setup_launch_worktree(
         )
     except worktree_error_cls as err:
         typed_err = cast(WorktreePrepareError, err)
+        dirty_reused_worktree = (
+            typed_err.reason_code == "worktree_in_use"
+            and "existing worktree is dirty" in typed_err.detail
+        )
         record_metric(
             db,
             config,
@@ -82,10 +91,29 @@ def setup_launch_worktree(
             payload={"reason": typed_err.reason_code, "detail": typed_err.detail},
         )
         blocked_reason = (
-            typed_err.reason_code
-            if typed_err.reason_code == "worktree_in_use"
-            else f"workspace_prepare:{typed_err.detail}"
+            "Existing reused worktree is dirty"
+            if dirty_reused_worktree
+            else (
+                typed_err.reason_code
+                if typed_err.reason_code == "worktree_in_use"
+                else f"workspace_prepare:{typed_err.detail}"
+            )
         )
+        if dirty_reused_worktree:
+            db.release_lease(issue_ref)
+            if session_store is not None:
+                latest_session = session_store.latest_session_for_issue(issue_ref)
+                if latest_session is not None:
+                    session_store.update_session(
+                        latest_session.id,
+                        SessionUpdateFields(
+                            status="failed",
+                            phase="blocked",
+                            failure_reason="worktree_dirty_reused_branch",
+                            done_reason="worktree_dirty_reused_branch",
+                            completed_at=datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
         block_prelaunch_issue(
             issue_ref,
             blocked_reason,
@@ -96,6 +124,12 @@ def setup_launch_worktree(
             board_mutator=board_mutator,
             gh_runner=gh_runner,
         )
+        if dirty_reused_worktree:
+            set_issue_handoff_target(
+                issue_ref,
+                "claude",
+                gh_runner=gh_runner,
+            )
         raise
     except RuntimeError as err:
         record_metric(

@@ -4368,7 +4368,7 @@ class TestRunDaemonLoop:
         assert transitions == [("crew#84", "Ready")]
         assert statuses["crew#84"] == "Ready"
 
-    def test_recover_interrupted_repair_session_returns_ready_not_review(
+    def test_recover_interrupted_repair_session_transitions_review_when_pr_survives(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config = _make_consumer_config(tmp_path)
@@ -4402,8 +4402,8 @@ class TestRunDaemonLoop:
         recovered = _recover_interrupted_sessions(config, db)
 
         assert [lease.issue_ref for lease in recovered] == ["crew#84"]
-        assert requeued == ["crew#84"]
-        assert transitioned == []
+        assert requeued == []
+        assert transitioned == ["crew#84"]
 
     def test_reconcile_moves_review_item_back_to_in_progress_for_active_repair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

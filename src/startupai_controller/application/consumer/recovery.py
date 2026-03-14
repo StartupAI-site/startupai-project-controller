@@ -21,6 +21,7 @@ class RecoveredLeaseInfo(Protocol):
     issue_ref: str
     branch_name: str | None
     pr_url: str | None
+    repair_pr_url: str | None
     session_kind: str
 
 
@@ -178,8 +179,23 @@ def recover_interrupted_sessions(
             except deps.gh_query_error_type:
                 classification, pr_match = ("none", None)
 
-            pr_url = lease.pr_url or (pr_match.url if pr_match is not None else None)
-            if lease.session_kind == "repair":
+            pr_url = (
+                lease.pr_url
+                or lease.repair_pr_url
+                or (pr_match.url if pr_match is not None else None)
+            )
+            if lease.session_kind == "repair" and (
+                pr_url is not None or classification == "adoptable"
+            ):
+                deps.transition_issue_to_review(
+                    lease.issue_ref,
+                    cp_config,
+                    config.project_owner,
+                    config.project_number,
+                    review_state_port=review_state_port,
+                    board_port=board_port,
+                )
+            elif lease.session_kind == "repair":
                 deps.return_issue_to_ready(
                     lease.issue_ref,
                     cp_config,

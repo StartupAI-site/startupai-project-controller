@@ -184,6 +184,50 @@ def _local_review_summary(db: StatusStorePort) -> ReviewSummaryPayload:
     }
 
 
+def _canonical_review_issue_ref(
+    config: ConsumerConfig,
+    issue_ref: str,
+    *,
+    parse_issue_ref: Callable[[str], IssueRef],
+) -> str | None:
+    """Normalize GitHub-qualified review refs at the status boundary only."""
+    default_repo_names = {
+        "app": "app.startupai-site",
+        "crew": "startupai-crew",
+        "site": "startupai.site",
+    }
+    try:
+        parse_issue_ref(issue_ref)
+        return issue_ref
+    except Exception:
+        pass
+    if "/" not in issue_ref or "#" not in issue_ref:
+        return None
+    repo_name, number_text = issue_ref.rsplit("#", maxsplit=1)
+    if not number_text.isdigit():
+        return None
+    repo_prefix = next(
+        (
+            prefix
+            for prefix, repo_root in config.repo_roots.items()
+            if repo_name
+            in {
+                f"{config.project_owner}/{repo_root.name}",
+                f"{config.project_owner}/{default_repo_names.get(prefix, repo_root.name)}",
+            }
+        ),
+        None,
+    )
+    if repo_prefix is None:
+        return None
+    canonical = f"{repo_prefix}#{number_text}"
+    try:
+        parse_issue_ref(canonical)
+    except Exception:
+        return None
+    return canonical
+
+
 def _github_review_summary(
     config: ConsumerConfig,
     db: StatusStorePort,
@@ -195,7 +239,13 @@ def _github_review_summary(
     try:
         review_refs: list[str] = []
         for snapshot in review_state_port.list_issues_by_status("Review"):
-            issue_ref = snapshot.issue_ref
+            issue_ref = _canonical_review_issue_ref(
+                config,
+                snapshot.issue_ref,
+                parse_issue_ref=deps.parse_issue_ref,
+            )
+            if issue_ref is None:
+                continue
             if deps.parse_issue_ref(issue_ref).prefix not in config.repo_prefixes:
                 continue
             if snapshot.executor.strip().lower() != config.executor:

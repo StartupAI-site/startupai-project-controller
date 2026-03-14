@@ -103,6 +103,31 @@ def retry_backoff_active(
     return datetime.now(timezone.utc) < due_at
 
 
+def locally_review_owned_issue(
+    db: Any,
+    issue_ref: str,
+) -> bool:
+    """Return True when local session/review state still owns the issue."""
+    get_review_queue_item = getattr(db, "get_review_queue_item", None)
+    get_requeue_state = getattr(db, "get_requeue_state", None)
+    latest_session_for_issue = getattr(db, "latest_session_for_issue", None)
+
+    if get_review_queue_item is not None and get_requeue_state is not None:
+        entry = get_review_queue_item(issue_ref)
+        if entry is not None:
+            count, stored_pr_url = get_requeue_state(issue_ref)
+            if not (count > 0 and stored_pr_url == entry.pr_url):
+                return True
+
+    if latest_session_for_issue is None or get_requeue_state is None:
+        return False
+    latest = latest_session_for_issue(issue_ref)
+    if latest is None or latest.status != "success" or not latest.pr_url:
+        return False
+    count, stored_pr_url = get_requeue_state(issue_ref)
+    return not (count > 0 and stored_pr_url == latest.pr_url)
+
+
 def next_retry_count(
     db: Any,
     issue_ref: str,
@@ -273,6 +298,7 @@ def select_candidate_for_cycle(
     parse_issue_ref: Callable[[str], Any],
     effective_retry_backoff: Callable[..., tuple[int, int]],
     retry_backoff_active: Callable[..., bool],
+    locally_review_owned_issue: Callable[[Any, str], bool],
     select_best_candidate: Callable[..., str | None],
 ) -> str | None:
     """Select the next eligible issue for one slot in this cycle."""
@@ -288,6 +314,7 @@ def select_candidate_for_cycle(
         parse_issue_ref=parse_issue_ref,
         effective_retry_backoff=effective_retry_backoff,
         retry_backoff_active=retry_backoff_active,
+        locally_review_owned_issue=locally_review_owned_issue,
         select_best_candidate=select_best_candidate,
     )
 
@@ -401,5 +428,6 @@ def select_candidate_for_cycle_from_shell(
         parse_issue_ref=parse_issue_ref,
         effective_retry_backoff=effective_retry_backoff,
         retry_backoff_active=retry_backoff_active,
+        locally_review_owned_issue=locally_review_owned_issue,
         select_best_candidate=select_best_candidate_from_shell,
     )

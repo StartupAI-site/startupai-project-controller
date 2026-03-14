@@ -36,6 +36,7 @@ from startupai_controller.validate_critical_path_promotion import (
 
 from startupai_controller.consumer_review_queue_state import (
     group_review_queue_entries_by_pr,
+    local_review_owned_issue_refs,
     partition_review_queue_entries_by_probe_change,
     prune_stale_review_entries,
     repark_unchanged_review_queue_entries,
@@ -210,7 +211,25 @@ def prepare_review_queue_batch(
     ) = None,
 ) -> tuple[PreparedReviewQueueBatch | None, ReviewQueueDrainSummary | None]:
     """Prepare the bounded review-queue workset for one drain cycle."""
-    review_refs = frozenset(
+
+    def _canonical_issue_ref(snapshot_issue_ref: str) -> str | None:
+        if "/" not in snapshot_issue_ref:
+            return snapshot_issue_ref
+        if "#" in snapshot_issue_ref:
+            repo_name, number_text = snapshot_issue_ref.rsplit("#", maxsplit=1)
+            prefix = next(
+                (
+                    candidate
+                    for candidate, repo_name_value in critical_path_config.issue_prefixes.items()
+                    if repo_name_value == repo_name
+                ),
+                None,
+            )
+            if prefix is not None and number_text.isdigit():
+                return f"{prefix}#{number_text}"
+        return None
+
+    review_refs = set(
         review_scope_issue_refs(
             config,
             critical_path_config,
@@ -219,6 +238,19 @@ def prepare_review_queue_batch(
     )
     existing_entries = store.list_review_queue_items()
     existing_refs = {entry.issue_ref for entry in existing_entries}
+    board_status_by_issue = {
+        issue_ref: snapshot.status
+        for snapshot in board_snapshot.items
+        for issue_ref in (_canonical_issue_ref(snapshot.issue_ref),)
+        if issue_ref is not None
+    }
+    review_refs.update(
+        local_review_owned_issue_refs(
+            store,
+            existing_entries,
+            board_status_by_issue=board_status_by_issue,
+        )
+    )
 
     removed = tuple(
         prune_stale_review_entries(
@@ -288,7 +320,7 @@ def prepare_review_queue_batch(
 
     return (
         prepared_batch_factory(
-            review_refs=review_refs,
+            review_refs=frozenset(review_refs),
             queue_items=queue_items,
             due_items=due_items,
             due_pr_groups=tuple(

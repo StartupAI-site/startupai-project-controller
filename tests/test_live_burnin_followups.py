@@ -14,6 +14,9 @@ import startupai_controller.board_consumer_cli as board_consumer_cli
 import startupai_controller.consumer_comment_pr_helpers as comment_pr_helpers
 import startupai_controller.consumer_preflight_wiring as preflight_wiring
 import startupai_controller.consumer_board_state_helpers as board_state_helpers
+import startupai_controller.consumer_launch_helpers as launch_helpers
+import startupai_controller.consumer_review_queue_state as review_queue_state
+import startupai_controller.consumer_selection_retry_wiring as selection_retry_wiring
 import startupai_controller.application.consumer.execution as execution_use_case
 import startupai_controller.application.consumer.status as consumer_status
 import startupai_controller.consumer_execution_support_helpers as execution_support
@@ -24,6 +27,7 @@ from startupai_controller.consumer_types import (
     ClaimedSessionContext,
     PrCreationOutcome,
     SessionExecutionOutcome,
+    WorktreePrepareError,
 )
 from startupai_controller.domain.models import (
     CycleResult,
@@ -412,6 +416,125 @@ def test_handle_non_review_execution_outcome_blocks_deterministic_pr_failures(
     assert metrics == ["mutation", "mutation"]
 
 
+def test_setup_launch_worktree_blocks_dirty_reused_worktree_and_cleans_local_state(
+    tmp_path: Path,
+) -> None:
+    config = _make_consumer_config(tmp_path)
+    prepared = _make_prepared_cycle_context(tmp_path, config)
+    db = _make_db(tmp_path)
+    session_id = db.create_session("crew#15", "codex", session_kind="repair")
+    db.acquire_lease("crew#15", session_id, now=datetime.now(timezone.utc))
+    db.update_session(
+        session_id,
+        status="running",
+        branch_name="feat/15-test",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    session_store = runtime_wiring.build_session_store(db)
+    blocked_calls: list[tuple[str, str]] = []
+    handoff_calls: list[tuple[str, str]] = []
+    metrics: list[str] = []
+
+    with pytest.raises(WorktreePrepareError, match="existing worktree is dirty"):
+        launch_helpers.setup_launch_worktree(
+            "crew#15",
+            "Repair dirty branch",
+            "repair",
+            "feat/15-test",
+            config=config,
+            cp_config=prepared.cp_config,
+            db=db,
+            prepare_worktree=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                WorktreePrepareError(
+                    "worktree_in_use",
+                    "existing worktree is dirty for feat/15-test: /tmp/worktree",
+                )
+            ),
+            record_metric=lambda _db, _config, metric_name, **_kwargs: metrics.append(
+                metric_name
+            ),
+            block_prelaunch_issue=lambda issue_ref, reason, **_kwargs: blocked_calls.append(
+                (issue_ref, reason)
+            ),
+            set_issue_handoff_target=lambda issue_ref, target, **_kwargs: handoff_calls.append(
+                (issue_ref, target)
+            ),
+            reconcile_repair_branch=lambda *_args, **_kwargs: pytest.fail(
+                "repair branch reconciliation should not run after dirty worktree block"
+            ),
+            worktree_error_cls=WorktreePrepareError,
+            session_store=session_store,
+        )
+
+    latest = db.latest_session_for_issue("crew#15")
+    assert latest is not None
+    assert metrics == ["worktree_blocked"]
+    assert blocked_calls == [("crew#15", "Existing reused worktree is dirty")]
+    assert handoff_calls == [("crew#15", "claude")]
+    assert db.active_lease_count() == 0
+    assert latest.status == "failed"
+    assert latest.phase == "blocked"
+    assert latest.failure_reason == "worktree_dirty_reused_branch"
+    assert latest.done_reason == "worktree_dirty_reused_branch"
+
+
+def test_local_review_owned_issue_refs_preserve_review_entry_until_explicit_requeue(
+    tmp_path: Path,
+) -> None:
+    db = _make_db(tmp_path)
+    pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/216"
+    session_id = db.create_session("crew#10", "codex")
+    db.update_session(
+        session_id,
+        status="success",
+        phase="review",
+        pr_url=pr_url,
+    )
+    db.enqueue_review_item(
+        "crew#10",
+        pr_url=pr_url,
+        pr_repo="StartupAI-site/startupai-crew",
+        pr_number=216,
+        source_session_id=session_id,
+        now=datetime.now(timezone.utc),
+    )
+
+    refs = review_queue_state.local_review_owned_issue_refs(
+        db,
+        db.list_review_queue_items(),
+        board_status_by_issue={"crew#10": "Ready"},
+    )
+    assert refs == ("crew#10",)
+
+    db.increment_requeue_count("crew#10", pr_url)
+    refs = review_queue_state.local_review_owned_issue_refs(
+        db,
+        db.list_review_queue_items(),
+        board_status_by_issue={"crew#10": "Ready"},
+    )
+    assert refs == ()
+
+
+def test_locally_review_owned_issue_excludes_latest_pr_until_explicit_requeue(
+    tmp_path: Path,
+) -> None:
+    db = _make_db(tmp_path)
+    pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/216"
+    session_id = db.create_session("crew#10", "codex")
+    db.update_session(
+        session_id,
+        status="success",
+        phase="review",
+        pr_url=pr_url,
+    )
+
+    assert selection_retry_wiring.locally_review_owned_issue(db, "crew#10") is True
+
+    db.increment_requeue_count("crew#10", pr_url)
+
+    assert selection_retry_wiring.locally_review_owned_issue(db, "crew#10") is False
+
+
 def test_transition_issue_to_in_progress_allows_same_session_ready_race(
     tmp_path: Path,
 ) -> None:
@@ -657,6 +780,29 @@ def test_recent_session_payload_surfaces_distinct_drain_abort_reason() -> None:
 
     assert payload["drain_abort_reason"] == "drain_requested_pre_execution"
     assert payload["drain_wait_class"] == "not_draining"
+
+
+def test_canonical_review_issue_ref_normalizes_fully_qualified_github_refs(
+    tmp_path: Path,
+) -> None:
+    config = _make_consumer_config(tmp_path)
+
+    assert (
+        consumer_status._canonical_review_issue_ref(
+            config,
+            "StartupAI-site/startupai-crew#84",
+            parse_issue_ref=preflight_wiring.parse_issue_ref,
+        )
+        == "crew#84"
+    )
+    assert (
+        consumer_status._canonical_review_issue_ref(
+            config,
+            "crew#84",
+            parse_issue_ref=preflight_wiring.parse_issue_ref,
+        )
+        == "crew#84"
+    )
 
 
 def test_build_gh_runner_port_is_idempotent_for_existing_port() -> None:

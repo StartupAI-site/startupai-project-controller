@@ -24,6 +24,16 @@ TRANSPORT_LOG_PATTERN = re.compile(
 )
 ISSUE_REF_PATTERN = re.compile(r"\b(?:app|crew|site)#\d+\b")
 BRANCH_NUMBER_PATTERN = re.compile(r"feat/(?P<number>\d+)-")
+WORKTREE_REUSE_BLOCKED_PATTERN = re.compile(
+    r"CycleResult\(action='error', issue_ref='(?P<issue_ref>[^']+)', "
+    r"session_id=(?:'[^']+'|None), reason='(?P<reason>worktree_in_use:[^']+)'"
+)
+CLAIMED_RESULT_PATTERN = re.compile(
+    r"CycleResult\(action='claimed', issue_ref='(?P<issue_ref>[^']+)', "
+    r"session_id='[^']*', reason='[^']*', pr_url='(?P<pr_url>[^']+)'"
+)
+REQUEUED_REFS_PATTERN = re.compile(r"requeued=\((?P<refs>[^)]*)\)")
+FULLY_QUALIFIED_ISSUE_REF_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+")
 SUMMARY_CONCLUSIONS = (
     "current transport acceptable for live use",
     "current transport acceptable but needs deeper instrumentation",
@@ -113,6 +123,7 @@ class RunSummary:
 class WorkflowIssue:
     kind: str
     issue_ref: str
+    pr_url: str | None
     count: int
     sample: str
 
@@ -668,8 +679,13 @@ class LimitedLiveTestHarness:
                     "Drain timeout exceeded; sent SIGINT/SIGTERM escalation."
                 )
         for issue in workflow_issues:
+            qualifier = (
+                f" {issue.issue_ref} pr={issue.pr_url}"
+                if issue.pr_url
+                else f" {issue.issue_ref}"
+            )
             self.issues.append(
-                f"Workflow issue [{issue.kind} {issue.issue_ref} x{issue.count}]: "
+                f"Workflow issue [{issue.kind}{qualifier} x{issue.count}]: "
                 f"{issue.sample}"
             )
         improvements = list(self.improvements)
@@ -815,28 +831,88 @@ class LimitedLiveTestHarness:
 
     def _workflow_log_issues(self) -> list[WorkflowIssue]:
         log_path = self.logs_dir / "consumer-run.log"
-        if not log_path.exists():
-            return []
-        lines = log_path.read_text(encoding="utf-8").splitlines()
-        grouped: dict[tuple[str, str], WorkflowIssue] = {}
+        lines = (
+            log_path.read_text(encoding="utf-8").splitlines()
+            if log_path.exists()
+            else []
+        )
+        grouped: dict[tuple[str, str, str | None], WorkflowIssue] = {}
+        claim_streaks: dict[tuple[str, str], int] = {}
+        reclaim_samples: dict[tuple[str, str], str] = {}
         for index, line in enumerate(lines):
-            kind = _workflow_issue_kind(line)
-            if kind is None:
-                continue
-            issue_ref = _infer_workflow_issue_ref(lines, index)
-            key = (kind, issue_ref)
-            if key not in grouped:
-                grouped[key] = WorkflowIssue(
-                    kind=kind,
+            stripped = line.strip()
+            worktree_match = WORKTREE_REUSE_BLOCKED_PATTERN.search(stripped)
+            if worktree_match is not None:
+                issue_ref = worktree_match.group("issue_ref")
+                _record_workflow_issue(
+                    grouped,
+                    kind="worktree_reuse_blocked",
                     issue_ref=issue_ref,
-                    count=1,
-                    sample=line.strip(),
+                    pr_url=None,
+                    sample=stripped,
                 )
                 continue
-            grouped[key].count += 1
+            requeued_refs = _extract_requeued_refs(stripped)
+            if requeued_refs:
+                for issue_ref in requeued_refs:
+                    for claim_key in tuple(claim_streaks):
+                        if claim_key[0] == issue_ref:
+                            claim_streaks.pop(claim_key, None)
+                continue
+            claimed_match = CLAIMED_RESULT_PATTERN.search(stripped)
+            if claimed_match is not None:
+                issue_ref = claimed_match.group("issue_ref")
+                pr_url = claimed_match.group("pr_url")
+                claim_key = (issue_ref, pr_url)
+                claim_streaks[claim_key] = claim_streaks.get(claim_key, 0) + 1
+                if claim_streaks[claim_key] >= 2:
+                    _record_workflow_issue(
+                        grouped,
+                        kind="review_reclaim_loop",
+                        issue_ref=issue_ref,
+                        pr_url=pr_url,
+                        sample=reclaim_samples.setdefault(claim_key, stripped),
+                    )
+                continue
+            kind = _workflow_issue_kind(stripped)
+            if kind is not None:
+                issue_ref = _infer_workflow_issue_ref(lines, index)
+                _record_workflow_issue(
+                    grouped,
+                    kind=kind,
+                    issue_ref=issue_ref,
+                    pr_url=None,
+                    sample=stripped,
+                )
+        for record in self.status_records:
+            payload = record.payload or {}
+            review_summary = payload.get("review_summary")
+            if not isinstance(review_summary, dict):
+                continue
+            if review_summary.get("source") != "local-fallback":
+                continue
+            error = str(review_summary.get("error") or "")
+            if "Invalid issue ref" not in error:
+                continue
+            sample = error
+            qualified_ref = FULLY_QUALIFIED_ISSUE_REF_PATTERN.search(error)
+            if qualified_ref is not None:
+                sample = f"{error} [{qualified_ref.group(0)}]"
+            _record_workflow_issue(
+                grouped,
+                kind="review_summary_parse_error",
+                issue_ref="global",
+                pr_url=None,
+                sample=sample,
+            )
         return sorted(
             grouped.values(),
-            key=lambda issue: (issue.kind, issue.issue_ref, issue.sample),
+            key=lambda issue: (
+                issue.kind,
+                issue.issue_ref,
+                issue.pr_url or "",
+                issue.sample,
+            ),
         )
 
     def _timeline_name(self, stem: str) -> str:
@@ -1079,14 +1155,45 @@ def _derive_health_transitions(records: list[SnapshotRecord]) -> list[dict[str, 
 
 
 def _workflow_issue_kind(line: str) -> str | None:
-    stripped = line.strip()
-    if "PR creation skipped:" in stripped:
+    if "PR creation skipped:" in line:
         return "pr_creation_skipped"
-    if "PR creation failed:" in stripped:
+    if "PR creation failed:" in line:
         return "pr_creation_failed"
     if " ERROR " in line and not TRANSPORT_LOG_PATTERN.search(line):
         return "workflow_error"
     return None
+
+
+def _extract_requeued_refs(line: str) -> tuple[str, ...]:
+    match = REQUEUED_REFS_PATTERN.search(line)
+    if match is None:
+        return ()
+    raw_refs = match.group("refs").strip()
+    if not raw_refs:
+        return ()
+    return tuple(ISSUE_REF_PATTERN.findall(raw_refs))
+
+
+def _record_workflow_issue(
+    grouped: dict[tuple[str, str, str | None], WorkflowIssue],
+    *,
+    kind: str,
+    issue_ref: str,
+    pr_url: str | None,
+    sample: str,
+) -> None:
+    key = (kind, issue_ref, pr_url)
+    existing = grouped.get(key)
+    if existing is None:
+        grouped[key] = WorkflowIssue(
+            kind=kind,
+            issue_ref=issue_ref,
+            pr_url=pr_url,
+            count=1,
+            sample=sample,
+        )
+        return
+    existing.count += 1
 
 
 def _infer_workflow_issue_ref(lines: list[str], index: int) -> str:
