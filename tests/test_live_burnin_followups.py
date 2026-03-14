@@ -48,12 +48,14 @@ def _completed_process(
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
-def test_validate_branch_publication_rejects_unpublished_branch() -> None:
+def test_validate_pr_head_eligibility_rejects_unpublished_branch() -> None:
     def runner(args, **kwargs):
         if args[3:] == ["branch", "--show-current"]:
             return _completed_process(args, stdout="feat/84-test\n")
         if args[3:] == ["show-ref", "--verify", "refs/heads/feat/84-test"]:
             return _completed_process(args, stdout="abc refs/heads/feat/84-test\n")
+        if args[3:] == ["rev-parse", "refs/heads/feat/84-test"]:
+            return _completed_process(args, stdout="abc123\n")
         if args[3:] == [
             "ls-remote",
             "--exit-code",
@@ -65,10 +67,10 @@ def test_validate_branch_publication_rejects_unpublished_branch() -> None:
         raise AssertionError(args)
 
     with pytest.raises(
-        execution_support.BranchPublicationError,
+        execution_support.PrHeadEligibilityError,
         match="not published on origin",
     ) as excinfo:
-        execution_support.validate_branch_publication(
+        execution_support.validate_pr_head_eligibility(
             "/tmp/worktree",
             "feat/84-test",
             subprocess_runner=runner,
@@ -205,23 +207,91 @@ def test_one_shot_json_reports_error_without_changing_error_exit_code(
     assert payload["reason"] == "synthetic one-shot failure"
 
 
-def test_validate_branch_publication_rejects_branch_mismatch() -> None:
+def test_validate_pr_head_eligibility_rejects_branch_mismatch() -> None:
     def runner(args, **kwargs):
         if args[3:] == ["branch", "--show-current"]:
             return _completed_process(args, stdout="feat/other-branch\n")
         raise AssertionError(args)
 
     with pytest.raises(
-        execution_support.BranchPublicationError,
+        execution_support.PrHeadEligibilityError,
         match="worktree is on feat/other-branch",
     ) as excinfo:
-        execution_support.validate_branch_publication(
+        execution_support.validate_pr_head_eligibility(
             "/tmp/worktree",
             "feat/84-test",
             subprocess_runner=runner,
         )
 
     assert excinfo.value.reason_code == "branch_mismatch"
+
+
+def test_validate_pr_head_eligibility_rejects_remote_head_mismatch() -> None:
+    def runner(args, **kwargs):
+        if args[3:] == ["branch", "--show-current"]:
+            return _completed_process(args, stdout="feat/84-test\n")
+        if args[3:] == ["show-ref", "--verify", "refs/heads/feat/84-test"]:
+            return _completed_process(args, stdout="abc refs/heads/feat/84-test\n")
+        if args[3:] == ["rev-parse", "refs/heads/feat/84-test"]:
+            return _completed_process(args, stdout="abc123\n")
+        if args[3:] == [
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            "feat/84-test",
+        ]:
+            return _completed_process(
+                args, stdout="def456\trefs/heads/feat/84-test\n"
+            )
+        raise AssertionError(args)
+
+    with pytest.raises(
+        execution_support.PrHeadEligibilityError,
+        match="does not match local HEAD",
+    ) as excinfo:
+        execution_support.validate_pr_head_eligibility(
+            "/tmp/worktree",
+            "feat/84-test",
+            subprocess_runner=runner,
+        )
+
+    assert excinfo.value.reason_code == "branch_not_published"
+
+
+def test_validate_pr_head_eligibility_rejects_remote_head_without_commits() -> None:
+    def runner(args, **kwargs):
+        if args[3:] == ["branch", "--show-current"]:
+            return _completed_process(args, stdout="feat/84-test\n")
+        if args[3:] == ["show-ref", "--verify", "refs/heads/feat/84-test"]:
+            return _completed_process(args, stdout="abc refs/heads/feat/84-test\n")
+        if args[3:] == ["rev-parse", "refs/heads/feat/84-test"]:
+            return _completed_process(args, stdout="abc123\n")
+        if args[3:] == [
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            "feat/84-test",
+        ]:
+            return _completed_process(
+                args, stdout="abc123\trefs/heads/feat/84-test\n"
+            )
+        if args[3:] == ["rev-list", "--count", "refs/remotes/origin/main..abc123"]:
+            return _completed_process(args, stdout="0\n")
+        raise AssertionError(args)
+
+    with pytest.raises(
+        execution_support.PrHeadEligibilityError,
+        match="no commits ahead of origin/main",
+    ) as excinfo:
+        execution_support.validate_pr_head_eligibility(
+            "/tmp/worktree",
+            "feat/84-test",
+            subprocess_runner=runner,
+        )
+
+    assert excinfo.value.reason_code == "branch_no_remote_commits"
 
 
 def test_create_pr_for_execution_result_fails_fast_for_unpublished_branch(
@@ -242,8 +312,8 @@ def test_create_pr_for_execution_result_fails_fast_for_unpublished_branch(
         subprocess_runner=None,
         gh_runner=None,
         has_commits_on_branch=lambda *args, **kwargs: True,
-        validate_branch_publication=lambda *args, **kwargs: (_ for _ in ()).throw(
-            execution_support.BranchPublicationError(
+        validate_pr_head_eligibility=lambda *args, **kwargs: (_ for _ in ()).throw(
+            execution_support.PrHeadEligibilityError(
                 reason_code="branch_not_published",
                 detail="head branch feat/84-test is not published on origin",
             )
@@ -260,6 +330,88 @@ def test_create_pr_for_execution_result_fails_fast_for_unpublished_branch(
     assert result.session_status == "failed"
     assert result.failure_reason == "branch_not_published"
     assert create_pr_called["value"] is False
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "blocked_reason"),
+    [
+        ("branch_not_published", "PR head branch is not published on origin"),
+        (
+            "branch_mismatch",
+            "Worktree branch does not match expected PR head",
+        ),
+        (
+            "branch_no_remote_commits",
+            "PR head branch has no commits ahead of origin/main",
+        ),
+    ],
+)
+def test_handle_non_review_execution_outcome_blocks_deterministic_pr_failures(
+    tmp_path: Path,
+    failure_reason: str,
+    blocked_reason: str,
+) -> None:
+    config = _make_consumer_config(tmp_path)
+    db = _make_db(tmp_path)
+    prepared = _make_prepared_cycle_context(tmp_path, config)
+    launch_context = _make_prepared_launch_context(tmp_path)
+    blocked_calls: list[tuple[str, str]] = []
+    handoff_calls: list[tuple[str, str]] = []
+    ready_calls: list[str] = []
+    metrics: list[str] = []
+
+    session_status, resolution_evaluation, done_reason = (
+        execution_use_case.handle_non_review_execution_outcome(
+            config=config,
+            db=db,
+            prepared=prepared,
+            deps=execution_use_case.NonReviewOutcomeDeps(
+                verify_resolution_payload=lambda *_args, **_kwargs: pytest.fail(
+                    "resolution verification should not run for deterministic PR failures"
+                ),
+                apply_resolution_action=lambda *_args, **_kwargs: pytest.fail(
+                    "resolution action should not run for deterministic PR failures"
+                ),
+                return_issue_to_ready=lambda issue_ref, *_args, **_kwargs: ready_calls.append(
+                    issue_ref
+                ),
+                set_blocked_with_reason=lambda issue_ref, reason, *_args, **_kwargs: blocked_calls.append(
+                    (issue_ref, reason)
+                ),
+                set_issue_handoff_target=lambda issue_ref, target, **_kwargs: handoff_calls.append(
+                    (issue_ref, target)
+                ),
+                record_successful_github_mutation=lambda _db: metrics.append("mutation"),
+                mark_degraded=lambda *_args, **_kwargs: pytest.fail(
+                    "deterministic PR failures should not degrade when block succeeds"
+                ),
+                queue_status_transition=lambda *_args, **_kwargs: pytest.fail(
+                    "deterministic PR failures should not queue Ready transitions"
+                ),
+                record_metric=lambda *_args, **_kwargs: None,
+                log_ready_reset_failure=lambda err: pytest.fail(str(err)),
+                log_blocked_transition_failure=lambda err: pytest.fail(str(err)),
+                log_handoff_target_failure=lambda err: pytest.fail(str(err)),
+            ),
+            launch_context=launch_context,
+            session_id="session-123",
+            session_status="failed",
+            failure_reason=failure_reason,
+            codex_result=None,
+            has_commits=True,
+            gh_runner=None,
+            pr_port=object(),
+            board_port=object(),
+        )
+    )
+
+    assert session_status == "failed"
+    assert resolution_evaluation is None
+    assert done_reason is None
+    assert blocked_calls == [("crew#84", blocked_reason)]
+    assert handoff_calls == [("crew#84", "claude")]
+    assert ready_calls == []
+    assert metrics == ["mutation", "mutation"]
 
 
 def test_transition_issue_to_in_progress_allows_same_session_ready_race(

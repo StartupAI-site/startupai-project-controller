@@ -1889,6 +1889,18 @@ class TestRunOneCycle:
                     stderr="",
                 )
 
+            if (
+                len(args) == 5
+                and args[:4] == ["git", "-C", str(worktree_root), "rev-parse"]
+                and str(args[4]).startswith("refs/heads/")
+            ):
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="abc123\n",
+                    stderr="",
+                )
+
             if len(args) == 8 and args[:7] == [
                 "git",
                 "-C",
@@ -1903,6 +1915,25 @@ class TestRunOneCycle:
                     args=args,
                     returncode=0,
                     stdout=f"abc123\trefs/heads/{branch}\n",
+                    stderr="",
+                )
+
+            if (
+                len(args) == 6
+                and args[:5]
+                == [
+                    "git",
+                    "-C",
+                    str(worktree_root),
+                    "rev-list",
+                    "--count",
+                ]
+                and str(args[5]).startswith("refs/remotes/origin/main..")
+            ):
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="1\n" if has_commits else "0\n",
                     stderr="",
                 )
 

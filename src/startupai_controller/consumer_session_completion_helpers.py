@@ -8,7 +8,7 @@ from typing import Callable, Protocol
 
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_execution_support_helpers import (
-    BranchPublicationError,
+    PrHeadEligibilityError,
 )
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
@@ -71,7 +71,7 @@ def create_pr_for_execution_result(
     subprocess_runner: SubprocessRunnerFn | None,
     gh_runner: GitHubRunnerFn | None,
     has_commits_on_branch: Callable[..., bool],
-    validate_branch_publication: Callable[..., None],
+    validate_pr_head_eligibility: Callable[..., None],
     create_or_update_pr: Callable[..., str],
     pr_creation_outcome_factory: type[PrCreationOutcome],
     logger: LoggerLike,
@@ -89,7 +89,7 @@ def create_pr_for_execution_result(
             subprocess_runner=subprocess_runner,
         )
         if has_commits:
-            validate_branch_publication(
+            validate_pr_head_eligibility(
                 launch_context.worktree_path,
                 launch_context.branch_name,
                 subprocess_runner=subprocess_runner,
@@ -106,7 +106,7 @@ def create_pr_for_execution_result(
                 session_id=claimed_context.session_id,
                 gh_runner=gh_runner,
             )
-    except BranchPublicationError as err:
+    except PrHeadEligibilityError as err:
         logger.error("PR creation skipped: %s", err)
         if updated_session_status == "success":
             updated_session_status = "failed"

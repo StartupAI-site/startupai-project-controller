@@ -113,7 +113,7 @@ def create_pr_for_execution_result(
         subprocess_runner=subprocess_runner,
         gh_runner=gh_runner,
         has_commits_on_branch=_execution_support_helpers.has_commits_on_branch,
-        validate_branch_publication=_execution_support_helpers.validate_branch_publication,
+        validate_pr_head_eligibility=_execution_support_helpers.validate_pr_head_eligibility,
         create_or_update_pr=_codex_comment_wiring.create_or_update_pr,
         pr_creation_outcome_factory=PrCreationOutcome,
         logger=logger,
@@ -246,6 +246,7 @@ def handle_non_review_execution_outcome(
     gh_runner: GitHubRunnerFn | GhRunnerPort | None,
     pr_port: PullRequestPort | None = None,
     board_port: BoardMutationPort | None = None,
+    failure_reason: str | None = None,
     logger,
 ) -> tuple[str, ResolutionEvaluation | None, str | None]:
     """Handle non-review outcomes for a claimed session."""
@@ -256,6 +257,7 @@ def handle_non_review_execution_outcome(
         launch_context=launch_context,
         session_id=session_id,
         session_status=session_status,
+        failure_reason=failure_reason,
         codex_result=codex_result,
         has_commits=has_commits,
         pr_port=pr_port,
