@@ -19,6 +19,7 @@ def select_candidate_for_cycle(
     parse_issue_ref: Callable[[str], Any],
     effective_retry_backoff: Callable[..., tuple[int, int]],
     retry_backoff_active: Callable[..., bool],
+    locally_review_owned_issue: Callable[[Any, str], bool],
     select_best_candidate: Callable[..., str | None],
 ) -> str | None:
     """Select the next eligible issue for one slot in this cycle."""
@@ -26,6 +27,8 @@ def select_candidate_for_cycle(
 
     def issue_filter(issue_ref: str) -> bool:
         if issue_ref in excluded:
+            return False
+        if locally_review_owned_issue(db, issue_ref):
             return False
         repo_prefix = parse_issue_ref(issue_ref).prefix
         workflow = prepared.main_workflows.get(repo_prefix)
@@ -40,7 +43,7 @@ def select_candidate_for_cycle(
         )
 
     if target_issue:
-        if target_issue in excluded:
+        if target_issue in excluded or locally_review_owned_issue(db, target_issue):
             return None
         return target_issue
 

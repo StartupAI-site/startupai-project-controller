@@ -590,10 +590,10 @@ class TestInterruptedSessionRecovery:
 
         assert recovered == []
 
-    def test_repair_session_returns_to_ready(
+    def test_repair_session_with_surviving_pr_returns_to_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Repair sessions always requeue to Ready, never Review."""
+        """Repair sessions with a surviving PR return to Review."""
         config = _make_consumer_config(tmp_path)
         db = _make_db(tmp_path)
         session_id = db.create_session(
@@ -625,8 +625,8 @@ class TestInterruptedSessionRecovery:
         recovered = _recover_interrupted_sessions(config, db)
 
         assert [l.issue_ref for l in recovered] == ["crew#84"]
-        assert requeued == ["crew#84"]
-        assert transitioned_to_review == []
+        assert requeued == []
+        assert transitioned_to_review == ["crew#84"]
 
     def test_new_work_with_pr_transitions_to_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

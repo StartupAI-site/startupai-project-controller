@@ -280,6 +280,41 @@ def prune_stale_review_entries(
     return removed
 
 
+def _explicit_requeue_for_pr(
+    store: SessionStorePort,
+    issue_ref: str,
+    pr_url: str,
+) -> bool:
+    """Return True when the current PR was explicitly requeued for coding."""
+    count, stored_pr_url = store.get_requeue_state(issue_ref)
+    return count > 0 and stored_pr_url == pr_url
+
+
+def local_review_owned_issue_refs(
+    store: SessionStorePort,
+    existing_entries: list[ReviewQueueEntry],
+    *,
+    board_status_by_issue: dict[str, str],
+) -> tuple[str, ...]:
+    """Return locally owned review refs that should survive snapshot churn."""
+    refs: list[str] = []
+    for entry in existing_entries:
+        latest_session = store.latest_session_for_issue(entry.issue_ref)
+        current_pr_url = (
+            latest_session.pr_url
+            if latest_session is not None and latest_session.pr_url
+            else entry.pr_url
+        )
+        if latest_session is None or latest_session.status != "success" or not current_pr_url:
+            continue
+        if _explicit_requeue_for_pr(store, entry.issue_ref, current_pr_url):
+            continue
+        if board_status_by_issue.get(entry.issue_ref) in {"Done", "Blocked"}:
+            continue
+        refs.append(entry.issue_ref)
+    return tuple(sorted(set(refs)))
+
+
 def seed_new_review_entries(
     store: SessionStorePort,
     review_refs: set[str] | frozenset[str],

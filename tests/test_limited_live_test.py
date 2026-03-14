@@ -653,6 +653,7 @@ def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_con
         {
             "kind": "pr_creation_skipped",
             "issue_ref": "app#129",
+            "pr_url": None,
             "count": 2,
             "sample": (
                 "2026-03-13 18:52:27,264 board-consumer ERROR PR creation skipped: "
@@ -664,3 +665,99 @@ def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_con
         "Workflow issue [pr_creation_skipped app#129 x2]" in item
         for item in summary.issues
     )
+
+
+def test_limited_live_test_groups_reclaim_loops_and_worktree_blockers(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    log_text = "\n".join(
+        [
+            "2026-03-13 21:24:07,653 board-consumer INFO Worker result [slot=3 issue=crew#15]: CycleResult(action='error', issue_ref='crew#15', session_id=None, reason='worktree_in_use:existing worktree is dirty for feat/15-test: /tmp/worktree', pr_url=None)",
+            "2026-03-13 21:26:45,049 board-consumer INFO Worker result [slot=2 issue=crew#10]: CycleResult(action='claimed', issue_ref='crew#10', session_id='1', reason='success', pr_url='https://github.com/StartupAI-site/startupai-crew/pull/216')",
+            "2026-03-13 21:31:24,813 board-consumer INFO Worker result [slot=2 issue=crew#10]: CycleResult(action='claimed', issue_ref='crew#10', session_id='2', reason='success', pr_url='https://github.com/StartupAI-site/startupai-crew/pull/216')",
+            "2026-03-13 21:35:01,380 board-consumer INFO Review queue: ReviewQueueDrainSummary(queued_count=17, due_count=0, seeded=(), removed=('crew#10',), verdict_backfilled=(), rerun=(), auto_merge_enabled=(), requeued=('crew#10',), blocked=(), skipped=(), escalated=(), partial_failure=False, error=None)",
+            "2026-03-13 21:35:14,132 board-consumer INFO Worker result [slot=2 issue=crew#10]: CycleResult(action='claimed', issue_ref='crew#10', session_id='3', reason='success', pr_url='https://github.com/StartupAI-site/startupai-crew/pull/216')",
+        ]
+    )
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        log_text=log_text,
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.workflow_issues == [
+        {
+            "kind": "review_reclaim_loop",
+            "issue_ref": "crew#10",
+            "pr_url": "https://github.com/StartupAI-site/startupai-crew/pull/216",
+            "count": 1,
+            "sample": (
+                "2026-03-13 21:31:24,813 board-consumer INFO Worker result [slot=2 issue=crew#10]: "
+                "CycleResult(action='claimed', issue_ref='crew#10', session_id='2', "
+                "reason='success', pr_url='https://github.com/StartupAI-site/startupai-crew/pull/216')"
+            ),
+        },
+        {
+            "kind": "worktree_reuse_blocked",
+            "issue_ref": "crew#15",
+            "pr_url": None,
+            "count": 1,
+            "sample": (
+                "2026-03-13 21:24:07,653 board-consumer INFO Worker result [slot=3 issue=crew#15]: "
+                "CycleResult(action='error', issue_ref='crew#15', session_id=None, "
+                "reason='worktree_in_use:existing worktree is dirty for feat/15-test: /tmp/worktree', pr_url=None)"
+            ),
+        },
+    ]
+
+
+def test_limited_live_test_surfaces_review_summary_parse_failures_from_status_fallback(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    status_local = _status_payload()
+    status_local["local_only"] = True
+    status_local["review_summary"] = {
+        "count": 1,
+        "refs": ["app#43"],
+        "source": "local-fallback",
+        "error": (
+            "Invalid issue ref 'StartupAI-site/app.startupai-site#43'. "
+            "Expected format <prefix>#123 where prefix is one of app|crew|site."
+        ),
+    }
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[status_local, status_local, status_local],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.workflow_issues == [
+        {
+            "kind": "review_summary_parse_error",
+            "issue_ref": "global",
+            "pr_url": None,
+            "count": 4,
+            "sample": (
+                "Invalid issue ref 'StartupAI-site/app.startupai-site#43'. Expected format "
+                "<prefix>#123 where prefix is one of app|crew|site. "
+                "[StartupAI-site/app.startupai-site#43]"
+            ),
+        }
+    ]
