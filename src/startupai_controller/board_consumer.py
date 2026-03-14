@@ -26,6 +26,7 @@ from startupai_controller.consumer_config import (
     DEFAULT_DRAIN_PATH,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SCHEMA_PATH,
+    DEFAULT_SHUTDOWN_STATE_PATH,
     DEFAULT_WORKFLOW_STATE_PATH,
 )
 from startupai_controller.consumer_drain_control import (

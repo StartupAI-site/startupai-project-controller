@@ -90,6 +90,7 @@ class CommandResult:
     completed_at: str
     timed_out: bool = False
     timeout_seconds: float | None = None
+    deadline_preempted: bool = False
 
     @property
     def ok(self) -> bool:
@@ -118,6 +119,7 @@ class RunSummary:
     drain_request_slip_seconds: float | None
     unexpected_exit: bool
     forced_shutdown: bool
+    forced_shutdown_blockers: list[dict[str, Any]]
     snapshot_failures: list[str]
     degraded_periods: list[dict[str, Any]]
     claim_suppression_periods: list[dict[str, Any]]
@@ -322,10 +324,12 @@ class LimitedLiveTestHarness:
         self._forced_shutdown = False
         self._shutdown_mode = "natural"
         self._drain_latency_seconds: float | None = None
+        self._scheduled_drain_monotonic: float | None = None
         self._run_meta: dict[str, Any] = {}
         self._scheduled_drain_at: str | None = None
         self._actual_drain_requested_at: str | None = None
         self._drain_request_slip_seconds: float | None = None
+        self._forced_shutdown_blockers: list[dict[str, Any]] = []
 
     def run(self) -> RunSummary:
         self._prepare_artifacts()
@@ -427,6 +431,9 @@ class LimitedLiveTestHarness:
             "board_consumer one-shot --dry-run --json",
         )
 
+    def _shutdown_state_path(self) -> Path:
+        return self.config.state_root / "shutdown-state.json"
+
     def _capture_baseline_snapshots(self) -> None:
         for name, command in self._baseline_snapshot_commands():
             self._capture_snapshot(name, command, self.baseline_dir)
@@ -452,6 +459,7 @@ class LimitedLiveTestHarness:
         scheduled_drain_at = (
             self.clock.now_utc().timestamp() + self.config.duration_seconds
         )
+        self._scheduled_drain_monotonic = end
         self._scheduled_drain_at = datetime.fromtimestamp(
             scheduled_drain_at,
             tz=UTC,
@@ -481,15 +489,19 @@ class LimitedLiveTestHarness:
                     self._consumer_status_command(local_only=True),
                     self.timeline_dir,
                     reason="cadence-local",
+                    deadline_monotonic=end,
                 )
-                self._check_status_transitions(snapshot)
+                self._check_status_transitions(snapshot, deadline_monotonic=end)
                 next_local += self.config.local_snapshot_seconds
                 continue
             if now >= next_full:
                 if end - now <= FULL_SNAPSHOT_GUARD_SECONDS:
                     next_full = end + self.config.full_snapshot_seconds
                     continue
-                self._capture_timeline_bundle("cadence-full")
+                self._capture_timeline_bundle(
+                    "cadence-full",
+                    deadline_monotonic=end,
+                )
                 next_full += self.config.full_snapshot_seconds
                 continue
             sleep_for = min(1.0, end - now, next_local - now, next_full - now)
@@ -500,18 +512,18 @@ class LimitedLiveTestHarness:
         if child.poll() is not None:
             self._shutdown_mode = "unexpected-exit"
             return
-        self._actual_drain_requested_at = self.clock.now_utc().isoformat()
         drain_requested_at = self.clock.monotonic()
-        if self._scheduled_drain_at is not None:
-            scheduled = datetime.fromisoformat(self._scheduled_drain_at)
-            actual = datetime.fromisoformat(self._actual_drain_requested_at)
+        self._actual_drain_requested_at = self.clock.now_utc().isoformat()
+        if self._scheduled_drain_monotonic is not None:
             self._drain_request_slip_seconds = max(
-                0.0, (actual - scheduled).total_seconds()
+                0.0,
+                drain_requested_at - self._scheduled_drain_monotonic,
             )
         drain_result = self._run_aux_command(self._consumer_drain_command())
         if not drain_result.ok:
             self.snapshot_failures.append("drain command failed")
             self.issues.append("Drain request failed; forcing shutdown escalation.")
+        latest_payload: dict[str, Any] = {}
         while (
             self.clock.monotonic() - drain_requested_at
             < self.config.drain_timeout_seconds
@@ -523,6 +535,7 @@ class LimitedLiveTestHarness:
                 reason="shutdown-poll",
             )
             payload = snapshot.payload or {}
+            latest_payload = payload
             if child.poll() is not None:
                 self._drain_latency_seconds = (
                     self.clock.monotonic() - drain_requested_at
@@ -544,6 +557,10 @@ class LimitedLiveTestHarness:
                         return
                     self.clock.sleep(1.0)
             self.clock.sleep(float(self.config.shutdown_poll_seconds))
+        self._forced_shutdown_blockers = self._extract_forced_shutdown_blockers(
+            latest_payload
+        )
+        self._write_forced_shutdown_state()
         self._forced_shutdown = True
         self._shutdown_mode = "forced"
         child.send_signal(signal.SIGINT)
@@ -575,41 +592,132 @@ class LimitedLiveTestHarness:
                 f"recovered {recovered_leases} interrupted lease(s) after forced shutdown"
             )
 
-    def _capture_timeline_bundle(self, reason: str) -> None:
+    def _extract_forced_shutdown_blockers(
+        self,
+        payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        blockers = payload.get("drain_blockers")
+        if not isinstance(blockers, list) or not blockers:
+            workers = payload.get("workers") or []
+            blockers = [
+                {
+                    "issue_ref": worker.get("issue_ref"),
+                    "session_id": worker.get("id"),
+                    "phase": worker.get("phase"),
+                    "external_execution_started": worker.get(
+                        "external_execution_started"
+                    ),
+                    "active_seconds": worker.get("active_seconds"),
+                    "shutdown_class": worker.get("shutdown_class")
+                    or worker.get("drain_wait_class"),
+                }
+                for worker in workers
+                if isinstance(worker, dict)
+            ]
+        rendered: list[dict[str, Any]] = []
+        for blocker in blockers:
+            if not isinstance(blocker, dict):
+                continue
+            external_execution_started = bool(
+                blocker.get("external_execution_started") is True
+            )
+            shutdown_reason = (
+                "drain_timeout_during_external_execution"
+                if external_execution_started
+                else "drain_timeout_after_graceful_shutdown_escalation"
+            )
+            rendered.append(
+                {
+                    "issue_ref": blocker.get("issue_ref"),
+                    "session_id": blocker.get("session_id"),
+                    "phase": blocker.get("phase"),
+                    "external_execution_started": external_execution_started,
+                    "active_seconds": blocker.get("active_seconds"),
+                    "shutdown_class": blocker.get("shutdown_class"),
+                    "shutdown_reason": shutdown_reason,
+                    "failure_reason_override": (
+                        "drain_timeout_during_external_execution"
+                        if external_execution_started
+                        else None
+                    ),
+                }
+            )
+        return rendered
+
+    def _write_forced_shutdown_state(self) -> None:
+        if not self._forced_shutdown_blockers:
+            return
+        _write_json(
+            self._shutdown_state_path(),
+            {
+                "cause": "harness-forced-drain-timeout",
+                "written_at": self.clock.now_utc().isoformat(),
+                "blockers": self._forced_shutdown_blockers,
+            },
+        )
+
+    def _capture_timeline_bundle(
+        self,
+        reason: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        if self._deadline_reached(deadline_monotonic):
+            return
         self._capture_snapshot(
             self._timeline_name("status"),
             self._consumer_status_command(local_only=False),
             self.timeline_dir,
             reason=reason,
+            deadline_monotonic=deadline_monotonic,
         )
+        if self._deadline_reached(deadline_monotonic):
+            return
         self._capture_snapshot(
             self._timeline_name("report-slo"),
             self._consumer_report_slo_command(local_only=False),
             self.timeline_dir,
             reason=reason,
+            deadline_monotonic=deadline_monotonic,
         )
+        if self._deadline_reached(deadline_monotonic):
+            return
         self._capture_snapshot(
             self._timeline_name("tick-dry-run"),
             self._control_plane_tick_command(),
             self.timeline_dir,
             reason=reason,
+            deadline_monotonic=deadline_monotonic,
         )
 
-    def _capture_event_bundle(self, reason: str) -> None:
+    def _capture_event_bundle(
+        self,
+        reason: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        if self._deadline_reached(deadline_monotonic):
+            return
         snapshot = self._capture_snapshot(
             self._timeline_name("status-local"),
             self._consumer_status_command(local_only=True),
             self.timeline_dir,
             reason=reason,
+            deadline_monotonic=deadline_monotonic,
         )
-        self._check_status_transitions(snapshot, allow_follow_up=False)
-        self._capture_timeline_bundle(reason)
+        self._check_status_transitions(
+            snapshot,
+            allow_follow_up=False,
+            deadline_monotonic=deadline_monotonic,
+        )
+        self._capture_timeline_bundle(reason, deadline_monotonic=deadline_monotonic)
 
     def _check_status_transitions(
         self,
         snapshot: SnapshotRecord,
         *,
         allow_follow_up: bool = True,
+        deadline_monotonic: float | None = None,
     ) -> None:
         payload = snapshot.payload or {}
         degraded = bool(payload.get("degraded"))
@@ -631,7 +739,10 @@ class LimitedLiveTestHarness:
             self._seen_claim_suppressed = True
             reasons.append("claim-suppressed-transition")
         if reasons:
-            self._capture_event_bundle("+".join(reasons))
+            self._capture_event_bundle(
+                "+".join(reasons),
+                deadline_monotonic=deadline_monotonic,
+            )
 
     def _payload_has_activity(self, payload: dict[str, Any]) -> bool:
         workers = payload.get("workers") or []
@@ -652,9 +763,10 @@ class LimitedLiveTestHarness:
         directory: Path,
         *,
         reason: str | None = None,
+        deadline_monotonic: float | None = None,
     ) -> SnapshotRecord:
         directory.mkdir(parents=True, exist_ok=True)
-        result = self._run_aux_command(command)
+        result = self._run_aux_command(command, deadline_monotonic=deadline_monotonic)
         base = directory / name
         payload = _parse_json(result.stdout)
         if payload is not None:
@@ -673,6 +785,7 @@ class LimitedLiveTestHarness:
                 "reason": reason,
                 "timed_out": result.timed_out,
                 "timeout_seconds": result.timeout_seconds,
+                "deadline_preempted": result.deadline_preempted,
             },
         )
         record = SnapshotRecord(
@@ -688,15 +801,16 @@ class LimitedLiveTestHarness:
             self._meaningful_board_activity = (
                 self._meaningful_board_activity or self._payload_has_activity(payload)
             )
-        if "status" in name:
+        if "status" in name and not result.deadline_preempted:
             self.status_records.append(record)
-        elif "tick-dry-run" in name:
+        elif "tick-dry-run" in name and not result.deadline_preempted:
             self.tick_records.append(record)
-        elif "report-slo" in name:
+        elif "report-slo" in name and not result.deadline_preempted:
             self.slo_records.append(record)
-        if result.returncode != 0 and not self._is_nonfatal_one_shot_idle(
-            result,
-            payload,
+        if (
+            result.returncode != 0
+            and not result.deadline_preempted
+            and not self._is_nonfatal_one_shot_idle(result, payload)
         ):
             message = f"{name} failed with exit code {result.returncode}"
             if result.timed_out:
@@ -740,6 +854,23 @@ class LimitedLiveTestHarness:
         control_plane_health_transitions = _derive_health_transitions(
             self.status_records
         )
+        public_forced_shutdown_blockers = [
+            {
+                key: value
+                for key, value in blocker.items()
+                if key
+                in {
+                    "issue_ref",
+                    "session_id",
+                    "phase",
+                    "external_execution_started",
+                    "active_seconds",
+                    "shutdown_class",
+                    "shutdown_reason",
+                }
+            }
+            for blocker in self._forced_shutdown_blockers
+        ]
         conclusion = self._determine_conclusion(
             degraded_periods,
             claim_periods,
@@ -790,6 +921,7 @@ class LimitedLiveTestHarness:
             drain_request_slip_seconds=self._drain_request_slip_seconds,
             unexpected_exit=self._unexpected_exit,
             forced_shutdown=self._forced_shutdown,
+            forced_shutdown_blockers=public_forced_shutdown_blockers,
             snapshot_failures=list(self.snapshot_failures),
             degraded_periods=degraded_periods,
             claim_suppression_periods=claim_periods,
@@ -884,17 +1016,12 @@ class LimitedLiveTestHarness:
         """Return True when forced shutdown waited only on in-flight execution."""
         if not self._forced_shutdown:
             return False
-        payload = self._latest_local_status_payload()
-        if payload is None:
-            return False
-        workers = payload.get("workers") or []
-        if not workers:
+        if not self._forced_shutdown_blockers:
             return False
         return all(
-            worker.get("status") == "running"
-            and worker.get("external_execution_started") is True
-            and worker.get("drain_wait_class") == "finishing_inflight_execution"
-            for worker in workers
+            blocker.get("external_execution_started") is True
+            and blocker.get("shutdown_class") == "finishing_inflight_execution"
+            for blocker in self._forced_shutdown_blockers
         )
 
     def _latest_local_status_payload(self) -> dict[str, Any] | None:
@@ -940,6 +1067,18 @@ class LimitedLiveTestHarness:
         lines.extend(["", "## Improvements"])
         for item in summary.improvements or ["None recorded."]:
             lines.append(f"- {item}")
+        lines.extend(["", "## Forced Shutdown Blockers"])
+        if summary.forced_shutdown_blockers:
+            for blocker in summary.forced_shutdown_blockers:
+                lines.append(
+                    "- "
+                    f"{blocker.get('issue_ref')} session={blocker.get('session_id')} "
+                    f"class={blocker.get('shutdown_class')} "
+                    f"reason={blocker.get('shutdown_reason')} "
+                    f"active_seconds={blocker.get('active_seconds')}"
+                )
+        else:
+            lines.append("- None recorded.")
         lines.extend(
             [
                 "",
@@ -1237,10 +1376,54 @@ class LimitedLiveTestHarness:
             return result.stdout.strip()
         return None
 
-    def _run_aux_command(self, argv: list[str]) -> CommandResult:
-        return self.backend.run(
+    def _run_aux_command(
+        self,
+        argv: list[str],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> CommandResult:
+        configured_timeout = float(self.config.command_timeout_seconds)
+        effective_timeout = configured_timeout
+        deadline_clipped = False
+        if deadline_monotonic is not None:
+            remaining = max(0.0, deadline_monotonic - self.clock.monotonic())
+            if remaining <= 0.0:
+                timestamp = self.clock.now_utc().isoformat()
+                return CommandResult(
+                    argv=list(argv),
+                    returncode=124,
+                    stdout="",
+                    stderr="command preempted at drain deadline",
+                    started_at=timestamp,
+                    completed_at=timestamp,
+                    timed_out=True,
+                    timeout_seconds=0.0,
+                    deadline_preempted=True,
+                )
+            effective_timeout = min(configured_timeout, remaining)
+            deadline_clipped = effective_timeout < configured_timeout
+        result = self.backend.run(
             argv,
-            timeout_seconds=float(self.config.command_timeout_seconds),
+            timeout_seconds=effective_timeout,
+        )
+        if result.timed_out and deadline_clipped:
+            return CommandResult(
+                argv=result.argv,
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                started_at=result.started_at,
+                completed_at=result.completed_at,
+                timed_out=result.timed_out,
+                timeout_seconds=result.timeout_seconds,
+                deadline_preempted=True,
+            )
+        return result
+
+    def _deadline_reached(self, deadline_monotonic: float | None) -> bool:
+        return (
+            deadline_monotonic is not None
+            and self.clock.monotonic() >= deadline_monotonic
         )
 
     def _is_nonfatal_one_shot_idle(

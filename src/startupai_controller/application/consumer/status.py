@@ -31,6 +31,8 @@ ReviewSummaryPayload = ObjectPayload
 ReviewQueueSummaryPayload = ObjectPayload
 RecentSessionStatusPayload = ObjectPayload
 WorkerStatusPayload = ObjectPayload
+DrainBlockerPayload = ObjectPayload
+EXECUTION_PROGRESS_STUCK_SECONDS = 120
 
 
 class MetricWindowPayload(TypedDict):
@@ -168,6 +170,7 @@ class CollectStatusPayloadDeps:
     ]
     control_plane_health_summary: ControlPlaneHealthSummaryFn
     drain_requested: Callable[[Path], bool]
+    read_drain_requested_at: Callable[[Path], str | None]
     workflow_status_payload: Callable[[WorkflowRepoStatus], WorkflowStatusPayload]
     session_retry_state: SessionRetryStateFn
     parse_iso8601_timestamp: Callable[[str], datetime | None]
@@ -436,6 +439,17 @@ def _active_seconds(started_at: str | None, *, now: datetime) -> int | None:
     return max(0, int((now - started).total_seconds()))
 
 
+def _parse_iso8601_best_effort(value: str) -> datetime | None:
+    """Parse one ISO-8601 timestamp and return None on failure."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _external_execution_started(session: SessionInfo) -> bool:
     """Return True once the claimed session crossed into Codex execution."""
     return session.phase == "executing"
@@ -456,6 +470,48 @@ def _drain_wait_class(
     return "pre_execution_abort_pending"
 
 
+def _effective_drain_observed_at(
+    session: SessionInfo,
+    *,
+    drain_requested_at: str | None,
+) -> str | None:
+    """Return the session-local drain timestamp, falling back to the sentinel."""
+    return session.drain_observed_at or drain_requested_at
+
+
+def _shutdown_class(
+    session: SessionInfo,
+    *,
+    now: datetime,
+    drain_requested: bool,
+    drain_requested_at: str | None,
+    parse_iso8601_timestamp: Callable[[str], datetime | None],
+) -> str:
+    """Classify why an active session is still blocking shutdown."""
+    if session.status != "running" or not drain_requested:
+        return "not_draining"
+    if not _external_execution_started(session):
+        return "stuck_waiting_on_controller_cleanup"
+    progress_at = None
+    if session.last_execution_progress_at:
+        progress_at = parse_iso8601_timestamp(session.last_execution_progress_at)
+    if progress_at is None and session.started_at:
+        progress_at = parse_iso8601_timestamp(session.started_at)
+    if progress_at is None:
+        return "finishing_inflight_execution"
+    effective_drain_observed_at = _effective_drain_observed_at(
+        session,
+        drain_requested_at=drain_requested_at,
+    )
+    if effective_drain_observed_at is not None:
+        drain_observed_at = parse_iso8601_timestamp(effective_drain_observed_at)
+        if drain_observed_at is not None and progress_at < drain_observed_at:
+            progress_at = drain_observed_at
+    if (now - progress_at).total_seconds() > EXECUTION_PROGRESS_STUCK_SECONDS:
+        return "stuck_waiting_on_external_execution"
+    return "finishing_inflight_execution"
+
+
 def _drain_abort_reason(session: SessionInfo) -> str | None:
     """Return the structured drain abort reason when this session was drained."""
     if session.failure_reason == "drain_requested_pre_execution":
@@ -470,6 +526,10 @@ def _worker_status_payload(
     *,
     now: datetime,
     drain_requested: bool,
+    drain_requested_at: str | None = None,
+    parse_iso8601_timestamp: Callable[
+        [str], datetime | None
+    ] = _parse_iso8601_best_effort,
 ) -> WorkerStatusPayload:
     """Render one active worker payload."""
     return {
@@ -484,6 +544,18 @@ def _worker_status_payload(
         "drain_wait_class": _drain_wait_class(
             worker,
             drain_requested=drain_requested,
+        ),
+        "drain_observed_at": _effective_drain_observed_at(
+            worker,
+            drain_requested_at=drain_requested_at,
+        ),
+        "last_execution_progress_at": worker.last_execution_progress_at,
+        "shutdown_class": _shutdown_class(
+            worker,
+            now=now,
+            drain_requested=drain_requested,
+            drain_requested_at=drain_requested_at,
+            parse_iso8601_timestamp=parse_iso8601_timestamp,
         ),
         "drain_abort_reason": _drain_abort_reason(worker),
         "session_kind": worker.session_kind,
@@ -613,6 +685,10 @@ def _recent_session_status_payload(
     workflows: dict[str, WorkflowDefinition],
     now: datetime,
     drain_requested: bool,
+    drain_requested_at: str | None = None,
+    parse_iso8601_timestamp: Callable[
+        [str], datetime | None
+    ] = _parse_iso8601_best_effort,
     session_retry_state: SessionRetryStateFn,
 ) -> RecentSessionStatusPayload:
     """Render one recent session payload for status JSON."""
@@ -635,6 +711,18 @@ def _recent_session_status_payload(
             session,
             drain_requested=drain_requested,
         ),
+        "drain_observed_at": _effective_drain_observed_at(
+            session,
+            drain_requested_at=drain_requested_at,
+        ),
+        "last_execution_progress_at": session.last_execution_progress_at,
+        "shutdown_class": _shutdown_class(
+            session,
+            now=now,
+            drain_requested=drain_requested,
+            drain_requested_at=drain_requested_at,
+            parse_iso8601_timestamp=parse_iso8601_timestamp,
+        ),
         "drain_abort_reason": _drain_abort_reason(session),
         "pr_url": session.pr_url,
         "resolution_kind": session.resolution_kind,
@@ -648,6 +736,31 @@ def _recent_session_status_payload(
             now=now,
         ),
     }
+
+
+def _drain_blockers_payload(
+    workers: list[WorkerStatusPayload],
+    *,
+    drain_requested: bool,
+) -> list[DrainBlockerPayload]:
+    """Return active drain blockers only while drain is in progress."""
+    if not drain_requested:
+        return []
+    blockers: list[DrainBlockerPayload] = []
+    for worker in workers:
+        blockers.append(
+            {
+                "issue_ref": worker["issue_ref"],
+                "session_id": worker["id"],
+                "phase": worker["phase"],
+                "external_execution_started": worker["external_execution_started"],
+                "active_seconds": worker["active_seconds"],
+                "drain_observed_at": worker.get("drain_observed_at"),
+                "last_execution_progress_at": worker.get("last_execution_progress_at"),
+                "shutdown_class": worker.get("shutdown_class"),
+            }
+        )
+    return blockers
 
 
 def _load_status_runtime(
@@ -789,6 +902,7 @@ def _build_status_payload(
     claim_suppressed_scope = control_state.get(suppressed_scope_key)
     last_rate_limit_at = control_state.get(last_rate_limit_key)
     drain_requested = deps.drain_requested(config.drain_path)
+    drain_requested_at = deps.read_drain_requested_at(config.drain_path)
     control_plane_health = deps.control_plane_health_summary(
         control_state,
         deferred_action_count=deferred_action_count,
@@ -796,23 +910,31 @@ def _build_status_payload(
         poll_interval_seconds=effective_interval,
     )
     lane_wip_limits = _lane_wip_limits_payload(auto_config)
+    worker_payloads = [
+        _worker_status_payload(
+            worker,
+            now=status_now,
+            drain_requested=drain_requested,
+            drain_requested_at=drain_requested_at,
+            parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
+        )
+        for worker in workers
+    ]
 
     return {
         "active_leases": leases,
         "active_slots": slots,
-        "workers": [
-            _worker_status_payload(
-                worker,
-                now=status_now,
-                drain_requested=drain_requested,
-            )
-            for worker in workers
-        ],
+        "workers": worker_payloads,
+        "drain_blockers": _drain_blockers_payload(
+            worker_payloads,
+            drain_requested=drain_requested,
+        ),
         "repo_prefixes": list(config.repo_prefixes),
         "global_concurrency": config.global_concurrency,
         "lane_wip_limits": lane_wip_limits,
         "poll_interval_seconds": effective_interval,
         "drain_requested": drain_requested,
+        "drain_requested_at": drain_requested_at,
         "drain_path": str(config.drain_path),
         "workflow_state_path": str(config.workflow_state_path),
         "workflow_last_reload_at": last_reload_at,
@@ -852,6 +974,8 @@ def _build_status_payload(
                 workflows=main_workflows,
                 now=status_now,
                 drain_requested=drain_requested,
+                drain_requested_at=drain_requested_at,
+                parse_iso8601_timestamp=deps.parse_iso8601_timestamp,
                 session_retry_state=deps.session_retry_state,
             )
             for session in sessions

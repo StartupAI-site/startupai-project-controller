@@ -247,6 +247,29 @@ class TestHeartbeat:
         assert session.status == "success"
         db.close()
 
+    def test_recover_interrupted_leases_applies_shutdown_reason_override(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        t0 = _now()
+        sess_id = db.create_session("crew#84", "codex")
+        db.acquire_lease("crew#84", sess_id, now=t0)
+        db.update_session(sess_id, status="running", started_at=t0.isoformat())
+
+        recovered = db.recover_interrupted_leases(
+            now=t0 + timedelta(minutes=1),
+            failure_reasons_by_session_id={
+                sess_id: "drain_timeout_during_external_execution"
+            },
+        )
+
+        assert recovered[0].session_status == "running"
+        session = db.get_session(sess_id)
+        assert session is not None
+        assert session.status == "aborted"
+        assert session.failure_reason == "drain_timeout_during_external_execution"
+        db.close()
+
 
 # -- Session CRUD + retry counting -------------------------------------------
 

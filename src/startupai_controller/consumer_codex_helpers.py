@@ -151,6 +151,7 @@ def run_codex_session(
     timeout_seconds: int,
     *,
     heartbeat_fn: Callable[[], None] | None = None,
+    progress_fn: Callable[[], None] | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     resolve_cli_command_fn: Callable[[str], str],
     popen_factory: Callable[..., subprocess.Popen[str]],
@@ -174,7 +175,11 @@ def run_codex_session(
         prompt,
     ]
     if subprocess_runner is not None:
+        if progress_fn is not None:
+            progress_fn()
         result = subprocess_runner(args, capture_output=True, text=True)
+        if progress_fn is not None:
+            progress_fn()
     else:
         proc_args = args[2:]
         with (
@@ -190,12 +195,28 @@ def run_codex_session(
                 stderr=stderr_log,
                 text=True,
             )
+            if progress_fn is not None:
+                progress_fn()
             deadline = time.monotonic() + timeout_seconds
+            stdout_position = 0
+            stderr_position = 0
             while True:
                 if heartbeat_fn is not None:
                     heartbeat_fn()
+                stdout_log.flush()
+                stdout_log.seek(stdout_position)
+                stdout_chunk = stdout_log.read()
+                stdout_position = stdout_log.tell()
+                stderr_log.flush()
+                stderr_log.seek(stderr_position)
+                stderr_chunk = stderr_log.read()
+                stderr_position = stderr_log.tell()
+                if progress_fn is not None and (stdout_chunk or stderr_chunk):
+                    progress_fn()
                 rc = process.poll()
                 if rc is not None:
+                    if progress_fn is not None:
+                        progress_fn()
                     stdout_log.flush()
                     stderr_log.flush()
                     stdout_log.seek(0)
@@ -210,6 +231,8 @@ def run_codex_session(
                 if time.monotonic() >= deadline:
                     process.kill()
                     process.wait()
+                    if progress_fn is not None:
+                        progress_fn()
                     stdout_log.flush()
                     stderr_log.flush()
                     stdout_log.seek(0)

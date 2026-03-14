@@ -76,6 +76,7 @@ def run_codex_session(
     timeout_seconds: int,
     *,
     heartbeat_fn: Callable[[], None] | None = None,
+    progress_fn: Callable[[], None] | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> int:
     """Run codex exec with the current shell seams."""
@@ -86,6 +87,7 @@ def run_codex_session(
         output_path,
         timeout_seconds,
         heartbeat_fn=heartbeat_fn,
+        progress_fn=progress_fn,
         subprocess_runner=subprocess_runner,
         resolve_cli_command_fn=_codex_runtime_wiring.resolve_cli_command,
         logger=logger,
