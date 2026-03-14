@@ -33,14 +33,21 @@ CLAIMED_RESULT_PATTERN = re.compile(
     r"session_id='[^']*', reason='[^']*', pr_url='(?P<pr_url>[^']+)'"
 )
 REMOVED_REFS_PATTERN = re.compile(r"removed=\((?P<refs>[^)]*)\)")
+SEEDED_REFS_PATTERN = re.compile(r"seeded=\((?P<refs>[^)]*)\)")
 REQUEUED_REFS_PATTERN = re.compile(r"requeued=\((?P<refs>[^)]*)\)")
 FULLY_QUALIFIED_ISSUE_REF_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+")
+LOG_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}"
+)
 SUMMARY_CONCLUSIONS = (
     "current transport acceptable for live use",
     "current transport acceptable but needs deeper instrumentation",
     "current transport needs a narrow GitHub MCP comparison spike before broader use",
     "test inconclusive due to insufficient board activity",
 )
+FULL_SNAPSHOT_GUARD_SECONDS = 20.0
+LOCAL_SNAPSHOT_GUARD_SECONDS = 5.0
+RECLAIM_COMPLETION_GRACE_SECONDS = 10.0
 
 
 class HarnessError(RuntimeError):
@@ -106,6 +113,9 @@ class RunSummary:
     meaningful_board_activity: bool
     shutdown_mode: str
     drain_latency_seconds: float | None
+    scheduled_drain_at: str | None
+    actual_drain_requested_at: str | None
+    drain_request_slip_seconds: float | None
     unexpected_exit: bool
     forced_shutdown: bool
     snapshot_failures: list[str]
@@ -312,6 +322,10 @@ class LimitedLiveTestHarness:
         self._forced_shutdown = False
         self._shutdown_mode = "natural"
         self._drain_latency_seconds: float | None = None
+        self._run_meta: dict[str, Any] = {}
+        self._scheduled_drain_at: str | None = None
+        self._actual_drain_requested_at: str | None = None
+        self._drain_request_slip_seconds: float | None = None
 
     def run(self) -> RunSummary:
         self._prepare_artifacts()
@@ -324,6 +338,7 @@ class LimitedLiveTestHarness:
             self._drain_and_stop(child)
         finally:
             child.close()
+        self._update_run_meta()
         self._capture_final_snapshots()
         summary = self._build_summary()
         self._write_summary(summary)
@@ -349,7 +364,7 @@ class LimitedLiveTestHarness:
         )
 
     def _write_run_meta(self) -> None:
-        meta = {
+        self._run_meta = {
             "git_commit": self._git_commit(),
             "hostname": socket.gethostname(),
             "started_at": self.clock.now_utc().isoformat(),
@@ -364,8 +379,17 @@ class LimitedLiveTestHarness:
                 "note": self.config.confirmation_note,
                 "procedural_only": True,
             },
+            "scheduled_drain_at": self._scheduled_drain_at,
+            "actual_drain_requested_at": self._actual_drain_requested_at,
+            "drain_request_slip_seconds": self._drain_request_slip_seconds,
         }
-        _write_json(self.run_dir / "run_meta.json", meta)
+        _write_json(self.run_dir / "run_meta.json", self._run_meta)
+
+    def _update_run_meta(self) -> None:
+        self._run_meta["scheduled_drain_at"] = self._scheduled_drain_at
+        self._run_meta["actual_drain_requested_at"] = self._actual_drain_requested_at
+        self._run_meta["drain_request_slip_seconds"] = self._drain_request_slip_seconds
+        _write_json(self.run_dir / "run_meta.json", self._run_meta)
 
     def _perform_preflight(self) -> None:
         if not self.config.confirm_single_consumer:
@@ -388,6 +412,16 @@ class LimitedLiveTestHarness:
             self._run_aux_command(self._consumer_status_command(local_only=False)),
             "board_consumer status --json",
         )
+        local_status = self._run_aux_command(
+            self._consumer_status_command(local_only=True)
+        )
+        self._require_ok(local_status, "board_consumer status --json --local-only")
+        local_payload = _parse_json(local_status.stdout) or {}
+        if local_payload.get("active_leases") or local_payload.get("workers"):
+            self._require_ok(
+                self._run_aux_command(self._consumer_recover_interrupted_command()),
+                "board_consumer recover-interrupted --json",
+            )
         self._require_one_shot_ok(
             self._run_aux_command(self._consumer_one_shot_command()),
             "board_consumer one-shot --dry-run --json",
@@ -415,6 +449,13 @@ class LimitedLiveTestHarness:
     def _monitor_run(self, child: ManagedProcess) -> None:
         start = self.clock.monotonic()
         end = start + self.config.duration_seconds
+        scheduled_drain_at = (
+            self.clock.now_utc().timestamp() + self.config.duration_seconds
+        )
+        self._scheduled_drain_at = datetime.fromtimestamp(
+            scheduled_drain_at,
+            tz=UTC,
+        ).isoformat()
         next_local = start + self.config.local_snapshot_seconds
         next_full = start + self.config.full_snapshot_seconds
 
@@ -432,6 +473,9 @@ class LimitedLiveTestHarness:
             if now >= end:
                 return
             if now >= next_local:
+                if end - now <= LOCAL_SNAPSHOT_GUARD_SECONDS:
+                    next_local = end + self.config.local_snapshot_seconds
+                    continue
                 snapshot = self._capture_snapshot(
                     self._timeline_name("status-local"),
                     self._consumer_status_command(local_only=True),
@@ -442,6 +486,9 @@ class LimitedLiveTestHarness:
                 next_local += self.config.local_snapshot_seconds
                 continue
             if now >= next_full:
+                if end - now <= FULL_SNAPSHOT_GUARD_SECONDS:
+                    next_full = end + self.config.full_snapshot_seconds
+                    continue
                 self._capture_timeline_bundle("cadence-full")
                 next_full += self.config.full_snapshot_seconds
                 continue
@@ -453,7 +500,14 @@ class LimitedLiveTestHarness:
         if child.poll() is not None:
             self._shutdown_mode = "unexpected-exit"
             return
+        self._actual_drain_requested_at = self.clock.now_utc().isoformat()
         drain_requested_at = self.clock.monotonic()
+        if self._scheduled_drain_at is not None:
+            scheduled = datetime.fromisoformat(self._scheduled_drain_at)
+            actual = datetime.fromisoformat(self._actual_drain_requested_at)
+            self._drain_request_slip_seconds = max(
+                0.0, (actual - scheduled).total_seconds()
+            )
         drain_result = self._run_aux_command(self._consumer_drain_command())
         if not drain_result.ok:
             self.snapshot_failures.append("drain command failed")
@@ -499,11 +553,27 @@ class LimitedLiveTestHarness:
                 self._drain_latency_seconds = (
                     self.clock.monotonic() - drain_requested_at
                 )
+                self._recover_after_forced_shutdown()
                 return
             self.clock.sleep(1.0)
         child.send_signal(signal.SIGTERM)
         child.wait(timeout=60)
         self._drain_latency_seconds = self.clock.monotonic() - drain_requested_at
+        self._recover_after_forced_shutdown()
+
+    def _recover_after_forced_shutdown(self) -> None:
+        result = self._run_aux_command(self._consumer_recover_interrupted_command())
+        if not result.ok:
+            message = "recover-interrupted failed after forced shutdown"
+            self.snapshot_failures.append(message)
+            self.issues.append(message)
+            return
+        payload = _parse_json(result.stdout) or {}
+        recovered_leases = int(payload.get("recovered_leases") or 0)
+        if recovered_leases:
+            self.worked.append(
+                f"recovered {recovered_leases} interrupted lease(s) after forced shutdown"
+            )
 
     def _capture_timeline_bundle(self, reason: str) -> None:
         self._capture_snapshot(
@@ -614,6 +684,10 @@ class LimitedLiveTestHarness:
             reason=reason,
             payload=payload,
         )
+        if payload is not None and "status" in name:
+            self._meaningful_board_activity = (
+                self._meaningful_board_activity or self._payload_has_activity(payload)
+            )
         if "status" in name:
             self.status_records.append(record)
         elif "tick-dry-run" in name:
@@ -642,7 +716,15 @@ class LimitedLiveTestHarness:
             "claim_suppressed_reason",
         )
         log_highlights = self._transport_log_highlights()
-        workflow_issues = self._workflow_log_issues()
+        workflow_issues = sorted(
+            self._workflow_log_issues() + self._runtime_workflow_issues(),
+            key=lambda issue: (
+                issue.kind,
+                issue.issue_ref,
+                issue.pr_url or "",
+                issue.sample,
+            ),
+        )
         control_plane_counts = []
         for record in self.tick_records:
             payload = record.payload or {}
@@ -703,6 +785,9 @@ class LimitedLiveTestHarness:
             meaningful_board_activity=self._meaningful_board_activity,
             shutdown_mode=self._shutdown_mode,
             drain_latency_seconds=self._drain_latency_seconds,
+            scheduled_drain_at=self._scheduled_drain_at,
+            actual_drain_requested_at=self._actual_drain_requested_at,
+            drain_request_slip_seconds=self._drain_request_slip_seconds,
             unexpected_exit=self._unexpected_exit,
             forced_shutdown=self._forced_shutdown,
             snapshot_failures=list(self.snapshot_failures),
@@ -716,6 +801,51 @@ class LimitedLiveTestHarness:
             issues=_dedupe(self.issues),
             improvements=_dedupe(improvements),
         )
+
+    def _runtime_workflow_issues(self) -> list[WorkflowIssue]:
+        issues: list[WorkflowIssue] = []
+        if (
+            self._drain_request_slip_seconds is not None
+            and self._drain_request_slip_seconds > 5
+        ):
+            issues.append(
+                WorkflowIssue(
+                    kind="drain_request_late",
+                    issue_ref="global",
+                    pr_url=None,
+                    count=1,
+                    sample=(
+                        "Drain request slipped by "
+                        f"{self._drain_request_slip_seconds:.3f}s "
+                        f"(scheduled={self._scheduled_drain_at}, actual={self._actual_drain_requested_at})"
+                    ),
+                )
+            )
+        if self._has_stale_local_state_after_shutdown():
+            issues.append(
+                WorkflowIssue(
+                    kind="stale_local_state_after_shutdown",
+                    issue_ref="global",
+                    pr_url=None,
+                    count=1,
+                    sample="Consumer stopped, but final local-only status still showed active leases/workers.",
+                )
+            )
+        return issues
+
+    def _has_stale_local_state_after_shutdown(self) -> bool:
+        payload = self._latest_local_status_payload()
+        if payload is None:
+            return False
+        if self.backend.systemd_consumer_active(
+            timeout_seconds=float(self.config.command_timeout_seconds)
+        ):
+            return False
+        if self.backend.local_consumer_processes(
+            timeout_seconds=float(self.config.command_timeout_seconds)
+        ):
+            return False
+        return bool(payload.get("active_leases") or payload.get("workers"))
 
     def _determine_conclusion(
         self,
@@ -794,6 +924,9 @@ class LimitedLiveTestHarness:
             f"- Meaningful board activity observed: `{summary.meaningful_board_activity}`",
             f"- Shutdown mode: `{summary.shutdown_mode}`",
             f"- Drain latency seconds: `{summary.drain_latency_seconds}`",
+            f"- Scheduled drain at: `{summary.scheduled_drain_at}`",
+            f"- Actual drain requested at: `{summary.actual_drain_requested_at}`",
+            f"- Drain request slip seconds: `{summary.drain_request_slip_seconds}`",
             f"- Unexpected exit: `{summary.unexpected_exit}`",
             f"- Forced shutdown: `{summary.forced_shutdown}`",
             "",
@@ -840,7 +973,7 @@ class LimitedLiveTestHarness:
         grouped: dict[tuple[str, str, str | None], WorkflowIssue] = {}
         claim_streaks: dict[tuple[str, str], int] = {}
         reclaim_samples: dict[tuple[str, str], str] = {}
-        removed_review_refs: set[str] = set()
+        removed_review_refs: dict[str, datetime | None] = {}
         for index, line in enumerate(lines):
             stripped = line.strip()
             worktree_match = WORKTREE_REUSE_BLOCKED_PATTERN.search(stripped)
@@ -855,13 +988,17 @@ class LimitedLiveTestHarness:
                 )
                 continue
             removed_refs = set(_extract_removed_refs(stripped))
+            seeded_refs = set(_extract_seeded_refs(stripped))
             requeued_refs = _extract_requeued_refs(stripped)
-            removed_review_refs.update(
-                ref for ref in removed_refs if ref not in requeued_refs
-            )
+            log_ts = _parse_log_timestamp(stripped)
+            for ref in removed_refs:
+                if ref not in requeued_refs:
+                    removed_review_refs[ref] = log_ts
+            for issue_ref in seeded_refs:
+                removed_review_refs.pop(issue_ref, None)
             if requeued_refs:
                 for issue_ref in requeued_refs:
-                    removed_review_refs.discard(issue_ref)
+                    removed_review_refs.pop(issue_ref, None)
                     for claim_key in tuple(claim_streaks):
                         if claim_key[0] == issue_ref:
                             claim_streaks.pop(claim_key, None)
@@ -870,15 +1007,24 @@ class LimitedLiveTestHarness:
             if claimed_match is not None:
                 issue_ref = claimed_match.group("issue_ref")
                 pr_url = claimed_match.group("pr_url")
-                if issue_ref in removed_review_refs:
-                    _record_workflow_issue(
-                        grouped,
-                        kind="review_reclaimed_after_removal",
-                        issue_ref=issue_ref,
-                        pr_url=pr_url,
-                        sample=stripped,
-                    )
-                    removed_review_refs.discard(issue_ref)
+                removed_at = removed_review_refs.pop(issue_ref, None)
+                if removed_at is not None:
+                    claim_ts = _parse_log_timestamp(stripped)
+                    if (
+                        removed_at is not None
+                        and claim_ts is not None
+                        and (claim_ts - removed_at).total_seconds()
+                        <= RECLAIM_COMPLETION_GRACE_SECONDS
+                    ):
+                        pass
+                    else:
+                        _record_workflow_issue(
+                            grouped,
+                            kind="review_reclaimed_after_removal",
+                            issue_ref=issue_ref,
+                            pr_url=pr_url,
+                            sample=stripped,
+                        )
                 claim_key = (issue_ref, pr_url)
                 claim_streaks[claim_key] = claim_streaks.get(claim_key, 0) + 1
                 if claim_streaks[claim_key] >= 2:
@@ -1019,6 +1165,20 @@ class LimitedLiveTestHarness:
             "-m",
             "startupai_controller.board_consumer",
             "drain",
+        ]
+        if self.config.db_path:
+            command.extend(["--db-path", str(self.config.db_path)])
+        return command
+
+    def _consumer_recover_interrupted_command(self) -> list[str]:
+        command = [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "startupai_controller.board_consumer",
+            "recover-interrupted",
+            "--json",
         ]
         if self.config.db_path:
             command.extend(["--db-path", str(self.config.db_path)])
@@ -1190,6 +1350,16 @@ def _extract_requeued_refs(line: str) -> tuple[str, ...]:
     return tuple(ISSUE_REF_PATTERN.findall(raw_refs))
 
 
+def _extract_seeded_refs(line: str) -> tuple[str, ...]:
+    match = SEEDED_REFS_PATTERN.search(line)
+    if match is None:
+        return ()
+    raw_refs = match.group("refs").strip()
+    if not raw_refs:
+        return ()
+    return tuple(ISSUE_REF_PATTERN.findall(raw_refs))
+
+
 def _extract_removed_refs(line: str) -> tuple[str, ...]:
     match = REMOVED_REFS_PATTERN.search(line)
     if match is None:
@@ -1198,6 +1368,15 @@ def _extract_removed_refs(line: str) -> tuple[str, ...]:
     if not raw_refs:
         return ()
     return tuple(ISSUE_REF_PATTERN.findall(raw_refs))
+
+
+def _parse_log_timestamp(line: str) -> datetime | None:
+    match = LOG_TIMESTAMP_PATTERN.search(line)
+    if match is None:
+        return None
+    return datetime.strptime(match.group("stamp"), "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=UTC
+    )
 
 
 def _record_workflow_issue(

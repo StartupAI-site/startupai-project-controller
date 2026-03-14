@@ -29,6 +29,29 @@ from startupai_controller.validate_critical_path_promotion import (
 logger = logging.getLogger("board-consumer")
 
 
+def _session_review_pr_url(latest_session: Any | None) -> str | None:
+    """Return the current PR URL carried by the latest session, if any."""
+    if latest_session is None:
+        return None
+    return getattr(latest_session, "pr_url", None) or getattr(
+        latest_session, "repair_pr_url", None
+    )
+
+
+def _review_truth_evidence(
+    latest_session: Any | None,
+    classification: str,
+    pr_match: Any | None,
+) -> str | None:
+    """Return the PR URL that proves Review is already the truthful lane."""
+    session_pr_url = _session_review_pr_url(latest_session)
+    if session_pr_url:
+        return session_pr_url
+    if classification == "adoptable" and pr_match is not None:
+        return getattr(pr_match, "url", None)
+    return None
+
+
 def transition_issue_to_review(
     issue_ref: str,
     config: Any,
@@ -221,6 +244,11 @@ def reconcile_single_in_progress_item(
     )
 
     if target == "ready":
+        review_truth_pr_url = _review_truth_evidence(
+            latest_session,
+            classification,
+            pr_match,
+        )
         if classification == "adoptable" and pr_match is not None:
             if latest_session is not None and not dry_run:
                 store.update_session(
@@ -228,15 +256,31 @@ def reconcile_single_in_progress_item(
                     SessionUpdateFields(pr_url=pr_match.url),
                 )
         if not dry_run:
-            return_issue_to_ready(
-                issue_ref,
-                critical_path_config,
-                consumer_config.project_owner,
-                consumer_config.project_number,
-                from_statuses={"In Progress"},
-                review_state_port=review_state_port,
-                board_port=board_port,
-            )
+            try:
+                return_issue_to_ready(
+                    issue_ref,
+                    critical_path_config,
+                    consumer_config.project_owner,
+                    consumer_config.project_number,
+                    from_statuses={"In Progress"},
+                    review_state_port=review_state_port,
+                    board_port=board_port,
+                )
+            except GhQueryError as err:
+                if (
+                    "current status=Review" not in str(err)
+                    or review_truth_pr_url is None
+                ):
+                    raise
+                if latest_session is not None:
+                    store.update_session(
+                        latest_session.id,
+                        SessionUpdateFields(
+                            pr_url=review_truth_pr_url,
+                            phase="review",
+                        ),
+                    )
+                return "review"
         return "ready"
 
     if target == "review":
