@@ -32,6 +32,7 @@ CLAIMED_RESULT_PATTERN = re.compile(
     r"CycleResult\(action='claimed', issue_ref='(?P<issue_ref>[^']+)', "
     r"session_id='[^']*', reason='[^']*', pr_url='(?P<pr_url>[^']+)'"
 )
+REMOVED_REFS_PATTERN = re.compile(r"removed=\((?P<refs>[^)]*)\)")
 REQUEUED_REFS_PATTERN = re.compile(r"requeued=\((?P<refs>[^)]*)\)")
 FULLY_QUALIFIED_ISSUE_REF_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+")
 SUMMARY_CONCLUSIONS = (
@@ -839,6 +840,7 @@ class LimitedLiveTestHarness:
         grouped: dict[tuple[str, str, str | None], WorkflowIssue] = {}
         claim_streaks: dict[tuple[str, str], int] = {}
         reclaim_samples: dict[tuple[str, str], str] = {}
+        removed_review_refs: set[str] = set()
         for index, line in enumerate(lines):
             stripped = line.strip()
             worktree_match = WORKTREE_REUSE_BLOCKED_PATTERN.search(stripped)
@@ -852,9 +854,14 @@ class LimitedLiveTestHarness:
                     sample=stripped,
                 )
                 continue
+            removed_refs = set(_extract_removed_refs(stripped))
             requeued_refs = _extract_requeued_refs(stripped)
+            removed_review_refs.update(
+                ref for ref in removed_refs if ref not in requeued_refs
+            )
             if requeued_refs:
                 for issue_ref in requeued_refs:
+                    removed_review_refs.discard(issue_ref)
                     for claim_key in tuple(claim_streaks):
                         if claim_key[0] == issue_ref:
                             claim_streaks.pop(claim_key, None)
@@ -863,6 +870,15 @@ class LimitedLiveTestHarness:
             if claimed_match is not None:
                 issue_ref = claimed_match.group("issue_ref")
                 pr_url = claimed_match.group("pr_url")
+                if issue_ref in removed_review_refs:
+                    _record_workflow_issue(
+                        grouped,
+                        kind="review_reclaimed_after_removal",
+                        issue_ref=issue_ref,
+                        pr_url=pr_url,
+                        sample=stripped,
+                    )
+                    removed_review_refs.discard(issue_ref)
                 claim_key = (issue_ref, pr_url)
                 claim_streaks[claim_key] = claim_streaks.get(claim_key, 0) + 1
                 if claim_streaks[claim_key] >= 2:
@@ -1166,6 +1182,16 @@ def _workflow_issue_kind(line: str) -> str | None:
 
 def _extract_requeued_refs(line: str) -> tuple[str, ...]:
     match = REQUEUED_REFS_PATTERN.search(line)
+    if match is None:
+        return ()
+    raw_refs = match.group("refs").strip()
+    if not raw_refs:
+        return ()
+    return tuple(ISSUE_REF_PATTERN.findall(raw_refs))
+
+
+def _extract_removed_refs(line: str) -> tuple[str, ...]:
+    match = REMOVED_REFS_PATTERN.search(line)
     if match is None:
         return ()
     raw_refs = match.group("refs").strip()

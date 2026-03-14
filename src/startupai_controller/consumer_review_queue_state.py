@@ -12,6 +12,7 @@ from startupai_controller.domain.models import (
     CycleBoardSnapshot,
     ProjectItemSnapshot,
     ReviewQueueEntry,
+    SessionInfo,
 )
 from startupai_controller.domain.repair_policy import parse_pr_url
 from startupai_controller.domain.review_queue_policy import (
@@ -290,6 +291,25 @@ def _explicit_requeue_for_pr(
     return count > 0 and stored_pr_url == pr_url
 
 
+def review_entry_matches_latest_session(
+    entry: ReviewQueueEntry,
+    latest_session: SessionInfo | None,
+) -> bool:
+    """Return True when a review queue row matches the latest successful PR session."""
+    if (
+        latest_session is None
+        or latest_session.status != "success"
+        or entry.source_session_id is None
+    ):
+        return False
+    current_pr_url = latest_session.pr_url or latest_session.repair_pr_url
+    if not current_pr_url:
+        return False
+    return (
+        entry.source_session_id == latest_session.id and entry.pr_url == current_pr_url
+    )
+
+
 def local_review_owned_issue_refs(
     store: SessionStorePort,
     existing_entries: list[ReviewQueueEntry],
@@ -301,8 +321,8 @@ def local_review_owned_issue_refs(
     for entry in existing_entries:
         latest_session = store.latest_session_for_issue(entry.issue_ref)
         current_pr_url = (
-            latest_session.pr_url
-            if latest_session is not None and latest_session.pr_url
+            (latest_session.pr_url or latest_session.repair_pr_url)
+            if latest_session is not None
             else entry.pr_url
         )
         if (
@@ -311,9 +331,12 @@ def local_review_owned_issue_refs(
             or not current_pr_url
         ):
             continue
-        if _explicit_requeue_for_pr(store, entry.issue_ref, current_pr_url):
-            continue
         if board_status_by_issue.get(entry.issue_ref) in {"Done", "Blocked"}:
+            continue
+        if review_entry_matches_latest_session(entry, latest_session):
+            refs.append(entry.issue_ref)
+            continue
+        if _explicit_requeue_for_pr(store, entry.issue_ref, current_pr_url):
             continue
         refs.append(entry.issue_ref)
     return tuple(sorted(set(refs)))

@@ -8,6 +8,9 @@ from typing import Any, Callable
 import startupai_controller.consumer_claim_helpers as _claim_helpers
 from startupai_controller import consumer_selection_helpers as _selection_helpers
 from startupai_controller.board_graph import _ready_snapshot_rank
+from startupai_controller.consumer_review_queue_state import (
+    review_entry_matches_latest_session,
+)
 from startupai_controller.domain.review_queue_policy import (
     effective_retry_backoff as _effective_retry_backoff_primitives,
     is_retryable_failure_reason as _is_retryable_failure_reason,
@@ -111,17 +114,19 @@ def locally_review_owned_issue(
     get_review_queue_item = getattr(db, "get_review_queue_item", None)
     get_requeue_state = getattr(db, "get_requeue_state", None)
     latest_session_for_issue = getattr(db, "latest_session_for_issue", None)
+    latest = latest_session_for_issue(issue_ref) if latest_session_for_issue else None
 
     if get_review_queue_item is not None and get_requeue_state is not None:
         entry = get_review_queue_item(issue_ref)
         if entry is not None:
+            if review_entry_matches_latest_session(entry, latest):
+                return True
             count, stored_pr_url = get_requeue_state(issue_ref)
             if not (count > 0 and stored_pr_url == entry.pr_url):
                 return True
 
     if latest_session_for_issue is None or get_requeue_state is None:
         return False
-    latest = latest_session_for_issue(issue_ref)
     if latest is None or latest.status != "success" or not latest.pr_url:
         return False
     count, stored_pr_url = get_requeue_state(issue_ref)
