@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import threading
 import urllib.request
@@ -36,6 +37,7 @@ from startupai_controller.board_consumer_cli import (
 from startupai_controller.consumer_workflow import load_workflow_definition
 from startupai_controller.consumer_board_state_helpers import (
     escalate_to_claude_from_shell as _escalate_to_claude,
+    return_issue_to_review_from_shell as _return_issue_to_review,
     return_issue_to_ready_from_shell as _return_issue_to_ready,
     transition_issue_to_in_progress_from_shell as _transition_issue_to_in_progress,
     transition_issue_to_review_from_shell as _transition_issue_to_review,
@@ -95,6 +97,7 @@ from startupai_controller.consumer_support_wiring import (
     hydrate_issue_context as _hydrate_issue_context,
 )
 from startupai_controller.consumer_types import (
+    CodexExecutionResult,
     ClaimedSessionContext,
     PendingClaimContext,
     PrCreationOutcome,
@@ -1171,6 +1174,123 @@ class TestRunCodexSession:
         assert heartbeats
         assert captured["kwargs"]["stdout"] is not subprocess.PIPE
         assert captured["kwargs"]["stderr"] is not subprocess.PIPE
+
+    def test_returns_structured_stop_reason_for_stuck_drain_interrupt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        interrupts: list[str] = []
+        captured_process: dict[str, object] = {}
+
+        class FakeProcess:
+            def __init__(self, args, **kwargs):
+                captured_process["process"] = self
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def send_signal(self, sig):
+                captured_process["signal"] = sig
+                self.returncode = 130
+
+            def terminate(self):
+                self.returncode = 143
+
+            def kill(self):
+                self.returncode = 124
+
+            def wait(self):
+                return self.returncode
+
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.resolve_cli_command",
+            lambda _command: "/usr/bin/codex",
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.subprocess.Popen",
+            FakeProcess,
+        )
+
+        result = _run_codex_session(
+            "/tmp/wt",
+            "prompt",
+            Path("schema.json"),
+            Path("out.json"),
+            1800,
+            should_interrupt_fn=lambda: True,
+            interrupting_fn=lambda: interrupts.append("called"),
+        )
+
+        assert result == CodexExecutionResult(
+            exit_code=130,
+            stop_reason="drain_stuck_external_execution",
+        )
+        assert interrupts == ["called"]
+        assert captured_process["signal"] == signal.SIGINT
+
+    def test_checks_stuck_drain_interrupts_on_one_second_cadence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        interrupts: list[str] = []
+        captured_process: dict[str, object] = {}
+        slept_seconds = 0.0
+
+        class FakeProcess:
+            def __init__(self, args, **kwargs):
+                del args, kwargs
+                captured_process["process"] = self
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def send_signal(self, sig):
+                captured_process["signal"] = sig
+                self.returncode = 130
+
+            def terminate(self):
+                self.returncode = 143
+
+            def kill(self):
+                self.returncode = 124
+
+            def wait(self):
+                return self.returncode
+
+        def fake_sleep(seconds: float) -> None:
+            nonlocal slept_seconds
+            slept_seconds += seconds
+
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.resolve_cli_command",
+            lambda _command: "/usr/bin/codex",
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.subprocess.Popen",
+            FakeProcess,
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.time.sleep",
+            fake_sleep,
+        )
+
+        result = _run_codex_session(
+            "/tmp/wt",
+            "prompt",
+            Path("schema.json"),
+            Path("out.json"),
+            1800,
+            should_interrupt_fn=lambda: slept_seconds >= 3.0,
+            interrupting_fn=lambda: interrupts.append("called"),
+        )
+
+        assert result == CodexExecutionResult(
+            exit_code=130,
+            stop_reason="drain_stuck_external_execution",
+        )
+        assert interrupts == ["called"]
+        assert captured_process["signal"] == signal.SIGINT
+        assert slept_seconds < 5.0
 
 
 class TestResolveCliCommand:
@@ -3854,6 +3974,67 @@ class TestConsumerShellSeams:
 
         assert result.moved_in_progress == ()
 
+    def test_reconcile_board_truth_moves_locally_review_owned_ready_item_back_to_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        cp_config = load_config(config.critical_paths_path)
+        auto_config = load_automation_config(config.automation_config_path)
+        pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/216"
+        session_id = db.create_session("crew#10", "codex")
+        db.update_session(
+            session_id,
+            status="success",
+            phase="review",
+            pr_url=pr_url,
+            repo_prefix="crew",
+        )
+        db.enqueue_review_item(
+            "crew#10",
+            pr_url=pr_url,
+            pr_repo="StartupAI-site/startupai-crew",
+            pr_number=216,
+            source_session_id=session_id,
+            now=datetime.now(timezone.utc),
+        )
+        ready_item = _ProjectItemSnapshot(
+            "StartupAI-site/startupai-crew#10",
+            "Ready",
+            "codex",
+            "none",
+            "P0",
+        )
+        board_snapshot = CycleBoardSnapshot(
+            items=(ready_item,),
+            by_status={"Ready": (ready_item,)},
+        )
+        repaired: list[str] = []
+
+        monkeypatch.setattr(
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_review_from_shell",
+            lambda issue_ref, *args, **kwargs: repaired.append(issue_ref),
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "stale Ready repair must use direct Ready -> Review helper"
+                )
+            ),
+        )
+
+        result = _reconcile_board_truth(
+            config,
+            cp_config,
+            auto_config,
+            db,
+            board_snapshot=board_snapshot,
+        )
+
+        assert result.moved_review == ("crew#10",)
+        assert repaired == ["crew#10"]
+
     def test_block_prelaunch_issue_queues_fallback_when_block_transition_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4192,6 +4373,34 @@ class TestRunDaemonLoop:
 
         assert transitions == [("crew#84", "Ready")]
         assert statuses["crew#84"] == "Ready"
+
+    def test_return_issue_to_review_uses_ports(self, tmp_path: Path) -> None:
+        cp_config = _load(tmp_path)
+        statuses = {"crew#10": "Ready"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        _return_issue_to_review(
+            "crew#10",
+            cp_config,
+            "StartupAI-site",
+            1,
+            from_statuses={"Ready"},
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert transitions == [("crew#10", "Review")]
+        assert statuses["crew#10"] == "Review"
 
     def test_replay_deferred_actions_uses_ports(self, tmp_path: Path) -> None:
         config = _make_consumer_config(tmp_path)

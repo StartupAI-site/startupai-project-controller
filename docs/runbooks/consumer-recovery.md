@@ -2,6 +2,32 @@
 
 Procedures for stopping, restarting, and recovering the board consumer daemon.
 
+## Burn-In Defaults
+
+Use short burns by default:
+
+- Default validation burn: `15 minutes`
+- Escalate to `20 minutes` when you need a little more live traffic
+- Use `1 hour` only for release-confidence or soak behavior
+
+Recommended short-burn invocation:
+
+```bash
+uv run python tools/limited_live_test.py \
+  --duration-seconds 900 \
+  --confirm-single-consumer \
+  --confirmation-note "operator note"
+```
+
+Interpretation guidance:
+
+- A short burn is still valid if it produces no claims, as long as it proves
+  controller transport, drain timing, and cleanup behavior.
+- If a burn ends with `ready_count > 0` but `eligible_count = 0`, treat that as
+  board/workflow state, not automatically as a selector bug.
+- If a burn ends with `ready_count = 0` and `eligible_count = 0`, the consumer
+  may have correctly healed stale board state or simply found no runnable work.
+
 ## Pre-Restart Checklist
 
 1. **Verify no other machine is running a consumer.**
@@ -94,6 +120,39 @@ uv run python -m startupai_controller.board_consumer recover-interrupted --json
 This command is idempotent. A clean no-op is still success and reports
 `recovered_leases: 0`.
 
+### Stale `Ready` Items With Surviving Review Ownership
+
+The consumer now reconciles one specific board-truth defect during preflight:
+
+- if an issue is shown as `Ready` on the board
+- but local state still proves Review ownership for a surviving PR
+- the consumer repairs that item back to `Review`
+
+This matters when the board appears to offer `Ready` work but admission still
+reports `eligible_count = 0`.
+
+Check local status:
+
+```bash
+uv run python -m startupai_controller.board_consumer status --json --local-only
+```
+
+Look at:
+
+- `admission.ready_count`
+- `admission.eligible_count`
+- `review_queue`
+- `review_summary`
+
+If stale `Ready` repair is suspected, also inspect the live project status for
+the issue:
+
+```bash
+gh issue view 10 --repo StartupAI-site/startupai-crew --json projectItems
+```
+
+Expected repaired state is `Review`, not `Ready`.
+
 ### Worst Case: Delete and Rebuild
 
 If the local database is corrupted or lost:
@@ -146,6 +205,30 @@ uv run python -m startupai_controller.board_consumer status --json --local-only
 
 If `review_queue.pressure` is `severe`, treat that as workflow queue health,
 not as a transport defect by itself.
+
+## Harness Notes
+
+The limited burn harness uses bounded auxiliary probes before and during a run:
+
+- `board_consumer one-shot --dry-run --json`
+- `board_control_plane tick --json --dry-run`
+- periodic status snapshots
+
+These probes are intentionally time-limited so they cannot wedge the burn.
+
+Current expectation:
+
+- timed-out auxiliary probes should be reaped cleanly
+- the main consumer run should still proceed
+- the machine should end with no lingering probe processes
+
+If a summary reports one of these lines:
+
+- `preflight one-shot --dry-run timed out after 30.0 seconds`
+- `tick-dry-run timed out after 30.0 seconds`
+
+that is instrumentation noise unless it prevents consumer startup, drain, or
+final cleanup.
 
 ## Common Issues
 

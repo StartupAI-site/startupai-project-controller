@@ -62,6 +62,27 @@ class TestSchemaInit:
         assert db2.active_lease_count() == 0
         db2.close()
 
+    def test_session_schema_persists_shutdown_signal_fields(
+        self, tmp_path: Path
+    ) -> None:
+        db = _make_db(tmp_path)
+        session_id = db.create_session("crew#84", "codex")
+        timestamp = _now().isoformat()
+        db.update_session(
+            session_id,
+            shutdown_signal_sent_at=timestamp,
+            last_external_event_before_shutdown_signal_at=timestamp,
+            shutdown_class_at_signal="stuck_waiting_on_external_execution",
+        )
+
+        session = db.get_session(session_id)
+
+        assert session is not None
+        assert session.shutdown_signal_sent_at == timestamp
+        assert session.last_external_event_before_shutdown_signal_at == timestamp
+        assert session.shutdown_class_at_signal == "stuck_waiting_on_external_execution"
+        db.close()
+
 
 # -- Lease acquire/release/conflict ------------------------------------------
 

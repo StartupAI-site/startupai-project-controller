@@ -50,16 +50,18 @@ FULL_SNAPSHOT_GUARD_SECONDS = 20.0
 LOCAL_SNAPSHOT_GUARD_SECONDS = 5.0
 RECLAIM_COMPLETION_GRACE_SECONDS = 10.0
 FORCED_SHUTDOWN_BUDGET_SECONDS = 120.0
+ONE_SHOT_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+BASELINE_SNAPSHOT_TIMEOUT_SECONDS = 30.0
 REVIEW_QUEUE_ELEVATED_DUE_COUNT = 20
 REVIEW_QUEUE_SEVERE_DUE_COUNT = 35
 SESSION_ID_PATTERN = re.compile(r"session id:\s*(?P<session_id>[0-9a-f-]+)")
 ISSUE_BLOCK_PATTERN = re.compile(r"Issue: .* \(#(?P<number>\d+)\)")
-REPOSITORY_LINE_PATTERN = re.compile(r"Repository:\s+(?P<repo>[^\\s]+)")
+REPOSITORY_LINE_PATTERN = re.compile(r"Repository:\s+(?P<repo>\S+)")
 WORKDIR_BRANCH_PATTERN = re.compile(
-    r"workdir:\s+/home/chris/projects/worktrees/(?P<repo_prefix>app|crew|site)/(?P<branch>feat/[^\\s]+)"
+    r"workdir:\s+/home/chris/projects/worktrees/(?P<repo_prefix>app|crew|site)/(?P<branch>feat/\S+)"
 )
-BRANCH_LINE_PATTERN = re.compile(r"Branch:\s+(?P<branch>feat/[^\\s]+)")
-PR_URL_PATTERN = re.compile(r"https://github.com/[^\\s)']+/pull/\\d+")
+BRANCH_LINE_PATTERN = re.compile(r"Branch:\s+(?P<branch>feat/\S+)")
+PR_URL_PATTERN = re.compile(r"https://github.com/\S+/pull/\d+")
 
 
 class HarnessError(RuntimeError):
@@ -226,18 +228,29 @@ class SubprocessBackend:
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         started_at = self._clock.now_utc().isoformat()
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
-            completed_at = self._clock.now_utc().isoformat()
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
             stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            self._terminate_timed_out_process(process)
+            if process.returncode is None:
+                try:
+                    stdout, stderr = process.communicate(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    self._terminate_timed_out_process(
+                        process,
+                        sig=signal.SIGKILL,
+                    )
+                    stdout, stderr = process.communicate()
+            completed_at = self._clock.now_utc().isoformat()
             timeout_note = (
                 f"command timed out after {timeout_seconds} seconds"
                 if timeout_seconds is not None
@@ -254,16 +267,38 @@ class SubprocessBackend:
                 timed_out=True,
                 timeout_seconds=timeout_seconds,
             )
+        returncode = process.returncode or 0
         completed_at = self._clock.now_utc().isoformat()
         return CommandResult(
             argv=list(argv),
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
             started_at=started_at,
             completed_at=completed_at,
             timeout_seconds=timeout_seconds,
         )
+
+    def _terminate_timed_out_process(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        sig: int = signal.SIGTERM,
+    ) -> None:
+        try:
+            pgid = os.getpgid(process.pid)
+        except ProcessLookupError:
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                return
+            return
+        try:
+            process.send_signal(sig)
+        except ProcessLookupError:
+            return
 
     def start_consumer(self, argv: list[str], log_path: Path) -> ManagedProcess:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,6 +382,7 @@ class LimitedLiveTestHarness:
         self._graceful_drain_latency_seconds: float | None = None
         self._shutdown_total_seconds: float | None = None
         self._scheduled_drain_monotonic: float | None = None
+        self._drain_requested_monotonic: float | None = None
         self._run_meta: dict[str, Any] = {}
         self._scheduled_drain_at: str | None = None
         self._actual_drain_requested_at: str | None = None
@@ -360,8 +396,11 @@ class LimitedLiveTestHarness:
         self._capture_baseline_snapshots()
         child = self._start_consumer()
         try:
-            self._monitor_run(child)
-            self._drain_and_stop(child)
+            drain_requested_at_monotonic = self._monitor_run(child)
+            self._drain_and_stop(
+                child,
+                drain_requested_at_monotonic=drain_requested_at_monotonic,
+            )
         finally:
             child.close()
         self._update_run_meta()
@@ -455,17 +494,35 @@ class LimitedLiveTestHarness:
                 self._run_aux_command(self._consumer_recover_interrupted_command()),
                 "board_consumer recover-interrupted --json",
             )
-        self._require_one_shot_ok(
-            self._run_aux_command(self._consumer_one_shot_command()),
-            "board_consumer one-shot --dry-run --json",
+        one_shot_result = self._run_aux_command(
+            self._consumer_one_shot_command(),
+            timeout_seconds=ONE_SHOT_PREFLIGHT_TIMEOUT_SECONDS,
         )
+        one_shot_payload = _parse_json(one_shot_result.stdout)
+        if not one_shot_result.ok and not self._is_nonfatal_one_shot_idle(
+            one_shot_result, one_shot_payload
+        ):
+            message = (
+                "preflight one-shot --dry-run timed out after "
+                f"{one_shot_result.timeout_seconds} seconds"
+                if one_shot_result.timed_out
+                else "preflight one-shot --dry-run failed with exit code "
+                f"{one_shot_result.returncode}"
+            )
+            self.snapshot_failures.append(message)
+            self.issues.append(message)
 
     def _shutdown_state_path(self) -> Path:
         return self.config.state_root / "shutdown-state.json"
 
     def _capture_baseline_snapshots(self) -> None:
         for name, command in self._baseline_snapshot_commands():
-            self._capture_snapshot(name, command, self.baseline_dir)
+            self._capture_snapshot(
+                name,
+                command,
+                self.baseline_dir,
+                timeout_seconds=BASELINE_SNAPSHOT_TIMEOUT_SECONDS,
+            )
 
     def _capture_final_snapshots(self) -> None:
         for name, command in self._baseline_snapshot_commands():
@@ -482,7 +539,7 @@ class LimitedLiveTestHarness:
             self.logs_dir / "consumer-run.log",
         )
 
-    def _monitor_run(self, child: ManagedProcess) -> None:
+    def _monitor_run(self, child: ManagedProcess) -> float | None:
         start = self.clock.monotonic()
         end = start + self.config.duration_seconds
         scheduled_drain_at = (
@@ -493,6 +550,7 @@ class LimitedLiveTestHarness:
             scheduled_drain_at,
             tz=UTC,
         ).isoformat()
+        self._update_run_meta()
         next_local = start + self.config.local_snapshot_seconds
         next_full = start + self.config.full_snapshot_seconds
 
@@ -506,9 +564,9 @@ class LimitedLiveTestHarness:
                         f"Consumer exited unexpectedly with code {returncode}."
                     )
                     self._capture_event_bundle("unexpected-exit")
-                return
+                return None
             if now >= end:
-                return
+                return self._request_drain()
             if now >= next_local:
                 if end - now <= LOCAL_SNAPSHOT_GUARD_SECONDS:
                     next_local = end + self.config.local_snapshot_seconds
@@ -537,24 +595,48 @@ class LimitedLiveTestHarness:
             if sleep_for > 0:
                 self.clock.sleep(sleep_for)
 
-    def _drain_and_stop(self, child: ManagedProcess) -> None:
-        if child.poll() is not None:
-            self._shutdown_mode = "unexpected-exit"
-            return
+    def _request_drain(self) -> float:
+        if self._drain_requested_monotonic is not None:
+            return self._drain_requested_monotonic
         drain_requested_at = self.clock.monotonic()
+        self._drain_requested_monotonic = drain_requested_at
         self._actual_drain_requested_at = self.clock.now_utc().isoformat()
         if self._scheduled_drain_monotonic is not None:
             self._drain_request_slip_seconds = max(
                 0.0,
                 drain_requested_at - self._scheduled_drain_monotonic,
             )
+        self._update_run_meta()
         drain_result = self._run_aux_command(self._consumer_drain_command())
         if not drain_result.ok:
             self.snapshot_failures.append("drain command failed")
             self.issues.append("Drain request failed; forcing shutdown escalation.")
+        return drain_requested_at
+
+    def _drain_and_stop(
+        self,
+        child: ManagedProcess,
+        *,
+        drain_requested_at_monotonic: float | None = None,
+    ) -> None:
+        if drain_requested_at_monotonic is None:
+            drain_requested_at_monotonic = self._drain_requested_monotonic
+        if child.poll() is not None:
+            if drain_requested_at_monotonic is not None:
+                elapsed = self.clock.monotonic() - drain_requested_at_monotonic
+                self._graceful_drain_latency_seconds = elapsed
+                self._shutdown_total_seconds = elapsed
+                self._drain_latency_seconds = elapsed
+                self._shutdown_mode = "natural"
+                self.worked.append("consumer drained and exited naturally")
+                return
+            self._shutdown_mode = "unexpected-exit"
+            return
+        if drain_requested_at_monotonic is None:
+            drain_requested_at_monotonic = self._request_drain()
         latest_payload: dict[str, Any] = {}
         while (
-            self.clock.monotonic() - drain_requested_at
+            self.clock.monotonic() - drain_requested_at_monotonic
             < self.config.drain_timeout_seconds
         ):
             snapshot = self._capture_snapshot(
@@ -566,7 +648,7 @@ class LimitedLiveTestHarness:
             payload = snapshot.payload or {}
             latest_payload = payload
             if child.poll() is not None:
-                elapsed = self.clock.monotonic() - drain_requested_at
+                elapsed = self.clock.monotonic() - drain_requested_at_monotonic
                 self._graceful_drain_latency_seconds = elapsed
                 self._shutdown_total_seconds = elapsed
                 self._drain_latency_seconds = elapsed
@@ -579,7 +661,7 @@ class LimitedLiveTestHarness:
                 )
                 while self.clock.monotonic() < wait_deadline:
                     if child.poll() is not None:
-                        elapsed = self.clock.monotonic() - drain_requested_at
+                        elapsed = self.clock.monotonic() - drain_requested_at_monotonic
                         self._graceful_drain_latency_seconds = elapsed
                         self._shutdown_total_seconds = elapsed
                         self._drain_latency_seconds = elapsed
@@ -589,7 +671,7 @@ class LimitedLiveTestHarness:
                     self.clock.sleep(1.0)
             self.clock.sleep(float(self.config.shutdown_poll_seconds))
         self._graceful_drain_latency_seconds = (
-            self.clock.monotonic() - drain_requested_at
+            self.clock.monotonic() - drain_requested_at_monotonic
         )
         self._forced_shutdown_blockers = self._extract_forced_shutdown_blockers(
             latest_payload
@@ -601,7 +683,7 @@ class LimitedLiveTestHarness:
         sigint_deadline = self.clock.monotonic() + 60
         while self.clock.monotonic() < sigint_deadline:
             if child.poll() is not None:
-                elapsed = self.clock.monotonic() - drain_requested_at
+                elapsed = self.clock.monotonic() - drain_requested_at_monotonic
                 self._shutdown_total_seconds = elapsed
                 self._drain_latency_seconds = elapsed
                 self._recover_after_forced_shutdown()
@@ -609,7 +691,7 @@ class LimitedLiveTestHarness:
             self.clock.sleep(1.0)
         child.send_signal(signal.SIGTERM)
         child.wait(timeout=60)
-        elapsed = self.clock.monotonic() - drain_requested_at
+        elapsed = self.clock.monotonic() - drain_requested_at_monotonic
         self._shutdown_total_seconds = elapsed
         self._drain_latency_seconds = elapsed
         self._recover_after_forced_shutdown()
@@ -644,6 +726,11 @@ class LimitedLiveTestHarness:
                         "external_execution_started"
                     ),
                     "active_seconds": worker.get("active_seconds"),
+                    "shutdown_signal_sent_at": worker.get("shutdown_signal_sent_at"),
+                    "last_external_event_before_shutdown_signal_at": worker.get(
+                        "last_external_event_before_shutdown_signal_at"
+                    ),
+                    "shutdown_class_at_signal": worker.get("shutdown_class_at_signal"),
                     "shutdown_class": worker.get("shutdown_class")
                     or worker.get("drain_wait_class"),
                 }
@@ -669,6 +756,11 @@ class LimitedLiveTestHarness:
                     "phase": blocker.get("phase"),
                     "external_execution_started": external_execution_started,
                     "active_seconds": blocker.get("active_seconds"),
+                    "shutdown_signal_sent_at": blocker.get("shutdown_signal_sent_at"),
+                    "last_external_event_before_shutdown_signal_at": blocker.get(
+                        "last_external_event_before_shutdown_signal_at"
+                    ),
+                    "shutdown_class_at_signal": blocker.get("shutdown_class_at_signal"),
                     "shutdown_class": blocker.get("shutdown_class"),
                     "shutdown_reason": shutdown_reason,
                     "failure_reason_override": (
@@ -800,9 +892,14 @@ class LimitedLiveTestHarness:
         *,
         reason: str | None = None,
         deadline_monotonic: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> SnapshotRecord:
         directory.mkdir(parents=True, exist_ok=True)
-        result = self._run_aux_command(command, deadline_monotonic=deadline_monotonic)
+        result = self._run_aux_command(
+            command,
+            deadline_monotonic=deadline_monotonic,
+            timeout_seconds=timeout_seconds,
+        )
         base = directory / name
         payload = _parse_json(result.stdout)
         if payload is not None:
@@ -921,6 +1018,9 @@ class LimitedLiveTestHarness:
                     "phase",
                     "external_execution_started",
                     "active_seconds",
+                    "shutdown_signal_sent_at",
+                    "last_external_event_before_shutdown_signal_at",
+                    "shutdown_class_at_signal",
                     "shutdown_class",
                     "shutdown_reason",
                 }
@@ -1097,7 +1197,10 @@ class LimitedLiveTestHarness:
             return False
         return all(
             blocker.get("external_execution_started") is True
-            and blocker.get("shutdown_class") == "finishing_inflight_execution"
+            and (
+                blocker.get("shutdown_class_at_signal") or blocker.get("shutdown_class")
+            )
+            == "finishing_inflight_execution"
             for blocker in self._forced_shutdown_blockers
         )
 
@@ -1285,6 +1388,7 @@ class LimitedLiveTestHarness:
                     _infer_workflow_issue_context(
                         lines,
                         index,
+                        kind=kind,
                     )
                 )
                 _record_workflow_issue(
@@ -1457,7 +1561,6 @@ class LimitedLiveTestHarness:
             ("report-slo", self._consumer_report_slo_command(local_only=False)),
             ("report-slo-local", self._consumer_report_slo_command(local_only=True)),
             ("tick-dry-run", self._control_plane_tick_command()),
-            ("one-shot-dry-run", self._consumer_one_shot_command()),
         ]
 
     def _require_ok(self, result: CommandResult, label: str) -> None:
@@ -1494,8 +1597,13 @@ class LimitedLiveTestHarness:
         argv: list[str],
         *,
         deadline_monotonic: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult:
-        configured_timeout = float(self.config.command_timeout_seconds)
+        configured_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(self.config.command_timeout_seconds)
+        )
         effective_timeout = configured_timeout
         deadline_clipped = False
         if deadline_monotonic is not None:
@@ -1675,6 +1783,70 @@ def _parse_log_timestamp(line: str) -> datetime | None:
     )
 
 
+def _log_block_lines(
+    lines: list[str],
+    start_index: int,
+    *,
+    max_lines: int = 12,
+    allow_timestamp_start: bool = True,
+) -> list[str]:
+    block: list[str] = []
+    end_index = min(len(lines), start_index + max_lines)
+    for candidate in range(start_index, end_index):
+        line = lines[candidate]
+        if (
+            candidate == start_index
+            and not allow_timestamp_start
+            and LOG_TIMESTAMP_PATTERN.search(line)
+        ):
+            break
+        if candidate > start_index and LOG_TIMESTAMP_PATTERN.search(line):
+            break
+        block.append(line)
+    return block
+
+
+def _extract_block_context(
+    block_lines: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    issue_ref: str | None = None
+    repo_prefix: str | None = None
+    branch_name: str | None = None
+    issue_number: str | None = None
+    repo_name: str | None = None
+    for block_line in block_lines:
+        direct_issue_match = ISSUE_REF_PATTERN.search(block_line)
+        if direct_issue_match is not None:
+            issue_ref = direct_issue_match.group(0)
+            repo_prefix = issue_ref.split("#", 1)[0]
+        issue_match = ISSUE_BLOCK_PATTERN.search(block_line)
+        if issue_match is not None:
+            issue_number = issue_match.group("number")
+        repo_match = REPOSITORY_LINE_PATTERN.search(block_line)
+        if repo_match is not None:
+            repo_name = repo_match.group("repo")
+            repo_prefix = repo_prefix or _repo_prefix_for_repo_name(repo_name)
+        branch_match = BRANCH_LINE_PATTERN.search(block_line)
+        if branch_match is not None:
+            branch_name = branch_match.group("branch")
+        workdir_match = WORKDIR_BRANCH_PATTERN.search(block_line)
+        if workdir_match is not None:
+            branch_name = branch_name or workdir_match.group("branch")
+            repo_prefix = repo_prefix or workdir_match.group("repo_prefix")
+            repo_name = repo_name or {
+                "app": "StartupAI-site/app.startupai-site",
+                "crew": "StartupAI-site/startupai-crew",
+                "site": "StartupAI-site/startupai.site",
+            }.get(workdir_match.group("repo_prefix"))
+    if issue_ref is None:
+        issue_ref = _issue_ref_from_block(issue_number, repo_name)
+    if issue_ref is None and issue_number is not None and repo_prefix is not None:
+        issue_ref = f"{repo_prefix}#{issue_number}"
+    if repo_prefix is None and issue_ref is not None:
+        repo_prefix = issue_ref.split("#", 1)[0]
+    return issue_ref, repo_prefix, branch_name
+
+
 def _record_workflow_issue(
     grouped: dict[tuple[str, str, str | None], WorkflowIssue],
     *,
@@ -1728,36 +1900,35 @@ def _session_context_near_line(
     for candidate in range(window_start, window_end):
         if SESSION_ID_PATTERN.search(lines[candidate]) is None:
             continue
-        issue_number = None
-        repo = None
-        branch_name = None
-        for block_line in lines[candidate : min(len(lines), candidate + 12)]:
-            issue_match = ISSUE_BLOCK_PATTERN.search(block_line)
-            if issue_match is not None:
-                issue_number = issue_match.group("number")
-            repo_match = REPOSITORY_LINE_PATTERN.search(block_line)
-            if repo_match is not None:
-                repo = repo_match.group("repo")
-            branch_match = BRANCH_LINE_PATTERN.search(block_line)
-            if branch_match is not None:
-                branch_name = branch_match.group("branch")
-            workdir_match = WORKDIR_BRANCH_PATTERN.search(block_line)
-            if workdir_match is not None and branch_name is None:
-                branch_name = workdir_match.group("branch")
-                repo = repo or {
-                    "app": "StartupAI-site/app.startupai-site",
-                    "crew": "StartupAI-site/startupai-crew",
-                    "site": "StartupAI-site/startupai.site",
-                }.get(workdir_match.group("repo_prefix"))
-        issue_ref = _issue_ref_from_block(issue_number, repo)
+        issue_ref, repo_prefix, branch_name = _extract_block_context(
+            _log_block_lines(lines, candidate)
+        )
         if issue_ref is None:
             continue
         distance = abs(candidate - index)
         if best is None or distance < best[0]:
-            best = (distance, issue_ref, _repo_prefix_for_repo_name(repo), branch_name)
+            best = (distance, issue_ref, repo_prefix, branch_name)
     if best is None:
         return None, None, None
     return best[1], best[2], best[3]
+
+
+def _same_line_session_context(
+    lines: list[str],
+    index: int,
+) -> tuple[str | None, str | None, str | None]:
+    if SESSION_ID_PATTERN.search(lines[index]) is None:
+        return None, None, None
+    return _extract_block_context(_log_block_lines(lines, index))
+
+
+def _forward_error_block_context(
+    lines: list[str],
+    index: int,
+) -> tuple[str | None, str | None, str | None]:
+    return _extract_block_context(
+        _log_block_lines(lines, index + 1, allow_timestamp_start=False)
+    )
 
 
 def _pr_url_context_near_line(
@@ -1801,7 +1972,37 @@ def _branch_context_near_line(
 def _infer_workflow_issue_context(
     lines: list[str],
     index: int,
+    *,
+    kind: str | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
+    if kind == "workflow_error":
+        issue_ref, repo_prefix, branch_name = _same_line_session_context(lines, index)
+        if issue_ref is not None:
+            return issue_ref, None, branch_name, repo_prefix
+
+        same_line_match = ISSUE_REF_PATTERN.search(lines[index])
+        if same_line_match is not None:
+            issue_ref = same_line_match.group(0)
+            return issue_ref, None, None, issue_ref.split("#", 1)[0]
+
+        issue_ref, repo_prefix, branch_name = _forward_error_block_context(lines, index)
+        if issue_ref is not None:
+            return issue_ref, None, branch_name, repo_prefix
+
+        branch_issue_ref, branch_repo_prefix = _branch_context_near_line(
+            lines,
+            index,
+            branch_name,
+        )
+        if branch_issue_ref is not None:
+            return branch_issue_ref, None, branch_name, branch_repo_prefix
+
+        pr_issue_ref, pr_url = _pr_url_context_near_line(lines, index)
+        if pr_issue_ref is not None and pr_url is not None:
+            return pr_issue_ref, pr_url, branch_name, pr_issue_ref.split("#", 1)[0]
+
+        return "unknown", None, branch_name, repo_prefix
+
     issue_ref, repo_prefix, branch_name = _session_context_near_line(lines, index)
     if issue_ref is not None:
         return issue_ref, None, branch_name, repo_prefix

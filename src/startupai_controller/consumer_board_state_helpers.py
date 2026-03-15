@@ -11,6 +11,9 @@ from startupai_controller import (
     consumer_execution_support_helpers as _execution_support_helpers,
 )
 import startupai_controller.consumer_resolution_helpers as _resolution_helpers
+from startupai_controller.consumer_review_queue_state import (
+    local_review_owned_issue_refs,
+)
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.domain.repair_policy import marker_for as _marker_for
 from startupai_controller.ports.board_mutations import BoardMutationPort
@@ -159,6 +162,43 @@ def return_issue_to_ready(
     )
 
 
+def return_issue_to_review(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    build_github_port_bundle: Callable[..., Any],
+    from_statuses: set[str] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Move a locally review-owned issue back to Review so board truth matches reality."""
+    port_review = review_state_port
+    port_board = board_port
+    if port_review is None or port_board is None:
+        bundle = build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
+        port_review = port_review or bundle.review_state
+        port_board = port_board or bundle.board_mutations
+    old_status = port_review.get_issue_status(issue_ref)
+    if old_status in (from_statuses or {"Ready"}):
+        port_board.set_issue_status(issue_ref, "Review")
+        changed = True
+    else:
+        changed = False
+    if changed or old_status == "Review":
+        return
+    raise GhQueryError(
+        f"Failed moving {issue_ref} back to Review: current status={old_status}"
+    )
+
+
 def reconcile_active_repair_review_items(
     consumer_config: Any,
     critical_path_config: Any,
@@ -203,6 +243,72 @@ def reconcile_active_repair_review_items(
             )
         moved_in_progress.append(issue_ref)
     return moved_in_progress
+
+
+def reconcile_locally_review_owned_ready_items(
+    consumer_config: Any,
+    critical_path_config: Any,
+    *,
+    store: SessionStorePort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: Any | None,
+    issue_ref_for_snapshot: Callable[..., str | None],
+    dry_run: bool,
+    return_issue_to_review: Callable[..., None],
+) -> list[str]:
+    """Return stale Ready items that should be healed back to Review."""
+    ready_items = (
+        board_snapshot.items_with_status("Ready")
+        if board_snapshot is not None
+        else review_state_port.list_issues_by_status("Ready")
+    )
+    existing_entries = store.list_review_queue_items()
+    if not ready_items or not existing_entries:
+        return []
+
+    snapshot_items = (
+        board_snapshot.items if board_snapshot is not None else tuple(ready_items)
+    )
+    board_status_by_issue = {
+        issue_ref: snapshot.status
+        for snapshot in snapshot_items
+        for issue_ref in (issue_ref_for_snapshot(snapshot),)
+        if issue_ref is not None
+    }
+    locally_review_owned = set(
+        local_review_owned_issue_refs(
+            store,
+            existing_entries,
+            board_status_by_issue=board_status_by_issue,
+        )
+    )
+    if not locally_review_owned:
+        return []
+
+    moved_review: list[str] = []
+    for snapshot in ready_items:
+        issue_ref = issue_ref_for_snapshot(snapshot)
+        if issue_ref is None:
+            continue
+        parsed = parse_issue_ref(issue_ref)
+        if parsed.prefix not in consumer_config.repo_prefixes:
+            continue
+        if snapshot.executor.strip().lower() != consumer_config.executor:
+            continue
+        if issue_ref not in locally_review_owned:
+            continue
+        if not dry_run:
+            return_issue_to_review(
+                issue_ref,
+                critical_path_config,
+                consumer_config.project_owner,
+                consumer_config.project_number,
+                review_state_port=review_state_port,
+                board_port=board_port,
+            )
+        moved_review.append(issue_ref)
+    return moved_review
 
 
 def reconcile_single_in_progress_item(
@@ -444,6 +550,34 @@ def return_issue_to_ready_from_shell(
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
     del board_info_resolver, board_mutator
     return return_issue_to_ready(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        build_github_port_bundle=build_github_port_bundle,
+        from_statuses=from_statuses,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        gh_runner=gh_runner,
+    )
+
+
+def return_issue_to_review_from_shell(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    from_statuses: set[str] | None = None,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Move a locally review-owned issue from stale Ready back to Review."""
+    del board_info_resolver, board_mutator
+    return return_issue_to_review(
         issue_ref,
         config,
         project_owner,

@@ -11,6 +11,7 @@ from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    CodexExecutionResult,
     CodexSessionResult,
     PrCreationOutcome,
     PreparedCycleContext,
@@ -339,7 +340,7 @@ class ExecutionDeps:
 
     assemble_codex_prompt: Callable[..., str]
     drain_requested: Callable[[Path], bool]
-    run_codex_session: Callable[..., int]
+    run_codex_session: Callable[..., int | CodexExecutionResult]
     parse_codex_result: Callable[..., CodexResultPayload | None]
     session_status_from_codex_result: Callable[..., tuple[str, str | None]]
     create_pr_for_execution_result: CreatePrForExecutionResultFn
@@ -464,9 +465,31 @@ def execute_claimed_session(
     drain_observed = bool(
         existing_session is not None and existing_session.drain_observed_at
     )
+    drain_observed_at = (
+        existing_session.drain_observed_at if existing_session is not None else None
+    )
+    if existing_session is not None:
+        last_external_event_at = (
+            existing_session.last_external_event_at
+            or existing_session.last_execution_progress_at
+            or initial_external_event_at
+        )
+    else:
+        last_external_event_at = initial_external_event_at
+    shutdown_signal_recorded = False
+
+    def _parse_iso8601(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _record_execution_progress() -> None:
+        nonlocal last_external_event_at
         timestamp = _iso_now()
+        last_external_event_at = timestamp
         session_store.update_session(
             session_id,
             {
@@ -476,17 +499,47 @@ def execute_claimed_session(
         )
 
     def _heartbeat_and_record_drain() -> None:
-        nonlocal drain_observed
+        nonlocal drain_observed, drain_observed_at
         db.update_heartbeat(candidate)
         if drain_observed or not deps.drain_requested(config.drain_path):
             return
         drain_observed = True
+        drain_observed_at = _iso_now()
         session_store.update_session(
             session_id,
-            {"drain_observed_at": _iso_now()},
+            {"drain_observed_at": drain_observed_at},
         )
 
-    exit_code = deps.run_codex_session(
+    def _stuck_reference_at() -> datetime | None:
+        drain_dt = _parse_iso8601(drain_observed_at)
+        last_event_dt = _parse_iso8601(last_external_event_at)
+        if drain_dt is not None and last_event_dt is not None:
+            return max(drain_dt, last_event_dt)
+        return drain_dt or last_event_dt
+
+    def _should_interrupt_stuck_execution() -> bool:
+        if not deps.drain_requested(config.drain_path):
+            return False
+        stuck_reference_at = _stuck_reference_at()
+        if stuck_reference_at is None:
+            return False
+        return (datetime.now(timezone.utc) - stuck_reference_at).total_seconds() > 120
+
+    def _record_shutdown_signal() -> None:
+        nonlocal shutdown_signal_recorded
+        if shutdown_signal_recorded:
+            return
+        shutdown_signal_recorded = True
+        session_store.update_session(
+            session_id,
+            {
+                "shutdown_signal_sent_at": _iso_now(),
+                "last_external_event_before_shutdown_signal_at": last_external_event_at,
+                "shutdown_class_at_signal": "stuck_waiting_on_external_execution",
+            },
+        )
+
+    codex_execution_result = deps.run_codex_session(
         launch_context.worktree_path,
         prompt,
         config.schema_path,
@@ -494,13 +547,22 @@ def execute_claimed_session(
         launch_context.effective_consumer_config.codex_timeout_seconds,
         heartbeat_fn=_heartbeat_and_record_drain,
         progress_fn=_record_execution_progress,
+        should_interrupt_fn=_should_interrupt_stuck_execution,
+        interrupting_fn=_record_shutdown_signal,
         subprocess_runner=process_runner.run if process_runner is not None else None,
     )
+    if isinstance(codex_execution_result, CodexExecutionResult):
+        exit_code = codex_execution_result.exit_code
+        stop_reason = codex_execution_result.stop_reason
+    else:
+        exit_code = codex_execution_result
+        stop_reason = None
 
     codex_result = deps.parse_codex_result(output_path, file_reader=file_reader)
     session_status, failure_reason = deps.session_status_from_codex_result(
         exit_code,
         codex_result,
+        stop_reason=stop_reason,
     )
     pr_outcome = deps.create_pr_for_execution_result(
         config=config,

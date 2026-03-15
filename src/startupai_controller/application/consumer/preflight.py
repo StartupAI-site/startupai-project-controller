@@ -145,6 +145,25 @@ class ReconcileActiveRepairReviewItemsFn(Protocol):
         ...
 
 
+class ReconcileLocallyReviewOwnedReadyItemsFn(Protocol):
+    """Return stale Ready items that should move back to Review."""
+
+    def __call__(
+        self,
+        consumer_config: ConsumerConfig,
+        critical_path_config: CriticalPathConfig,
+        *,
+        store: SessionStorePort,
+        review_state_port: ReviewStatePort,
+        board_port: BoardMutationPort,
+        board_snapshot: CycleBoardSnapshot | None,
+        issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
+        dry_run: bool,
+    ) -> list[str]:
+        """Return issue refs moved back to Review."""
+        ...
+
+
 class ReconcileStaleInProgressItemsFn(Protocol):
     """Return stale In Progress issues split by truthful destination lane."""
 
@@ -268,6 +287,7 @@ class ReconciliationDeps:
 
     issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None]
     reconcile_active_repair_review_items: ReconcileActiveRepairReviewItemsFn
+    reconcile_locally_review_owned_ready_items: ReconcileLocallyReviewOwnedReadyItemsFn
     reconcile_stale_in_progress_items: ReconcileStaleInProgressItemsFn
 
 
@@ -307,6 +327,18 @@ def reconcile_board_truth(
             consumer_config,
             critical_path_config,
             active_repair_sessions_by_issue=active_repair_sessions_by_issue,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_snapshot=board_snapshot,
+            issue_ref_for_snapshot=deps.issue_ref_for_snapshot,
+            dry_run=dry_run,
+        )
+    )
+    moved_review.extend(
+        deps.reconcile_locally_review_owned_ready_items(
+            consumer_config,
+            critical_path_config,
+            store=store,
             review_state_port=review_state_port,
             board_port=board_port,
             board_snapshot=board_snapshot,

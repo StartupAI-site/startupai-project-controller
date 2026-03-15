@@ -49,12 +49,14 @@ class ReconciliationWiringDeps:
 
     # Board state helpers module (real bodies)
     board_state_reconcile_active_repair: Callable[..., list[str]]
+    board_state_reconcile_locally_review_owned_ready: Callable[..., list[str]]
     board_state_reconcile_single: Callable[..., str]
     board_state_reconcile_stale: Callable[..., tuple[list[str], list[str], list[str]]]
 
     # Board transition functions
     transition_issue_to_in_progress: Callable[..., None]
     return_issue_to_ready: Callable[..., None]
+    return_issue_to_review: Callable[..., None]
     transition_issue_to_review: Callable[..., None]
     set_blocked_with_reason: Callable[..., None]
 
@@ -93,6 +95,32 @@ def reconcile_active_repair_review_items(
         issue_ref_for_snapshot=issue_ref_for_snapshot,
         dry_run=dry_run,
         transition_issue_to_in_progress=deps.transition_issue_to_in_progress,
+    )
+
+
+def reconcile_locally_review_owned_ready_items(
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    *,
+    deps: ReconciliationWiringDeps,
+    store: SessionStorePort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
+    dry_run: bool,
+) -> list[str]:
+    """Return stale Ready items that should move back to Review."""
+    return deps.board_state_reconcile_locally_review_owned_ready(
+        consumer_config,
+        critical_path_config,
+        store=store,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_snapshot=board_snapshot,
+        issue_ref_for_snapshot=issue_ref_for_snapshot,
+        dry_run=dry_run,
+        return_issue_to_review=deps.return_issue_to_review,
     )
 
 
@@ -238,6 +266,29 @@ def wire_reconcile_board_truth(
             dry_run=dry_run,
         )
 
+    def _wired_reconcile_locally_review_owned_ready(
+        consumer_config,
+        critical_path_config,
+        *,
+        store,
+        review_state_port,
+        board_port,
+        board_snapshot,
+        issue_ref_for_snapshot,
+        dry_run,
+    ):
+        return reconcile_locally_review_owned_ready_items(
+            consumer_config,
+            critical_path_config,
+            deps=deps,
+            store=store,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            board_snapshot=board_snapshot,
+            issue_ref_for_snapshot=issue_ref_for_snapshot,
+            dry_run=dry_run,
+        )
+
     def _wired_reconcile_stale(
         consumer_config,
         critical_path_config,
@@ -280,6 +331,9 @@ def wire_reconcile_board_truth(
         deps=ReconciliationDeps(
             issue_ref_for_snapshot=_issue_ref_for_snapshot,
             reconcile_active_repair_review_items=_wired_reconcile_active_repair,
+            reconcile_locally_review_owned_ready_items=(
+                _wired_reconcile_locally_review_owned_ready
+            ),
             reconcile_stale_in_progress_items=_wired_reconcile_stale,
         ),
         session_store=session_store,

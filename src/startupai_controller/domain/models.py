@@ -283,6 +283,9 @@ class SessionInfo:
     drain_observed_at: str | None = None
     last_execution_progress_at: str | None = None
     last_external_event_at: str | None = None
+    shutdown_signal_sent_at: str | None = None
+    last_external_event_before_shutdown_signal_at: str | None = None
+    shutdown_class_at_signal: str | None = None
 
 
 @dataclass(frozen=True)

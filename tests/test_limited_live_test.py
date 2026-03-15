@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from tools.limited_live_test import (
     HarnessError,
     LimitedLiveTestConfig,
     LimitedLiveTestHarness,
+    SubprocessBackend,
 )
 
 UTC = timezone.utc
@@ -246,6 +248,8 @@ class FakeBackend:
             return ("report-slo", "--local-only" in argv)
         if "tick" in argv:
             return ("tick", None)
+        if "one-shot" in argv:
+            return ("one-shot", None)
         return ("other", None)
 
     def _is_consumer_command(self, argv: list[str]) -> bool:
@@ -315,6 +319,61 @@ def _config(tmp_path: Path) -> LimitedLiveTestConfig:
     )
 
 
+def test_subprocess_backend_timeout_terminates_auxiliary_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    backend = SubprocessBackend(clock)
+    kill_calls: list[tuple[int, int]] = []
+
+    class FakePopen:
+        def __init__(self) -> None:
+            self.pid = 4321
+            self.returncode: int | None = None
+            self.timeouts: list[float | None] = []
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            self.timeouts.append(timeout)
+            if len(self.timeouts) == 1:
+                raise subprocess.TimeoutExpired(
+                    cmd=["uv", "run"],
+                    timeout=timeout,
+                    output="partial stdout",
+                    stderr="partial stderr",
+                )
+            self.returncode = -signal.SIGTERM
+            return ("partial stdout", "partial stderr")
+
+        def send_signal(self, sig: int) -> None:
+            self.returncode = -sig
+
+    fake_process = FakePopen()
+
+    monkeypatch.setattr(
+        "tools.limited_live_test.subprocess.Popen",
+        lambda *args, **kwargs: fake_process,
+    )
+    monkeypatch.setattr(
+        "tools.limited_live_test.os.getpgid",
+        lambda pid: pid,
+    )
+
+    def _killpg(pgid: int, sig: int) -> None:
+        kill_calls.append((pgid, sig))
+        fake_process.returncode = -sig
+
+    monkeypatch.setattr("tools.limited_live_test.os.killpg", _killpg)
+
+    result = backend.run(["uv", "run"], timeout_seconds=30.0)
+
+    assert result.timed_out is True
+    assert result.returncode == 124
+    assert result.stdout == "partial stdout"
+    assert "timed out after 30.0 seconds" in result.stderr
+    assert fake_process.timeouts == [30.0]
+    assert kill_calls == [(4321, signal.SIGTERM)]
+
+
 def test_limited_live_test_happy_path_creates_artifacts(tmp_path: Path) -> None:
     clock = FakeClock()
     process = FakeProcess(clock=clock, drain_exit_delay=1)
@@ -355,7 +414,7 @@ def test_one_shot_idle_json_is_nonfatal_for_harness(tmp_path: Path) -> None:
         status_full=[_status_payload()],
         report_slo=[_report_payload()],
         tick_payloads=[_tick_payload()],
-        failures={("other", None): 2},
+        failures={("one-shot", None): 2},
     )
     harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
 
@@ -378,7 +437,7 @@ def test_one_shot_idle_requires_idle_action_for_nonfatal_harness_classification(
         status_full=[_status_payload()],
         report_slo=[_report_payload()],
         tick_payloads=[_tick_payload()],
-        failures={("other", None): 2},
+        failures={("one-shot", None): 2},
     )
     harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
 
@@ -528,6 +587,9 @@ def test_limited_live_test_treats_forced_shutdown_as_acceptable_when_only_waitin
             "phase": None,
             "external_execution_started": True,
             "active_seconds": None,
+            "shutdown_signal_sent_at": None,
+            "last_external_event_before_shutdown_signal_at": None,
+            "shutdown_class_at_signal": None,
             "shutdown_class": "finishing_inflight_execution",
             "shutdown_reason": "drain_timeout_during_external_execution",
         }
@@ -631,6 +693,77 @@ def test_limited_live_test_applies_timeout_to_preflight_process_checks(
         60.0,
     ) in backend.timeout_requests
     assert (["ps", "-eo", "pid=,command="], 60.0) in backend.timeout_requests
+    assert (
+        [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "startupai_controller.board_consumer",
+            "one-shot",
+            "--dry-run",
+            "--json",
+        ],
+        30.0,
+    ) in backend.timeout_requests
+    assert (
+        [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "startupai_controller.board_control_plane",
+            "tick",
+            "--json",
+            "--dry-run",
+        ],
+        30.0,
+    ) in backend.timeout_requests
+
+
+def test_limited_live_test_omits_baseline_one_shot_snapshot(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    harness.run()
+
+    baseline_dir = harness.run_dir / "artifacts" / "baseline"
+    assert not any(
+        path.name.startswith("one-shot-dry-run") for path in baseline_dir.iterdir()
+    )
+
+
+def test_limited_live_test_records_preflight_one_shot_timeout_and_continues(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload()],
+        status_full=[_status_payload()],
+        report_slo=[_report_payload()],
+        tick_payloads=[_tick_payload()],
+        delays={("one-shot", None): 45.0},
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.conclusion == "test inconclusive due to insufficient board activity"
+    assert "preflight one-shot --dry-run timed out after 30.0 seconds" in summary.issues
 
 
 def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_conclusion(
@@ -831,6 +964,50 @@ def test_limited_live_test_surfaces_review_summary_parse_failures_from_status_fa
     ]
 
 
+def test_limited_live_test_attributes_multiline_workflow_error_from_forward_block_context(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    log_text = "\n".join(
+        [
+            "2026-03-15 02:45:00,000 board-consumer INFO Worker result [slot=1 issue=app#51]: CycleResult(action='claimed', issue_ref='app#51', session_id='sess-51', reason='success', pr_url='https://github.com/StartupAI-site/app.startupai-site/pull/240')",
+            "2026-03-15 02:46:00,000 board-consumer ERROR codex exec failed (exit 124): command timed out",
+            "session id: abc123",
+            "Issue: PDF export (#61)",
+            "Repository: StartupAI-site/app.startupai-site",
+            "Branch: feat/61-pdf-powerpoint-export",
+            "workdir: /home/chris/projects/worktrees/app/feat/61-pdf-powerpoint-export",
+        ]
+    )
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        log_text=log_text,
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert {
+        "kind": "workflow_error",
+        "issue_ref": "app#61",
+        "count": 1,
+        "sample": (
+            "2026-03-15 02:46:00,000 board-consumer ERROR codex exec failed "
+            "(exit 124): command timed out"
+        ),
+    } in summary.workflow_issues
+    assert not any(
+        issue["kind"] == "workflow_error" and issue["issue_ref"] == "app#51"
+        for issue in summary.workflow_issues
+    )
+
+
 def test_limited_live_test_ignores_removed_then_immediate_completion_then_seed(
     tmp_path: Path,
 ) -> None:
@@ -950,6 +1127,59 @@ def test_limited_live_test_requests_drain_before_near_deadline_local_snapshot(
         harness._consumer_status_command(local_only=True),
         6.0,
     ) in backend.timeout_requests
+
+
+def test_limited_live_test_persists_drain_request_before_shutdown_wait(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=None)
+    config = _config(tmp_path)
+    config.duration_seconds = 10
+    config.local_snapshot_seconds = 4
+    config.full_snapshot_seconds = 900
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[
+            _status_payload(),
+            _status_payload(),
+            _status_payload(),
+            _status_payload(),
+        ],
+        status_full=[_status_payload()],
+        report_slo=[_report_payload()],
+        tick_payloads=[_tick_payload()],
+    )
+    observed: dict[str, object] = {}
+
+    class StopAfterDrainRequest(RuntimeError):
+        pass
+
+    class InspectHarness(LimitedLiveTestHarness):
+        def _drain_and_stop(self, child, *, drain_requested_at_monotonic=None) -> None:
+            del child
+            run_meta = json.loads((self.run_dir / "run_meta.json").read_text())
+            observed["drain_requested_at_monotonic"] = drain_requested_at_monotonic
+            observed["scheduled_drain_at"] = run_meta["scheduled_drain_at"]
+            observed["actual_drain_requested_at"] = run_meta[
+                "actual_drain_requested_at"
+            ]
+            observed["drain_request_slip_seconds"] = run_meta[
+                "drain_request_slip_seconds"
+            ]
+            raise StopAfterDrainRequest
+
+    harness = InspectHarness(config, backend, clock)
+
+    with pytest.raises(StopAfterDrainRequest):
+        harness.run()
+
+    assert observed["drain_requested_at_monotonic"] is not None
+    assert observed["scheduled_drain_at"] is not None
+    assert observed["actual_drain_requested_at"] is not None
+    assert observed["drain_request_slip_seconds"] == 0.0
+    assert any("drain" in command for command in backend.commands)
 
 
 def test_limited_live_test_preempts_near_deadline_full_bundle_command_by_remaining_time(

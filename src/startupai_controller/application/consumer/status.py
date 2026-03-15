@@ -571,6 +571,11 @@ def _worker_status_payload(
         ),
         "last_external_event_at": _last_external_event_at(worker),
         "last_execution_progress_at": worker.last_execution_progress_at,
+        "shutdown_signal_sent_at": worker.shutdown_signal_sent_at,
+        "last_external_event_before_shutdown_signal_at": (
+            worker.last_external_event_before_shutdown_signal_at
+        ),
+        "shutdown_class_at_signal": worker.shutdown_class_at_signal,
         "shutdown_class": _shutdown_class(
             worker,
             now=now,
@@ -738,6 +743,11 @@ def _recent_session_status_payload(
         ),
         "last_external_event_at": _last_external_event_at(session),
         "last_execution_progress_at": session.last_execution_progress_at,
+        "shutdown_signal_sent_at": session.shutdown_signal_sent_at,
+        "last_external_event_before_shutdown_signal_at": (
+            session.last_external_event_before_shutdown_signal_at
+        ),
+        "shutdown_class_at_signal": session.shutdown_class_at_signal,
         "shutdown_class": _shutdown_class(
             session,
             now=now,
@@ -780,6 +790,11 @@ def _drain_blockers_payload(
                 "drain_observed_at": worker.get("drain_observed_at"),
                 "last_external_event_at": worker.get("last_external_event_at"),
                 "last_execution_progress_at": worker.get("last_execution_progress_at"),
+                "shutdown_signal_sent_at": worker.get("shutdown_signal_sent_at"),
+                "last_external_event_before_shutdown_signal_at": worker.get(
+                    "last_external_event_before_shutdown_signal_at"
+                ),
+                "shutdown_class_at_signal": worker.get("shutdown_class_at_signal"),
                 "shutdown_class": worker.get("shutdown_class"),
             }
         )
