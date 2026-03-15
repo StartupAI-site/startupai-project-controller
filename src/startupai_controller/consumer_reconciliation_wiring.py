@@ -15,6 +15,7 @@ from startupai_controller.application.consumer.reconciliation import (
     ReconciliationWiringDeps,
     SnapshotIssueRefView,
     reconcile_active_repair_review_items as _reconcile_active_repair_review_items_use_case,
+    reconcile_locally_review_owned_ready_items as _reconcile_locally_review_owned_ready_items_use_case,
     reconcile_single_in_progress_item as _reconcile_single_in_progress_item_use_case,
     reconcile_stale_in_progress_items as _reconcile_stale_in_progress_items_use_case,
     wire_reconcile_board_truth as _wire_reconcile_board_truth_use_case,
@@ -64,6 +65,7 @@ def build_reconciliation_wiring_deps() -> ReconciliationWiringDeps:
     """Build the wiring deps for board-truth reconciliation."""
     return ReconciliationWiringDeps(
         board_state_reconcile_active_repair=_board_state_helpers.reconcile_active_repair_review_items,
+        board_state_reconcile_locally_review_owned_ready=_board_state_helpers.reconcile_locally_review_owned_ready_items,
         board_state_reconcile_single=_board_state_helpers.reconcile_single_in_progress_item,
         board_state_reconcile_stale=_board_state_helpers.reconcile_stale_in_progress_items,
         transition_issue_to_in_progress=_board_state_helpers.transition_issue_to_in_progress_from_shell,
@@ -131,6 +133,35 @@ def reconcile_single_in_progress_item(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        dry_run=dry_run,
+    )
+
+
+def reconcile_locally_review_owned_ready_items(
+    consumer_config: ConsumerConfig,
+    critical_path_config: CriticalPathConfig,
+    *,
+    store: SessionStorePort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: CycleBoardSnapshot | None,
+    issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None],
+    board_info_resolver: BoardInfoResolverFn | None,
+    board_mutator: BoardStatusMutatorFn | None,
+    gh_runner: GitHubRunnerFn | None,
+    dry_run: bool,
+) -> list[str]:
+    """Return stale Ready items that should move back to Review."""
+    del board_info_resolver, board_mutator, gh_runner
+    return _reconcile_locally_review_owned_ready_items_use_case(
+        consumer_config,
+        critical_path_config,
+        deps=build_reconciliation_wiring_deps(),
+        store=store,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        board_snapshot=board_snapshot,
+        issue_ref_for_snapshot=issue_ref_for_snapshot,
         dry_run=dry_run,
     )
 

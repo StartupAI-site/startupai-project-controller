@@ -3973,6 +3973,59 @@ class TestConsumerShellSeams:
 
         assert result.moved_in_progress == ()
 
+    def test_reconcile_board_truth_moves_locally_review_owned_ready_item_back_to_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _make_consumer_config(tmp_path)
+        db = _make_db(tmp_path)
+        cp_config = load_config(config.critical_paths_path)
+        auto_config = load_automation_config(config.automation_config_path)
+        pr_url = "https://github.com/StartupAI-site/startupai-crew/pull/216"
+        session_id = db.create_session("crew#10", "codex")
+        db.update_session(
+            session_id,
+            status="success",
+            phase="review",
+            pr_url=pr_url,
+            repo_prefix="crew",
+        )
+        db.enqueue_review_item(
+            "crew#10",
+            pr_url=pr_url,
+            pr_repo="StartupAI-site/startupai-crew",
+            pr_number=216,
+            source_session_id=session_id,
+            now=datetime.now(timezone.utc),
+        )
+        ready_item = _ProjectItemSnapshot(
+            "StartupAI-site/startupai-crew#10",
+            "Ready",
+            "codex",
+            "none",
+            "P0",
+        )
+        board_snapshot = CycleBoardSnapshot(
+            items=(ready_item,),
+            by_status={"Ready": (ready_item,)},
+        )
+        transitioned: list[str] = []
+
+        monkeypatch.setattr(
+            "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
+            lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
+        )
+
+        result = _reconcile_board_truth(
+            config,
+            cp_config,
+            auto_config,
+            db,
+            board_snapshot=board_snapshot,
+        )
+
+        assert result.moved_review == ("crew#10",)
+        assert transitioned == ["crew#10"]
+
     def test_block_prelaunch_issue_queues_fallback_when_block_transition_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

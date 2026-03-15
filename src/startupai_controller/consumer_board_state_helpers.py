@@ -11,6 +11,9 @@ from startupai_controller import (
     consumer_execution_support_helpers as _execution_support_helpers,
 )
 import startupai_controller.consumer_resolution_helpers as _resolution_helpers
+from startupai_controller.consumer_review_queue_state import (
+    local_review_owned_issue_refs,
+)
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.domain.repair_policy import marker_for as _marker_for
 from startupai_controller.ports.board_mutations import BoardMutationPort
@@ -203,6 +206,72 @@ def reconcile_active_repair_review_items(
             )
         moved_in_progress.append(issue_ref)
     return moved_in_progress
+
+
+def reconcile_locally_review_owned_ready_items(
+    consumer_config: Any,
+    critical_path_config: Any,
+    *,
+    store: SessionStorePort,
+    review_state_port: ReviewStatePort,
+    board_port: BoardMutationPort,
+    board_snapshot: Any | None,
+    issue_ref_for_snapshot: Callable[..., str | None],
+    dry_run: bool,
+    transition_issue_to_review: Callable[..., None],
+) -> list[str]:
+    """Return stale Ready items that should be healed back to Review."""
+    ready_items = (
+        board_snapshot.items_with_status("Ready")
+        if board_snapshot is not None
+        else review_state_port.list_issues_by_status("Ready")
+    )
+    existing_entries = store.list_review_queue_items()
+    if not ready_items or not existing_entries:
+        return []
+
+    snapshot_items = (
+        board_snapshot.items if board_snapshot is not None else tuple(ready_items)
+    )
+    board_status_by_issue = {
+        issue_ref: snapshot.status
+        for snapshot in snapshot_items
+        for issue_ref in (issue_ref_for_snapshot(snapshot),)
+        if issue_ref is not None
+    }
+    locally_review_owned = set(
+        local_review_owned_issue_refs(
+            store,
+            existing_entries,
+            board_status_by_issue=board_status_by_issue,
+        )
+    )
+    if not locally_review_owned:
+        return []
+
+    moved_review: list[str] = []
+    for snapshot in ready_items:
+        issue_ref = issue_ref_for_snapshot(snapshot)
+        if issue_ref is None:
+            continue
+        parsed = parse_issue_ref(issue_ref)
+        if parsed.prefix not in consumer_config.repo_prefixes:
+            continue
+        if snapshot.executor.strip().lower() != consumer_config.executor:
+            continue
+        if issue_ref not in locally_review_owned:
+            continue
+        if not dry_run:
+            transition_issue_to_review(
+                issue_ref,
+                critical_path_config,
+                consumer_config.project_owner,
+                consumer_config.project_number,
+                review_state_port=review_state_port,
+                board_port=board_port,
+            )
+        moved_review.append(issue_ref)
+    return moved_review
 
 
 def reconcile_single_in_progress_item(
