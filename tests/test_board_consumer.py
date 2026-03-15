@@ -1227,6 +1227,70 @@ class TestRunCodexSession:
         assert interrupts == ["called"]
         assert captured_process["signal"] == signal.SIGINT
 
+    def test_checks_stuck_drain_interrupts_on_one_second_cadence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        interrupts: list[str] = []
+        captured_process: dict[str, object] = {}
+        slept_seconds = 0.0
+
+        class FakeProcess:
+            def __init__(self, args, **kwargs):
+                del args, kwargs
+                captured_process["process"] = self
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def send_signal(self, sig):
+                captured_process["signal"] = sig
+                self.returncode = 130
+
+            def terminate(self):
+                self.returncode = 143
+
+            def kill(self):
+                self.returncode = 124
+
+            def wait(self):
+                return self.returncode
+
+        def fake_sleep(seconds: float) -> None:
+            nonlocal slept_seconds
+            slept_seconds += seconds
+
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.resolve_cli_command",
+            lambda _command: "/usr/bin/codex",
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.subprocess.Popen",
+            FakeProcess,
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.time.sleep",
+            fake_sleep,
+        )
+
+        result = _run_codex_session(
+            "/tmp/wt",
+            "prompt",
+            Path("schema.json"),
+            Path("out.json"),
+            1800,
+            should_interrupt_fn=lambda: slept_seconds >= 3.0,
+            interrupting_fn=lambda: interrupts.append("called"),
+        )
+
+        assert result == CodexExecutionResult(
+            exit_code=130,
+            stop_reason="drain_stuck_external_execution",
+        )
+        assert interrupts == ["called"]
+        assert captured_process["signal"] == signal.SIGINT
+        assert slept_seconds < 5.0
+
 
 class TestResolveCliCommand:
     def test_uses_path_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:

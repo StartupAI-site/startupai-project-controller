@@ -347,6 +347,7 @@ class LimitedLiveTestHarness:
         self._graceful_drain_latency_seconds: float | None = None
         self._shutdown_total_seconds: float | None = None
         self._scheduled_drain_monotonic: float | None = None
+        self._drain_requested_monotonic: float | None = None
         self._run_meta: dict[str, Any] = {}
         self._scheduled_drain_at: str | None = None
         self._actual_drain_requested_at: str | None = None
@@ -360,8 +361,11 @@ class LimitedLiveTestHarness:
         self._capture_baseline_snapshots()
         child = self._start_consumer()
         try:
-            self._monitor_run(child)
-            self._drain_and_stop(child)
+            drain_requested_at_monotonic = self._monitor_run(child)
+            self._drain_and_stop(
+                child,
+                drain_requested_at_monotonic=drain_requested_at_monotonic,
+            )
         finally:
             child.close()
         self._update_run_meta()
@@ -482,7 +486,7 @@ class LimitedLiveTestHarness:
             self.logs_dir / "consumer-run.log",
         )
 
-    def _monitor_run(self, child: ManagedProcess) -> None:
+    def _monitor_run(self, child: ManagedProcess) -> float | None:
         start = self.clock.monotonic()
         end = start + self.config.duration_seconds
         scheduled_drain_at = (
@@ -493,6 +497,7 @@ class LimitedLiveTestHarness:
             scheduled_drain_at,
             tz=UTC,
         ).isoformat()
+        self._update_run_meta()
         next_local = start + self.config.local_snapshot_seconds
         next_full = start + self.config.full_snapshot_seconds
 
@@ -506,9 +511,9 @@ class LimitedLiveTestHarness:
                         f"Consumer exited unexpectedly with code {returncode}."
                     )
                     self._capture_event_bundle("unexpected-exit")
-                return
+                return None
             if now >= end:
-                return
+                return self._request_drain()
             if now >= next_local:
                 if end - now <= LOCAL_SNAPSHOT_GUARD_SECONDS:
                     next_local = end + self.config.local_snapshot_seconds
@@ -537,24 +542,48 @@ class LimitedLiveTestHarness:
             if sleep_for > 0:
                 self.clock.sleep(sleep_for)
 
-    def _drain_and_stop(self, child: ManagedProcess) -> None:
-        if child.poll() is not None:
-            self._shutdown_mode = "unexpected-exit"
-            return
+    def _request_drain(self) -> float:
+        if self._drain_requested_monotonic is not None:
+            return self._drain_requested_monotonic
         drain_requested_at = self.clock.monotonic()
+        self._drain_requested_monotonic = drain_requested_at
         self._actual_drain_requested_at = self.clock.now_utc().isoformat()
         if self._scheduled_drain_monotonic is not None:
             self._drain_request_slip_seconds = max(
                 0.0,
                 drain_requested_at - self._scheduled_drain_monotonic,
             )
+        self._update_run_meta()
         drain_result = self._run_aux_command(self._consumer_drain_command())
         if not drain_result.ok:
             self.snapshot_failures.append("drain command failed")
             self.issues.append("Drain request failed; forcing shutdown escalation.")
+        return drain_requested_at
+
+    def _drain_and_stop(
+        self,
+        child: ManagedProcess,
+        *,
+        drain_requested_at_monotonic: float | None = None,
+    ) -> None:
+        if drain_requested_at_monotonic is None:
+            drain_requested_at_monotonic = self._drain_requested_monotonic
+        if child.poll() is not None:
+            if drain_requested_at_monotonic is not None:
+                elapsed = self.clock.monotonic() - drain_requested_at_monotonic
+                self._graceful_drain_latency_seconds = elapsed
+                self._shutdown_total_seconds = elapsed
+                self._drain_latency_seconds = elapsed
+                self._shutdown_mode = "natural"
+                self.worked.append("consumer drained and exited naturally")
+                return
+            self._shutdown_mode = "unexpected-exit"
+            return
+        if drain_requested_at_monotonic is None:
+            drain_requested_at_monotonic = self._request_drain()
         latest_payload: dict[str, Any] = {}
         while (
-            self.clock.monotonic() - drain_requested_at
+            self.clock.monotonic() - drain_requested_at_monotonic
             < self.config.drain_timeout_seconds
         ):
             snapshot = self._capture_snapshot(
@@ -566,7 +595,7 @@ class LimitedLiveTestHarness:
             payload = snapshot.payload or {}
             latest_payload = payload
             if child.poll() is not None:
-                elapsed = self.clock.monotonic() - drain_requested_at
+                elapsed = self.clock.monotonic() - drain_requested_at_monotonic
                 self._graceful_drain_latency_seconds = elapsed
                 self._shutdown_total_seconds = elapsed
                 self._drain_latency_seconds = elapsed
@@ -579,7 +608,7 @@ class LimitedLiveTestHarness:
                 )
                 while self.clock.monotonic() < wait_deadline:
                     if child.poll() is not None:
-                        elapsed = self.clock.monotonic() - drain_requested_at
+                        elapsed = self.clock.monotonic() - drain_requested_at_monotonic
                         self._graceful_drain_latency_seconds = elapsed
                         self._shutdown_total_seconds = elapsed
                         self._drain_latency_seconds = elapsed
@@ -589,7 +618,7 @@ class LimitedLiveTestHarness:
                     self.clock.sleep(1.0)
             self.clock.sleep(float(self.config.shutdown_poll_seconds))
         self._graceful_drain_latency_seconds = (
-            self.clock.monotonic() - drain_requested_at
+            self.clock.monotonic() - drain_requested_at_monotonic
         )
         self._forced_shutdown_blockers = self._extract_forced_shutdown_blockers(
             latest_payload
@@ -601,7 +630,7 @@ class LimitedLiveTestHarness:
         sigint_deadline = self.clock.monotonic() + 60
         while self.clock.monotonic() < sigint_deadline:
             if child.poll() is not None:
-                elapsed = self.clock.monotonic() - drain_requested_at
+                elapsed = self.clock.monotonic() - drain_requested_at_monotonic
                 self._shutdown_total_seconds = elapsed
                 self._drain_latency_seconds = elapsed
                 self._recover_after_forced_shutdown()
@@ -609,7 +638,7 @@ class LimitedLiveTestHarness:
             self.clock.sleep(1.0)
         child.send_signal(signal.SIGTERM)
         child.wait(timeout=60)
-        elapsed = self.clock.monotonic() - drain_requested_at
+        elapsed = self.clock.monotonic() - drain_requested_at_monotonic
         self._shutdown_total_seconds = elapsed
         self._drain_latency_seconds = elapsed
         self._recover_after_forced_shutdown()

@@ -286,7 +286,9 @@ def run_codex_session(
                         stderr=stderr_log.read(),
                     )
                     break
-                sleep_fn(15)
+                poll_sleep_seconds = 1.0 if should_interrupt_fn is not None else 15.0
+                remaining_sleep = max(0.0, deadline - time.monotonic())
+                sleep_fn(min(poll_sleep_seconds, remaining_sleep))
     if result.returncode != 0 and stop_reason is None:
         detail = (result.stderr or result.stdout or "").strip()
         if detail:

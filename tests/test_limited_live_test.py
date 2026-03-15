@@ -999,6 +999,59 @@ def test_limited_live_test_requests_drain_before_near_deadline_local_snapshot(
     ) in backend.timeout_requests
 
 
+def test_limited_live_test_persists_drain_request_before_shutdown_wait(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=None)
+    config = _config(tmp_path)
+    config.duration_seconds = 10
+    config.local_snapshot_seconds = 4
+    config.full_snapshot_seconds = 900
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[
+            _status_payload(),
+            _status_payload(),
+            _status_payload(),
+            _status_payload(),
+        ],
+        status_full=[_status_payload()],
+        report_slo=[_report_payload()],
+        tick_payloads=[_tick_payload()],
+    )
+    observed: dict[str, object] = {}
+
+    class StopAfterDrainRequest(RuntimeError):
+        pass
+
+    class InspectHarness(LimitedLiveTestHarness):
+        def _drain_and_stop(self, child, *, drain_requested_at_monotonic=None) -> None:
+            del child
+            run_meta = json.loads((self.run_dir / "run_meta.json").read_text())
+            observed["drain_requested_at_monotonic"] = drain_requested_at_monotonic
+            observed["scheduled_drain_at"] = run_meta["scheduled_drain_at"]
+            observed["actual_drain_requested_at"] = run_meta[
+                "actual_drain_requested_at"
+            ]
+            observed["drain_request_slip_seconds"] = run_meta[
+                "drain_request_slip_seconds"
+            ]
+            raise StopAfterDrainRequest
+
+    harness = InspectHarness(config, backend, clock)
+
+    with pytest.raises(StopAfterDrainRequest):
+        harness.run()
+
+    assert observed["drain_requested_at_monotonic"] is not None
+    assert observed["scheduled_drain_at"] is not None
+    assert observed["actual_drain_requested_at"] is not None
+    assert observed["drain_request_slip_seconds"] == 0.0
+    assert any("drain" in command for command in backend.commands)
+
+
 def test_limited_live_test_preempts_near_deadline_full_bundle_command_by_remaining_time(
     tmp_path: Path,
 ) -> None:
