@@ -49,8 +49,12 @@ class RetryCountStatePort(ConsumerRuntimeStatePort, Protocol):
 def session_status_from_codex_result(
     exit_code: int,
     codex_result: CodexResultPayload | None,
+    *,
+    stop_reason: str | None = None,
 ) -> tuple[str, str | None]:
     """Map Codex exit/result into session status and failure reason."""
+    if stop_reason == "drain_stuck_external_execution":
+        return "aborted", stop_reason
     if exit_code == 0 and codex_result and codex_result["outcome"] == "success":
         return "success", None
     if exit_code == 124:

@@ -54,12 +54,12 @@ REVIEW_QUEUE_ELEVATED_DUE_COUNT = 20
 REVIEW_QUEUE_SEVERE_DUE_COUNT = 35
 SESSION_ID_PATTERN = re.compile(r"session id:\s*(?P<session_id>[0-9a-f-]+)")
 ISSUE_BLOCK_PATTERN = re.compile(r"Issue: .* \(#(?P<number>\d+)\)")
-REPOSITORY_LINE_PATTERN = re.compile(r"Repository:\s+(?P<repo>[^\\s]+)")
+REPOSITORY_LINE_PATTERN = re.compile(r"Repository:\s+(?P<repo>\S+)")
 WORKDIR_BRANCH_PATTERN = re.compile(
-    r"workdir:\s+/home/chris/projects/worktrees/(?P<repo_prefix>app|crew|site)/(?P<branch>feat/[^\\s]+)"
+    r"workdir:\s+/home/chris/projects/worktrees/(?P<repo_prefix>app|crew|site)/(?P<branch>feat/\S+)"
 )
-BRANCH_LINE_PATTERN = re.compile(r"Branch:\s+(?P<branch>feat/[^\\s]+)")
-PR_URL_PATTERN = re.compile(r"https://github.com/[^\\s)']+/pull/\\d+")
+BRANCH_LINE_PATTERN = re.compile(r"Branch:\s+(?P<branch>feat/\S+)")
+PR_URL_PATTERN = re.compile(r"https://github.com/\S+/pull/\d+")
 
 
 class HarnessError(RuntimeError):
@@ -644,6 +644,11 @@ class LimitedLiveTestHarness:
                         "external_execution_started"
                     ),
                     "active_seconds": worker.get("active_seconds"),
+                    "shutdown_signal_sent_at": worker.get("shutdown_signal_sent_at"),
+                    "last_external_event_before_shutdown_signal_at": worker.get(
+                        "last_external_event_before_shutdown_signal_at"
+                    ),
+                    "shutdown_class_at_signal": worker.get("shutdown_class_at_signal"),
                     "shutdown_class": worker.get("shutdown_class")
                     or worker.get("drain_wait_class"),
                 }
@@ -669,6 +674,11 @@ class LimitedLiveTestHarness:
                     "phase": blocker.get("phase"),
                     "external_execution_started": external_execution_started,
                     "active_seconds": blocker.get("active_seconds"),
+                    "shutdown_signal_sent_at": blocker.get("shutdown_signal_sent_at"),
+                    "last_external_event_before_shutdown_signal_at": blocker.get(
+                        "last_external_event_before_shutdown_signal_at"
+                    ),
+                    "shutdown_class_at_signal": blocker.get("shutdown_class_at_signal"),
                     "shutdown_class": blocker.get("shutdown_class"),
                     "shutdown_reason": shutdown_reason,
                     "failure_reason_override": (
@@ -921,6 +931,9 @@ class LimitedLiveTestHarness:
                     "phase",
                     "external_execution_started",
                     "active_seconds",
+                    "shutdown_signal_sent_at",
+                    "last_external_event_before_shutdown_signal_at",
+                    "shutdown_class_at_signal",
                     "shutdown_class",
                     "shutdown_reason",
                 }
@@ -1097,7 +1110,10 @@ class LimitedLiveTestHarness:
             return False
         return all(
             blocker.get("external_execution_started") is True
-            and blocker.get("shutdown_class") == "finishing_inflight_execution"
+            and (
+                blocker.get("shutdown_class_at_signal") or blocker.get("shutdown_class")
+            )
+            == "finishing_inflight_execution"
             for blocker in self._forced_shutdown_blockers
         )
 
@@ -1285,6 +1301,7 @@ class LimitedLiveTestHarness:
                     _infer_workflow_issue_context(
                         lines,
                         index,
+                        kind=kind,
                     )
                 )
                 _record_workflow_issue(
@@ -1675,6 +1692,70 @@ def _parse_log_timestamp(line: str) -> datetime | None:
     )
 
 
+def _log_block_lines(
+    lines: list[str],
+    start_index: int,
+    *,
+    max_lines: int = 12,
+    allow_timestamp_start: bool = True,
+) -> list[str]:
+    block: list[str] = []
+    end_index = min(len(lines), start_index + max_lines)
+    for candidate in range(start_index, end_index):
+        line = lines[candidate]
+        if (
+            candidate == start_index
+            and not allow_timestamp_start
+            and LOG_TIMESTAMP_PATTERN.search(line)
+        ):
+            break
+        if candidate > start_index and LOG_TIMESTAMP_PATTERN.search(line):
+            break
+        block.append(line)
+    return block
+
+
+def _extract_block_context(
+    block_lines: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    issue_ref: str | None = None
+    repo_prefix: str | None = None
+    branch_name: str | None = None
+    issue_number: str | None = None
+    repo_name: str | None = None
+    for block_line in block_lines:
+        direct_issue_match = ISSUE_REF_PATTERN.search(block_line)
+        if direct_issue_match is not None:
+            issue_ref = direct_issue_match.group(0)
+            repo_prefix = issue_ref.split("#", 1)[0]
+        issue_match = ISSUE_BLOCK_PATTERN.search(block_line)
+        if issue_match is not None:
+            issue_number = issue_match.group("number")
+        repo_match = REPOSITORY_LINE_PATTERN.search(block_line)
+        if repo_match is not None:
+            repo_name = repo_match.group("repo")
+            repo_prefix = repo_prefix or _repo_prefix_for_repo_name(repo_name)
+        branch_match = BRANCH_LINE_PATTERN.search(block_line)
+        if branch_match is not None:
+            branch_name = branch_match.group("branch")
+        workdir_match = WORKDIR_BRANCH_PATTERN.search(block_line)
+        if workdir_match is not None:
+            branch_name = branch_name or workdir_match.group("branch")
+            repo_prefix = repo_prefix or workdir_match.group("repo_prefix")
+            repo_name = repo_name or {
+                "app": "StartupAI-site/app.startupai-site",
+                "crew": "StartupAI-site/startupai-crew",
+                "site": "StartupAI-site/startupai.site",
+            }.get(workdir_match.group("repo_prefix"))
+    if issue_ref is None:
+        issue_ref = _issue_ref_from_block(issue_number, repo_name)
+    if issue_ref is None and issue_number is not None and repo_prefix is not None:
+        issue_ref = f"{repo_prefix}#{issue_number}"
+    if repo_prefix is None and issue_ref is not None:
+        repo_prefix = issue_ref.split("#", 1)[0]
+    return issue_ref, repo_prefix, branch_name
+
+
 def _record_workflow_issue(
     grouped: dict[tuple[str, str, str | None], WorkflowIssue],
     *,
@@ -1728,36 +1809,35 @@ def _session_context_near_line(
     for candidate in range(window_start, window_end):
         if SESSION_ID_PATTERN.search(lines[candidate]) is None:
             continue
-        issue_number = None
-        repo = None
-        branch_name = None
-        for block_line in lines[candidate : min(len(lines), candidate + 12)]:
-            issue_match = ISSUE_BLOCK_PATTERN.search(block_line)
-            if issue_match is not None:
-                issue_number = issue_match.group("number")
-            repo_match = REPOSITORY_LINE_PATTERN.search(block_line)
-            if repo_match is not None:
-                repo = repo_match.group("repo")
-            branch_match = BRANCH_LINE_PATTERN.search(block_line)
-            if branch_match is not None:
-                branch_name = branch_match.group("branch")
-            workdir_match = WORKDIR_BRANCH_PATTERN.search(block_line)
-            if workdir_match is not None and branch_name is None:
-                branch_name = workdir_match.group("branch")
-                repo = repo or {
-                    "app": "StartupAI-site/app.startupai-site",
-                    "crew": "StartupAI-site/startupai-crew",
-                    "site": "StartupAI-site/startupai.site",
-                }.get(workdir_match.group("repo_prefix"))
-        issue_ref = _issue_ref_from_block(issue_number, repo)
+        issue_ref, repo_prefix, branch_name = _extract_block_context(
+            _log_block_lines(lines, candidate)
+        )
         if issue_ref is None:
             continue
         distance = abs(candidate - index)
         if best is None or distance < best[0]:
-            best = (distance, issue_ref, _repo_prefix_for_repo_name(repo), branch_name)
+            best = (distance, issue_ref, repo_prefix, branch_name)
     if best is None:
         return None, None, None
     return best[1], best[2], best[3]
+
+
+def _same_line_session_context(
+    lines: list[str],
+    index: int,
+) -> tuple[str | None, str | None, str | None]:
+    if SESSION_ID_PATTERN.search(lines[index]) is None:
+        return None, None, None
+    return _extract_block_context(_log_block_lines(lines, index))
+
+
+def _forward_error_block_context(
+    lines: list[str],
+    index: int,
+) -> tuple[str | None, str | None, str | None]:
+    return _extract_block_context(
+        _log_block_lines(lines, index + 1, allow_timestamp_start=False)
+    )
 
 
 def _pr_url_context_near_line(
@@ -1801,7 +1881,37 @@ def _branch_context_near_line(
 def _infer_workflow_issue_context(
     lines: list[str],
     index: int,
+    *,
+    kind: str | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
+    if kind == "workflow_error":
+        issue_ref, repo_prefix, branch_name = _same_line_session_context(lines, index)
+        if issue_ref is not None:
+            return issue_ref, None, branch_name, repo_prefix
+
+        same_line_match = ISSUE_REF_PATTERN.search(lines[index])
+        if same_line_match is not None:
+            issue_ref = same_line_match.group(0)
+            return issue_ref, None, None, issue_ref.split("#", 1)[0]
+
+        issue_ref, repo_prefix, branch_name = _forward_error_block_context(lines, index)
+        if issue_ref is not None:
+            return issue_ref, None, branch_name, repo_prefix
+
+        branch_issue_ref, branch_repo_prefix = _branch_context_near_line(
+            lines,
+            index,
+            branch_name,
+        )
+        if branch_issue_ref is not None:
+            return branch_issue_ref, None, branch_name, branch_repo_prefix
+
+        pr_issue_ref, pr_url = _pr_url_context_near_line(lines, index)
+        if pr_issue_ref is not None and pr_url is not None:
+            return pr_issue_ref, pr_url, branch_name, pr_issue_ref.split("#", 1)[0]
+
+        return "unknown", None, branch_name, repo_prefix
+
     issue_ref, repo_prefix, branch_name = _session_context_near_line(lines, index)
     if issue_ref is not None:
         return issue_ref, None, branch_name, repo_prefix

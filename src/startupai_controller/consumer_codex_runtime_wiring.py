@@ -10,8 +10,11 @@ from typing import Callable
 
 from startupai_controller import consumer_codex_helpers as _codex_helpers
 from startupai_controller.consumer_config import ConsumerConfig
-from startupai_controller.consumer_types import CodexSessionResult
-from startupai_controller.consumer_types import IssueContextPayload
+from startupai_controller.consumer_types import (
+    CodexExecutionResult,
+    CodexSessionResult,
+    IssueContextPayload,
+)
 from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -79,10 +82,12 @@ def run_codex_session(
     *,
     heartbeat_fn: Callable[[], None] | None = None,
     progress_fn: Callable[[], None] | None = None,
+    should_interrupt_fn: Callable[[], bool] | None = None,
+    interrupting_fn: Callable[[], None] | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     resolve_cli_command_fn: Callable[[str], str],
     logger: _codex_helpers.CodexLogger,
-) -> int:
+) -> int | CodexExecutionResult:
     """Run codex exec with a timeout wrapper."""
     return _codex_helpers.run_codex_session(
         worktree_path,
@@ -92,6 +97,8 @@ def run_codex_session(
         timeout_seconds,
         heartbeat_fn=heartbeat_fn,
         progress_fn=progress_fn,
+        should_interrupt_fn=should_interrupt_fn,
+        interrupting_fn=interrupting_fn,
         subprocess_runner=subprocess_runner,
         resolve_cli_command_fn=resolve_cli_command_fn,
         popen_factory=subprocess.Popen,

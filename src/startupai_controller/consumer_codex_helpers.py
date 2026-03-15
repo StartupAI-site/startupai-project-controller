@@ -6,13 +6,18 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
 from typing import Callable, Protocol, cast
 
 from startupai_controller.consumer_config import ConsumerConfig
-from startupai_controller.consumer_types import CodexSessionResult, IssueContextPayload
+from startupai_controller.consumer_types import (
+    CodexExecutionResult,
+    CodexSessionResult,
+    IssueContextPayload,
+)
 from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.validate_critical_path_promotion import (
     CriticalPathConfig,
@@ -152,14 +157,17 @@ def run_codex_session(
     *,
     heartbeat_fn: Callable[[], None] | None = None,
     progress_fn: Callable[[], None] | None = None,
+    should_interrupt_fn: Callable[[], bool] | None = None,
+    interrupting_fn: Callable[[], None] | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     resolve_cli_command_fn: Callable[[str], str],
     popen_factory: Callable[..., subprocess.Popen[str]],
     sleep_fn: Callable[[float], None] = time.sleep,
     logger: CodexLogger,
-) -> int:
+) -> int | CodexExecutionResult:
     """Run codex exec with a timeout wrapper and return the exit code."""
     codex_cmd = resolve_cli_command_fn("codex")
+    stop_reason: str | None = None
     args = [
         "timeout",
         str(timeout_seconds),
@@ -228,6 +236,40 @@ def run_codex_session(
                         stderr=stderr_log.read(),
                     )
                     break
+                if should_interrupt_fn is not None and should_interrupt_fn():
+                    if interrupting_fn is not None:
+                        interrupting_fn()
+                    send_signal = getattr(process, "send_signal", None)
+                    if callable(send_signal):
+                        send_signal(signal.SIGINT)
+                    else:
+                        process.terminate()
+                    interrupt_deadline = time.monotonic() + 5.0
+                    while time.monotonic() < interrupt_deadline:
+                        rc = process.poll()
+                        if rc is not None:
+                            break
+                        sleep_fn(0.5)
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    final_returncode = process.poll()
+                    if progress_fn is not None:
+                        progress_fn()
+                    stdout_log.flush()
+                    stderr_log.flush()
+                    stdout_log.seek(0)
+                    stderr_log.seek(0)
+                    result = subprocess.CompletedProcess(
+                        args=proc_args,
+                        returncode=(
+                            final_returncode if final_returncode is not None else 124
+                        ),
+                        stdout=stdout_log.read(),
+                        stderr=stderr_log.read(),
+                    )
+                    stop_reason = "drain_stuck_external_execution"
+                    break
                 if time.monotonic() >= deadline:
                     process.kill()
                     process.wait()
@@ -245,7 +287,7 @@ def run_codex_session(
                     )
                     break
                 sleep_fn(15)
-    if result.returncode != 0:
+    if result.returncode != 0 and stop_reason is None:
         detail = (result.stderr or result.stdout or "").strip()
         if detail:
             logger.error("codex exec failed (exit %s): %s", result.returncode, detail)
@@ -255,6 +297,11 @@ def run_codex_session(
             )
     elif not output_path.exists():
         logger.error("codex exec exited 0 but produced no output file: %s", output_path)
+    if stop_reason is not None:
+        return CodexExecutionResult(
+            exit_code=result.returncode,
+            stop_reason=stop_reason,
+        )
     return result.returncode
 
 

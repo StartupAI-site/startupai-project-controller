@@ -26,6 +26,7 @@ import startupai_controller.runtime.wiring as runtime_wiring
 from startupai_controller.board_consumer_cli import _cmd_report_slo
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    CodexExecutionResult,
     PrCreationOutcome,
     SessionExecutionOutcome,
     WorktreePrepareError,
@@ -848,6 +849,81 @@ def test_execute_claimed_session_marks_phase_executing_before_codex(
     assert session_store_updates[0]["phase"] == "executing"
     assert session_store_updates[0]["last_execution_progress_at"] is not None
     assert outcome.session_status == "aborted"
+
+
+def test_execute_claimed_session_persists_frozen_shutdown_signal_fields(
+    tmp_path: Path,
+) -> None:
+    config = _make_consumer_config(tmp_path)
+    prepared = _make_prepared_cycle_context(tmp_path, config)
+    launch_context = _make_prepared_launch_context(tmp_path)
+    claimed_context = ClaimedSessionContext("session-123", 3, 1)
+    db = _make_db(tmp_path)
+    session_store_updates: list[dict[str, object]] = []
+
+    class SessionStore:
+        def update_session(self, _session_id: str, fields: dict[str, object]) -> None:
+            session_store_updates.append(fields)
+
+        def get_session(self, _session_id: str) -> SessionInfo | None:
+            return None
+
+    def run_codex_session(*_args, **kwargs) -> CodexExecutionResult:
+        kwargs["interrupting_fn"]()
+        return CodexExecutionResult(
+            exit_code=124,
+            stop_reason="drain_stuck_external_execution",
+        )
+
+    outcome = execution_use_case.execute_claimed_session(
+        config=config,
+        db=db,
+        prepared=prepared,
+        deps=execution_use_case.ExecutionDeps(
+            assemble_codex_prompt=lambda *_args, **_kwargs: "prompt",
+            drain_requested=lambda _path: False,
+            run_codex_session=run_codex_session,
+            parse_codex_result=lambda *_args, **_kwargs: None,
+            session_status_from_codex_result=completion_helpers.session_status_from_codex_result,
+            create_pr_for_execution_result=lambda **_kwargs: PrCreationOutcome(
+                pr_url=None,
+                has_commits=False,
+                session_status="aborted",
+                failure_reason="drain_stuck_external_execution",
+            ),
+            handoff_execution_to_review=lambda **_kwargs: pytest.fail(
+                "review handoff should not run for a drain-stuck abort"
+            ),
+            handle_non_review_execution_outcome=lambda **_kwargs: (
+                "aborted",
+                None,
+                None,
+            ),
+            build_session_execution_outcome=SessionExecutionOutcome,
+        ),
+        launch_context=launch_context,
+        claimed_context=claimed_context,
+        session_store=SessionStore(),
+        gh_runner=None,
+        process_runner=None,
+        file_reader=None,
+        review_state_port=None,
+        board_port=object(),
+        pr_port=object(),
+    )
+
+    frozen_update = next(
+        fields
+        for fields in session_store_updates
+        if "shutdown_signal_sent_at" in fields
+    )
+    assert frozen_update["shutdown_signal_sent_at"] is not None
+    assert frozen_update["last_external_event_before_shutdown_signal_at"] is not None
+    assert frozen_update["shutdown_class_at_signal"] == (
+        "stuck_waiting_on_external_execution"
+    )
+    assert outcome.session_status == "aborted"
+    assert outcome.failure_reason == "drain_stuck_external_execution"
 
 
 def test_worker_status_payload_classifies_drain_wait_for_inflight_execution() -> None:

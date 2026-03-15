@@ -53,6 +53,14 @@ class IssueContextPayload(TypedDict):
 
 
 @dataclass(frozen=True)
+class CodexExecutionResult:
+    """Execution metadata for one Codex child-process run."""
+
+    exit_code: int
+    stop_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class PreparedCycleContext:
     """Preflight context reused across worker launches in one daemon tick."""
 

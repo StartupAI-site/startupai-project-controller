@@ -24,6 +24,7 @@ from startupai_controller.consumer_config import ConsumerConfig
 import startupai_controller.consumer_session_completion_helpers as _session_completion_helpers
 from startupai_controller.consumer_types import (
     ClaimedSessionContext,
+    CodexExecutionResult,
     CodexSessionResult,
     PrCreationOutcome,
     PreparedCycleContext,
@@ -720,7 +721,7 @@ def execute_claimed_session(
     comment_poster: CommentPosterFn | None,
     gh_runner: GitHubRunnerFn | GhRunnerPort | None,
     assemble_codex_prompt: Callable[..., str],
-    run_codex_session: Callable[..., int],
+    run_codex_session: Callable[..., int | CodexExecutionResult],
     parse_codex_result: Callable[..., CodexResultPayload | None],
     session_status_from_codex_result: Callable[..., tuple[str, str | None]],
     create_pr_for_execution_result: Callable[..., PrCreationOutcome],

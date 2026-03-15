@@ -528,6 +528,9 @@ def test_limited_live_test_treats_forced_shutdown_as_acceptable_when_only_waitin
             "phase": None,
             "external_execution_started": True,
             "active_seconds": None,
+            "shutdown_signal_sent_at": None,
+            "last_external_event_before_shutdown_signal_at": None,
+            "shutdown_class_at_signal": None,
             "shutdown_class": "finishing_inflight_execution",
             "shutdown_reason": "drain_timeout_during_external_execution",
         }
@@ -829,6 +832,50 @@ def test_limited_live_test_surfaces_review_summary_parse_failures_from_status_fa
             ),
         }
     ]
+
+
+def test_limited_live_test_attributes_multiline_workflow_error_from_forward_block_context(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    log_text = "\n".join(
+        [
+            "2026-03-15 02:45:00,000 board-consumer INFO Worker result [slot=1 issue=app#51]: CycleResult(action='claimed', issue_ref='app#51', session_id='sess-51', reason='success', pr_url='https://github.com/StartupAI-site/app.startupai-site/pull/240')",
+            "2026-03-15 02:46:00,000 board-consumer ERROR codex exec failed (exit 124): command timed out",
+            "session id: abc123",
+            "Issue: PDF export (#61)",
+            "Repository: StartupAI-site/app.startupai-site",
+            "Branch: feat/61-pdf-powerpoint-export",
+            "workdir: /home/chris/projects/worktrees/app/feat/61-pdf-powerpoint-export",
+        ]
+    )
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+        log_text=log_text,
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert {
+        "kind": "workflow_error",
+        "issue_ref": "app#61",
+        "count": 1,
+        "sample": (
+            "2026-03-15 02:46:00,000 board-consumer ERROR codex exec failed "
+            "(exit 124): command timed out"
+        ),
+    } in summary.workflow_issues
+    assert not any(
+        issue["kind"] == "workflow_error" and issue["issue_ref"] == "app#51"
+        for issue in summary.workflow_issues
+    )
 
 
 def test_limited_live_test_ignores_removed_then_immediate_completion_then_seed(

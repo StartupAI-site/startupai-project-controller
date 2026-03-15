@@ -12,7 +12,11 @@ import startupai_controller.consumer_codex_runtime_wiring as _codex_runtime_wiri
 from startupai_controller.board_graph import _resolve_issue_coordinates
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.consumer_config import ConsumerConfig
-from startupai_controller.consumer_types import CodexSessionResult, IssueContextPayload
+from startupai_controller.consumer_types import (
+    CodexExecutionResult,
+    CodexSessionResult,
+    IssueContextPayload,
+)
 from startupai_controller.consumer_workflow import render_workflow_prompt
 from startupai_controller.consumer_workflow import WorkflowDefinition
 from startupai_controller.domain.models import (
@@ -77,8 +81,10 @@ def run_codex_session(
     *,
     heartbeat_fn: Callable[[], None] | None = None,
     progress_fn: Callable[[], None] | None = None,
+    should_interrupt_fn: Callable[[], bool] | None = None,
+    interrupting_fn: Callable[[], None] | None = None,
     subprocess_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> int:
+) -> int | CodexExecutionResult:
     """Run codex exec with the current shell seams."""
     return _codex_runtime_wiring.run_codex_session(
         worktree_path,
@@ -88,6 +94,8 @@ def run_codex_session(
         timeout_seconds,
         heartbeat_fn=heartbeat_fn,
         progress_fn=progress_fn,
+        should_interrupt_fn=should_interrupt_fn,
+        interrupting_fn=interrupting_fn,
         subprocess_runner=subprocess_runner,
         resolve_cli_command_fn=_codex_runtime_wiring.resolve_cli_command,
         logger=logger,

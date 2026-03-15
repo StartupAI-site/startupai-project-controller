@@ -35,6 +35,9 @@ class SessionUpdateFields(TypedDict, total=False):
     drain_observed_at: str | None
     last_execution_progress_at: str | None
     last_external_event_at: str | None
+    shutdown_signal_sent_at: str | None
+    last_external_event_before_shutdown_signal_at: str | None
+    shutdown_class_at_signal: str | None
     resolution_kind: str | None
     verification_class: str | None
     resolution_evidence_json: str | None

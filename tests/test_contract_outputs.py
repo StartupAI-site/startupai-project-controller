@@ -55,6 +55,10 @@ def _normalize_status_payload(payload: dict[str, object]) -> dict[str, object]:
         rendered["id"] = "<session-id:running>"
         if rendered.get("drain_observed_at") is not None:
             rendered["drain_observed_at"] = "<iso8601>"
+        if rendered.get("shutdown_signal_sent_at") is not None:
+            rendered["shutdown_signal_sent_at"] = "<iso8601>"
+        if rendered.get("last_external_event_before_shutdown_signal_at") is not None:
+            rendered["last_external_event_before_shutdown_signal_at"] = "<iso8601>"
         workers.append(rendered)
     normalized["workers"] = sorted(workers, key=lambda item: item["issue_ref"])
 
@@ -65,6 +69,10 @@ def _normalize_status_payload(payload: dict[str, object]) -> dict[str, object]:
             rendered["session_id"] = "<session-id:running>"
         if rendered.get("drain_observed_at") is not None:
             rendered["drain_observed_at"] = "<iso8601>"
+        if rendered.get("shutdown_signal_sent_at") is not None:
+            rendered["shutdown_signal_sent_at"] = "<iso8601>"
+        if rendered.get("last_external_event_before_shutdown_signal_at") is not None:
+            rendered["last_external_event_before_shutdown_signal_at"] = "<iso8601>"
         drain_blockers.append(rendered)
     normalized["drain_blockers"] = sorted(
         drain_blockers, key=lambda item: item["issue_ref"]
@@ -82,6 +90,10 @@ def _normalize_status_payload(payload: dict[str, object]) -> dict[str, object]:
             rendered["completed_at"] = "<iso8601>"
         if rendered.get("drain_observed_at") is not None:
             rendered["drain_observed_at"] = "<iso8601>"
+        if rendered.get("shutdown_signal_sent_at") is not None:
+            rendered["shutdown_signal_sent_at"] = "<iso8601>"
+        if rendered.get("last_external_event_before_shutdown_signal_at") is not None:
+            rendered["last_external_event_before_shutdown_signal_at"] = "<iso8601>"
         if rendered["next_retry_at"] is not None:
             rendered["next_retry_at"] = "<iso8601>"
         if rendered["retry_remaining_seconds"] is not None:

@@ -145,6 +145,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     drain_observed_at TEXT,
     last_execution_progress_at TEXT,
     last_external_event_at TEXT,
+    shutdown_signal_sent_at TEXT,
+    last_external_event_before_shutdown_signal_at TEXT,
+    shutdown_class_at_signal TEXT,
     resolution_kind TEXT,
     verification_class TEXT,
     resolution_evidence_json TEXT,
@@ -272,6 +275,14 @@ class ConsumerDB:
             conn, "sessions", "last_execution_progress_at", "TEXT"
         )
         ConsumerDB._ensure_column(conn, "sessions", "last_external_event_at", "TEXT")
+        ConsumerDB._ensure_column(conn, "sessions", "shutdown_signal_sent_at", "TEXT")
+        ConsumerDB._ensure_column(
+            conn,
+            "sessions",
+            "last_external_event_before_shutdown_signal_at",
+            "TEXT",
+        )
+        ConsumerDB._ensure_column(conn, "sessions", "shutdown_class_at_signal", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "resolution_kind", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "verification_class", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "resolution_evidence_json", "TEXT")
@@ -544,6 +555,9 @@ class ConsumerDB:
             "drain_observed_at",
             "last_execution_progress_at",
             "last_external_event_at",
+            "shutdown_signal_sent_at",
+            "last_external_event_before_shutdown_signal_at",
+            "shutdown_class_at_signal",
             "resolution_kind",
             "verification_class",
             "resolution_evidence_json",
@@ -1277,6 +1291,11 @@ class ConsumerDB:
             drain_observed_at=row["drain_observed_at"],
             last_execution_progress_at=row["last_execution_progress_at"],
             last_external_event_at=row["last_external_event_at"],
+            shutdown_signal_sent_at=row["shutdown_signal_sent_at"],
+            last_external_event_before_shutdown_signal_at=row[
+                "last_external_event_before_shutdown_signal_at"
+            ],
+            shutdown_class_at_signal=row["shutdown_class_at_signal"],
             resolution_kind=row["resolution_kind"],
             verification_class=row["verification_class"],
             resolution_evidence_json=row["resolution_evidence_json"],

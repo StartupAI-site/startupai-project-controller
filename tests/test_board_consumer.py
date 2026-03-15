@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import threading
 import urllib.request
@@ -95,6 +96,7 @@ from startupai_controller.consumer_support_wiring import (
     hydrate_issue_context as _hydrate_issue_context,
 )
 from startupai_controller.consumer_types import (
+    CodexExecutionResult,
     ClaimedSessionContext,
     PendingClaimContext,
     PrCreationOutcome,
@@ -1171,6 +1173,59 @@ class TestRunCodexSession:
         assert heartbeats
         assert captured["kwargs"]["stdout"] is not subprocess.PIPE
         assert captured["kwargs"]["stderr"] is not subprocess.PIPE
+
+    def test_returns_structured_stop_reason_for_stuck_drain_interrupt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        interrupts: list[str] = []
+        captured_process: dict[str, object] = {}
+
+        class FakeProcess:
+            def __init__(self, args, **kwargs):
+                captured_process["process"] = self
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def send_signal(self, sig):
+                captured_process["signal"] = sig
+                self.returncode = 130
+
+            def terminate(self):
+                self.returncode = 143
+
+            def kill(self):
+                self.returncode = 124
+
+            def wait(self):
+                return self.returncode
+
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.resolve_cli_command",
+            lambda _command: "/usr/bin/codex",
+        )
+        monkeypatch.setattr(
+            "startupai_controller.consumer_codex_runtime_wiring.subprocess.Popen",
+            FakeProcess,
+        )
+
+        result = _run_codex_session(
+            "/tmp/wt",
+            "prompt",
+            Path("schema.json"),
+            Path("out.json"),
+            1800,
+            should_interrupt_fn=lambda: True,
+            interrupting_fn=lambda: interrupts.append("called"),
+        )
+
+        assert result == CodexExecutionResult(
+            exit_code=130,
+            stop_reason="drain_stuck_external_execution",
+        )
+        assert interrupts == ["called"]
+        assert captured_process["signal"] == signal.SIGINT
 
 
 class TestResolveCliCommand:
