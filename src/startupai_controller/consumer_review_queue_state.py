@@ -48,7 +48,19 @@ class ReviewQueueResultView(Protocol):
     def blocked_reason(self) -> str | None: ...
 
     @property
+    def queue_reason(self) -> str | None: ...
+
+    @property
     def skipped_reason(self) -> str | None: ...
+
+    @property
+    def terminal_reason(self) -> str | None: ...
+
+    @property
+    def check_names(self) -> tuple[str, ...]: ...
+
+    @property
+    def last_result(self) -> str | None: ...
 
 
 def group_review_queue_entries_by_pr(
@@ -110,60 +122,103 @@ def apply_review_queue_result(
         delay_seconds=effective_retry_seconds,
     )
 
-    if result.requeued_refs:
+    result_requeued_refs = getattr(result, "requeued_refs", ())
+    result_terminal_reason = getattr(result, "terminal_reason", None)
+    result_auto_merge_enabled = getattr(result, "auto_merge_enabled", False)
+    result_rerun_checks = getattr(result, "rerun_checks", ())
+    result_blocked_reason = getattr(result, "blocked_reason", None)
+    result_queue_reason = getattr(result, "queue_reason", None)
+    result_skipped_reason = getattr(result, "skipped_reason", None)
+    result_check_names = getattr(result, "check_names", ())
+    result_last_result = getattr(result, "last_result", None)
+
+    if result_requeued_refs:
         return False
 
-    if result.auto_merge_enabled:
-        store.update_review_queue_item(
+    if result_terminal_reason:
+        store.append_review_rescue_event(
             entry.issue_ref,
-            next_attempt_at=next_attempt_at,
-            last_result="auto_merge_enabled",
-            last_reason=None,
-            last_state_digest=effective_state_digest,
-            blocked_streak=0,
-            blocked_class=None,
+            pr_repo=entry.pr_repo,
+            pr_number=entry.pr_number,
+            result_kind=result_last_result or "terminal",
+            reason=result_terminal_reason,
             now=current,
         )
+        store.delete_review_queue_item(entry.issue_ref)
         return False
 
-    if result.rerun_checks:
+    if result_auto_merge_enabled:
+        store.append_review_rescue_event(
+            entry.issue_ref,
+            pr_repo=entry.pr_repo,
+            pr_number=entry.pr_number,
+            result_kind=result_last_result or "success",
+            reason="auto-merge-enabled",
+            now=current,
+        )
+        store.delete_review_queue_item(entry.issue_ref)
+        return False
+
+    if result_rerun_checks:
         store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
             last_result="rerun_checks",
-            last_reason=",".join(result.rerun_checks),
+            last_reason=",".join(result_rerun_checks),
             last_state_digest=effective_state_digest,
+            last_check_names=(),
+            copilot_missing_since=None,
             blocked_streak=0,
             blocked_class=None,
             now=current,
         )
         return False
 
-    if result.blocked_reason:
+    if result_blocked_reason:
+        persisted_reason = result_queue_reason or result_blocked_reason
         new_class, new_streak, needs_escalation = blocked_streak_needs_escalation(
-            result.blocked_reason,
+            persisted_reason,
             entry.blocked_streak,
             entry.blocked_class,
         )
         store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
-            last_result="blocked",
-            last_reason=result.blocked_reason,
+            last_result=result_last_result or "blocked",
+            last_reason=persisted_reason,
             last_state_digest=effective_state_digest,
+            last_check_names=result_check_names,
+            copilot_missing_since=(
+                entry.copilot_missing_since or current.isoformat()
+                if persisted_reason == "missing-copilot-review"
+                else None
+            ),
             blocked_streak=new_streak,
             blocked_class=new_class,
             now=current,
         )
         return needs_escalation
 
-    if result.skipped_reason:
+    if result_skipped_reason:
+        if result_skipped_reason == "auto-merge-already-enabled":
+            store.append_review_rescue_event(
+                entry.issue_ref,
+                pr_repo=entry.pr_repo,
+                pr_number=entry.pr_number,
+                result_kind=result_last_result or "terminal",
+                reason="auto-merge-already-enabled-terminal",
+                now=current,
+            )
+            store.delete_review_queue_item(entry.issue_ref)
+            return False
         store.update_review_queue_item(
             entry.issue_ref,
             next_attempt_at=next_attempt_at,
-            last_result="skipped",
-            last_reason=result.skipped_reason,
+            last_result=result_last_result or "skipped",
+            last_reason=result_skipped_reason,
             last_state_digest=effective_state_digest,
+            last_check_names=(),
+            copilot_missing_since=None,
             blocked_streak=0,
             blocked_class=None,
             now=current,
@@ -173,9 +228,11 @@ def apply_review_queue_result(
     store.update_review_queue_item(
         entry.issue_ref,
         next_attempt_at=next_attempt_at,
-        last_result="processed",
+        last_result=result_last_result or "processed",
         last_reason=None,
         last_state_digest=effective_state_digest,
+        last_check_names=(),
+        copilot_missing_since=None,
         blocked_streak=0,
         blocked_class=None,
         now=current,
@@ -211,6 +268,8 @@ def apply_review_queue_partial_failure(
             last_result="partial_failure",
             last_reason=error,
             last_state_digest=entry.last_state_digest,
+            last_check_names=(),
+            copilot_missing_since=None,
             blocked_streak=0,
             blocked_class=None,
             now=current,
@@ -475,9 +534,15 @@ def repark_unchanged_review_queue_entries(
                 blocked_reason=(
                     entry.last_reason if entry.last_result == "blocked" else None
                 ),
+                queue_reason=(
+                    entry.last_reason if entry.last_result == "blocked" else None
+                ),
                 skipped_reason=(
                     entry.last_reason if entry.last_result == "skipped" else None
                 ),
+                terminal_reason=None,
+                check_names=entry.last_check_names,
+                last_result=entry.last_result,
             ),
         )
         retry_seconds = review_queue_retry_seconds_for_result(synthetic_result)

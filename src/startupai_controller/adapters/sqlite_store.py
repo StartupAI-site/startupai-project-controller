@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
+from startupai_controller.domain.models import (
+    ReviewQueueEntry,
+    ReviewRescueEvent,
+    SessionInfo,
+)
 from startupai_controller.ports.session_store import SessionUpdateFields
 
 # Adapter-internal types re-exported for canonical import paths.
@@ -71,6 +75,33 @@ class SqliteSessionStore:
     def delete_review_queue_item(self, issue_ref: str) -> None:
         self._db.delete_review_queue_item(issue_ref)
 
+    def append_review_rescue_event(
+        self,
+        issue_ref: str,
+        *,
+        pr_repo: str,
+        pr_number: int,
+        result_kind: str,
+        reason: str | None = None,
+        payload_json: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        self._db.append_review_rescue_event(
+            issue_ref,
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            result_kind=result_kind,
+            reason=reason,
+            payload_json=payload_json,
+            now=now,
+        )
+
+    def list_review_rescue_events(
+        self,
+        issue_ref: str | None = None,
+    ) -> list[ReviewRescueEvent]:
+        return self._db.list_review_rescue_events(issue_ref)
+
     def update_review_queue_item(
         self,
         issue_ref: str,
@@ -79,6 +110,8 @@ class SqliteSessionStore:
         last_result: str,
         last_reason: str | None = None,
         last_state_digest: str | None = None,
+        last_check_names: tuple[str, ...] = (),
+        copilot_missing_since: str | None = None,
         blocked_streak: int = 0,
         blocked_class: str | None = None,
         now: datetime | None = None,
@@ -89,6 +122,8 @@ class SqliteSessionStore:
             last_result=last_result,
             last_reason=last_reason,
             last_state_digest=last_state_digest,
+            last_check_names=last_check_names,
+            copilot_missing_since=copilot_missing_since,
             blocked_streak=blocked_streak,
             blocked_class=blocked_class,
             now=now,

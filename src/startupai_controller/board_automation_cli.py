@@ -396,6 +396,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_dry_run_argument(p_review_rescue_all)
     p_review_rescue_all.set_defaults(func=core._cmd_review_rescue_all)
 
+    p_review_recover_verdicts = subparsers.add_parser(
+        "review-recover-verdicts",
+        help="Sweep active review rows and backfill missing codex verdict markers",
+    )
+    p_review_recover_verdicts.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Emit machine-readable JSON output",
+    )
+    _add_dry_run_argument(p_review_recover_verdicts)
+    p_review_recover_verdicts.set_defaults(func=core._cmd_review_recover_verdicts)
+
     p_policy = subparsers.add_parser(
         "enforce-execution-policy",
         help="Close Copilot coding-agent PRs and re-queue linked issues",

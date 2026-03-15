@@ -19,10 +19,12 @@ from startupai_controller.domain.models import (
     ReviewRescueResult,
     ReviewRescueSweep,
     ReviewSnapshot,
+    ReviewVerdictRecoverySweep,
 )
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.ready_flow import BoardInfoView
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
 from startupai_controller.application.automation.codex_gate import (
@@ -30,6 +32,7 @@ from startupai_controller.application.automation.codex_gate import (
 )
 from startupai_controller.application.automation.review_rescue import (
     automerge_review as _app_automerge_review,
+    review_recover_verdicts as _app_review_recover_verdicts,
     review_rescue as _app_review_rescue,
     review_rescue_all as _app_review_rescue_all,
 )
@@ -310,6 +313,7 @@ def review_rescue(
     pr_port=None,
     review_state_port=None,
     board_port=None,
+    session_store: SessionStorePort | None = None,
     # Injected port factories and helpers
     default_pr_port_fn: Callable[..., object] | None = None,
     default_review_state_port_fn: Callable[..., object] | None = None,
@@ -363,6 +367,7 @@ def review_rescue(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        session_store=session_store,
         automerge_runner=_automerge_runner,
     )
 
@@ -378,6 +383,7 @@ def review_rescue_all(
     pr_port=None,
     review_state_port=None,
     board_port=None,
+    session_store: SessionStorePort | None = None,
     # Injected port factories and helpers
     default_pr_port_fn: Callable[..., object] | None = None,
     default_review_state_port_fn: Callable[..., object] | None = None,
@@ -410,6 +416,7 @@ def review_rescue_all(
                 pr_port=kwargs["pr_port"],
                 review_state_port=kwargs["review_state_port"],
                 board_port=kwargs["board_port"],
+                session_store=kwargs["session_store"],
             )
         return ReviewRescueResult(
             pr_repo=kwargs["pr_repo"],
@@ -424,7 +431,29 @@ def review_rescue_all(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        session_store=session_store,
         review_rescue_runner=_review_rescue_runner,
+    )
+
+
+def review_recover_verdicts(
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    session_store: SessionStorePort,
+    dry_run: bool = False,
+    gh_runner: Callable[..., str] | None = None,
+    pr_port=None,
+    default_pr_port_fn: Callable[..., object] | None = None,
+) -> ReviewVerdictRecoverySweep:
+    """Assemble ports and delegate to the explicit verdict recovery sweep."""
+    if pr_port is None and default_pr_port_fn is not None:
+        pr_port = default_pr_port_fn(project_owner, project_number, config, gh_runner)
+    return _app_review_recover_verdicts(
+        store=session_store,
+        pr_port=pr_port,
+        dry_run=dry_run,
     )
 
 

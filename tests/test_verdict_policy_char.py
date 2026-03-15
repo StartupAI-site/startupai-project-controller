@@ -126,6 +126,17 @@ class TestPreBackfillVerdictEligibility:
             entry_pr_url=entry.pr_url,
         )
 
+    def test_hyphenated_verdict_blocked_entry_is_eligible(self) -> None:
+        """The new machine-readable blocker reason remains pre-backfill eligible."""
+        entry = _make_review_queue_entry(
+            last_result="blocked",
+            last_reason="missing-codex-verdict-marker",
+        )
+        assert is_pre_backfill_eligible(
+            last_result=entry.last_result,
+            last_reason=entry.last_reason,
+        )
+
     def test_newly_seeded_entry_is_eligible(self) -> None:
         """Entry with no last_result (newly seeded) is eligible."""
         entry = _make_review_queue_entry(last_result=None)

@@ -64,6 +64,7 @@ class BoardAutomationConfig:
     issue_context_cache_enabled: bool = True
     issue_context_cache_ttl_seconds: int = 900
     launch_hydration_concurrency: int = 1
+    copilot_review_fallback_timeout_seconds: int = 86400
     rate_limit_pause_enabled: bool = True
     rate_limit_cooldown_seconds: int = 300
     worktree_reuse_enabled: bool = True
@@ -238,6 +239,9 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
         launch_hydration_concurrency = int(
             authority_raw.get("launch_hydration_concurrency", 1)
         )
+        copilot_review_fallback_timeout_seconds = int(
+            authority_raw.get("copilot_review_fallback_timeout_seconds", 86400)
+        )
         rate_limit_cooldown_seconds = int(
             authority_raw.get("rate_limit_cooldown_seconds", 300)
         )
@@ -255,6 +259,11 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
         raise ConfigError(
             "automation config execution_authority.launch_hydration_concurrency "
             "must be >= 1"
+        )
+    if copilot_review_fallback_timeout_seconds < 1:
+        raise ConfigError(
+            "automation config execution_authority."
+            "copilot_review_fallback_timeout_seconds must be >= 1"
         )
     if rate_limit_cooldown_seconds < 1:
         raise ConfigError(
@@ -418,6 +427,9 @@ def load_automation_config(path: Path) -> BoardAutomationConfig:
         issue_context_cache_enabled=issue_context_cache_enabled,
         issue_context_cache_ttl_seconds=issue_context_cache_ttl_seconds,
         launch_hydration_concurrency=launch_hydration_concurrency,
+        copilot_review_fallback_timeout_seconds=(
+            copilot_review_fallback_timeout_seconds
+        ),
         rate_limit_pause_enabled=rate_limit_pause_enabled,
         rate_limit_cooldown_seconds=rate_limit_cooldown_seconds,
         worktree_reuse_enabled=worktree_reuse_enabled,

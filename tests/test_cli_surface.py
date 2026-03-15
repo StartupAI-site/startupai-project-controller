@@ -22,6 +22,7 @@ BOARD_AUTOMATION_SUBCOMMANDS = {
     "automerge-review",
     "review-rescue",
     "review-rescue-all",
+    "review-recover-verdicts",
     "enforce-execution-policy",
     "classify-parallelism",
 }

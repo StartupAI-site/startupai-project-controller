@@ -17,7 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
+from startupai_controller.domain.models import (
+    ReviewQueueEntry,
+    ReviewRescueEvent,
+    SessionInfo,
+)
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "startupai" / "consumer.db"
 
@@ -202,7 +206,22 @@ CREATE TABLE IF NOT EXISTS review_queue (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_result TEXT,
     last_reason TEXT,
-    last_state_digest TEXT
+    last_state_digest TEXT,
+    last_check_names_json TEXT,
+    copilot_missing_since TEXT,
+    blocked_streak INTEGER NOT NULL DEFAULT 0,
+    blocked_class TEXT
+);
+
+CREATE TABLE IF NOT EXISTS review_rescue_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_ref TEXT NOT NULL,
+    pr_repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    result_kind TEXT NOT NULL,
+    reason TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_consumer_metrics_type_created
@@ -214,6 +233,119 @@ ON consumer_metrics(created_at);
 CREATE INDEX IF NOT EXISTS idx_review_queue_next_attempt
 ON review_queue(next_attempt_at, enqueued_at);
 """
+
+_SCHEMA_VERSION = 4
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()  # noqa: S608
+    }
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    column_sql: str,
+) -> None:
+    if column in _table_columns(conn, table):
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_sql}")  # noqa: S608
+
+
+def _create_review_rescue_events_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS review_rescue_events ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "issue_ref TEXT NOT NULL, "
+        "pr_repo TEXT NOT NULL, "
+        "pr_number INTEGER NOT NULL, "
+        "result_kind TEXT NOT NULL, "
+        "reason TEXT, "
+        "payload_json TEXT, "
+        "created_at TEXT NOT NULL"
+        ")"
+    )
+
+
+def _migration_1_identity_and_repair_columns(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "leases", "slot_id", "INTEGER")
+    _add_column_if_missing(conn, "sessions", "repo_prefix", "TEXT")
+    _add_column_if_missing(conn, "sessions", "slot_id", "INTEGER")
+    _add_column_if_missing(conn, "sessions", "phase", "TEXT")
+    _add_column_if_missing(conn, "sessions", "provenance_id", "TEXT")
+    _add_column_if_missing(conn, "sessions", "failure_reason", "TEXT")
+    _add_column_if_missing(
+        conn, "sessions", "session_kind", "TEXT NOT NULL DEFAULT 'new_work'"
+    )
+    _add_column_if_missing(conn, "sessions", "repair_pr_url", "TEXT")
+    _add_column_if_missing(conn, "sessions", "branch_reconcile_state", "TEXT")
+    _add_column_if_missing(conn, "sessions", "branch_reconcile_error", "TEXT")
+
+
+def _migration_2_shutdown_and_resolution_columns(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "sessions", "drain_observed_at", "TEXT")
+    _add_column_if_missing(conn, "sessions", "last_execution_progress_at", "TEXT")
+    _add_column_if_missing(conn, "sessions", "last_external_event_at", "TEXT")
+    _add_column_if_missing(conn, "sessions", "shutdown_signal_sent_at", "TEXT")
+    _add_column_if_missing(
+        conn,
+        "sessions",
+        "last_external_event_before_shutdown_signal_at",
+        "TEXT",
+    )
+    _add_column_if_missing(conn, "sessions", "shutdown_class_at_signal", "TEXT")
+    _add_column_if_missing(conn, "sessions", "resolution_kind", "TEXT")
+    _add_column_if_missing(conn, "sessions", "verification_class", "TEXT")
+    _add_column_if_missing(conn, "sessions", "resolution_evidence_json", "TEXT")
+    _add_column_if_missing(conn, "sessions", "resolution_action", "TEXT")
+    _add_column_if_missing(conn, "sessions", "done_reason", "TEXT")
+
+
+def _migration_3_review_queue_state_columns(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "review_queue", "last_state_digest", "TEXT")
+    _add_column_if_missing(
+        conn, "review_queue", "blocked_streak", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _add_column_if_missing(conn, "review_queue", "blocked_class", "TEXT")
+
+
+def _migration_4_review_queue_rescue_columns(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "review_queue", "last_check_names_json", "TEXT")
+    _add_column_if_missing(conn, "review_queue", "copilot_missing_since", "TEXT")
+    _create_review_rescue_events_table(conn)
+
+
+_MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
+    (1, _migration_1_identity_and_repair_columns),
+    (2, _migration_2_shutdown_and_resolution_columns),
+    (3, _migration_3_review_queue_state_columns),
+    (4, _migration_4_review_queue_rescue_columns),
+)
+
+
+def _schema_version(conn: sqlite3.Connection) -> int:
+    row = conn.execute("PRAGMA user_version").fetchone()
+    if row is None:
+        return 0
+    return int(row[0])
+
+
+def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(f"PRAGMA user_version = {version}")  # noqa: S608
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    current_version = _schema_version(conn)
+    if current_version >= _SCHEMA_VERSION:
+        return
+    for version, migration in _MIGRATIONS:
+        if version <= current_version:
+            continue
+        migration(conn)
+        _set_schema_version(conn, version)
 
 
 # ---------------------------------------------------------------------------
@@ -258,64 +390,8 @@ class ConsumerDB:
     @staticmethod
     def _init_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_SQL)
-        ConsumerDB._ensure_column(conn, "leases", "slot_id", "INTEGER")
-        ConsumerDB._ensure_column(conn, "sessions", "repo_prefix", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "slot_id", "INTEGER")
-        ConsumerDB._ensure_column(conn, "sessions", "phase", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "provenance_id", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "failure_reason", "TEXT")
-        ConsumerDB._ensure_column(
-            conn, "sessions", "session_kind", "TEXT NOT NULL DEFAULT 'new_work'"
-        )
-        ConsumerDB._ensure_column(conn, "sessions", "repair_pr_url", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "branch_reconcile_state", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "branch_reconcile_error", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "drain_observed_at", "TEXT")
-        ConsumerDB._ensure_column(
-            conn, "sessions", "last_execution_progress_at", "TEXT"
-        )
-        ConsumerDB._ensure_column(conn, "sessions", "last_external_event_at", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "shutdown_signal_sent_at", "TEXT")
-        ConsumerDB._ensure_column(
-            conn,
-            "sessions",
-            "last_external_event_before_shutdown_signal_at",
-            "TEXT",
-        )
-        ConsumerDB._ensure_column(conn, "sessions", "shutdown_class_at_signal", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "resolution_kind", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "verification_class", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "resolution_evidence_json", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "resolution_action", "TEXT")
-        ConsumerDB._ensure_column(conn, "sessions", "done_reason", "TEXT")
-        ConsumerDB._ensure_column(conn, "review_queue", "last_state_digest", "TEXT")
-        ConsumerDB._ensure_column(
-            conn, "review_queue", "blocked_streak", "INTEGER NOT NULL DEFAULT 0"
-        )
-        ConsumerDB._ensure_column(conn, "review_queue", "blocked_class", "TEXT")
-
-    @staticmethod
-    def _ensure_column(
-        conn: sqlite3.Connection,
-        table: str,
-        column: str,
-        column_sql: str,
-    ) -> None:
-        columns = {
-            row["name"]
-            for row in conn.execute(
-                f"PRAGMA table_info({table})"
-            ).fetchall()  # noqa: S608
-        }
-        if column in columns:
-            return
-        try:
-            conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN {column} {column_sql}"  # noqa: S608
-            )
-        except sqlite3.OperationalError as error:
-            if "duplicate column name" not in str(error).lower():
-                raise
+        _apply_migrations(conn)
+        conn.commit()
 
     def close(self) -> None:
         if self._conn is not None:
@@ -1061,6 +1137,8 @@ class ConsumerDB:
         last_result: str,
         last_reason: str | None = None,
         last_state_digest: str | None = None,
+        last_check_names: tuple[str, ...] = (),
+        copilot_missing_since: str | None = None,
         blocked_streak: int | None = None,
         blocked_class: str | None = None,
         now: datetime | None = None,
@@ -1075,6 +1153,8 @@ class ConsumerDB:
             "last_result = ?",
             "last_reason = ?",
             "last_state_digest = ?",
+            "last_check_names_json = ?",
+            "copilot_missing_since = ?",
         ]
         params: list[Any] = [
             current,
@@ -1083,6 +1163,8 @@ class ConsumerDB:
             last_result,
             last_reason,
             last_state_digest,
+            (json.dumps(sorted(set(last_check_names))) if last_check_names else None),
+            copilot_missing_since,
         ]
         if blocked_streak is not None:
             parts.append("blocked_streak = ?")
@@ -1126,6 +1208,68 @@ class ConsumerDB:
             (issue_ref,),
         )
         conn.commit()
+
+    def append_review_rescue_event(
+        self,
+        issue_ref: str,
+        *,
+        pr_repo: str,
+        pr_number: int,
+        result_kind: str,
+        reason: str | None = None,
+        payload_json: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        current = (now or datetime.now(timezone.utc)).isoformat()
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO review_rescue_events ("
+            "issue_ref, pr_repo, pr_number, result_kind, reason, payload_json, created_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                issue_ref,
+                pr_repo,
+                pr_number,
+                result_kind,
+                reason,
+                payload_json,
+                current,
+            ),
+        )
+        conn.commit()
+
+    def list_review_rescue_events(
+        self,
+        issue_ref: str | None = None,
+    ) -> list[ReviewRescueEvent]:
+        conn = self._get_connection()
+        if issue_ref is None:
+            rows = conn.execute(
+                "SELECT issue_ref, pr_repo, pr_number, result_kind, reason, payload_json, created_at "
+                "FROM review_rescue_events ORDER BY id ASC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT issue_ref, pr_repo, pr_number, result_kind, reason, payload_json, created_at "
+                "FROM review_rescue_events WHERE issue_ref = ? ORDER BY id ASC",
+                (issue_ref,),
+            ).fetchall()
+        return [
+            ReviewRescueEvent(
+                issue_ref=str(row["issue_ref"]),
+                pr_repo=str(row["pr_repo"]),
+                pr_number=int(row["pr_number"]),
+                result_kind=str(row["result_kind"]),
+                reason=str(row["reason"]) if row["reason"] is not None else None,
+                payload_json=(
+                    str(row["payload_json"])
+                    if row["payload_json"] is not None
+                    else None
+                ),
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
 
     # -- Metrics ------------------------------------------------------------
 
@@ -1305,6 +1449,17 @@ class ConsumerDB:
 
     @staticmethod
     def _row_to_review_queue_entry(row: sqlite3.Row) -> ReviewQueueEntry:
+        check_names: tuple[str, ...] = ()
+        raw_check_names = row["last_check_names_json"]
+        if raw_check_names:
+            try:
+                payload = json.loads(str(raw_check_names))
+            except json.JSONDecodeError:
+                payload = []
+            if isinstance(payload, list):
+                check_names = tuple(
+                    sorted({str(item).strip() for item in payload if str(item).strip()})
+                )
         return ReviewQueueEntry(
             issue_ref=str(row["issue_ref"]),
             pr_url=str(row["pr_url"]),
@@ -1333,6 +1488,12 @@ class ConsumerDB:
             last_state_digest=(
                 str(row["last_state_digest"])
                 if row["last_state_digest"] is not None
+                else None
+            ),
+            last_check_names=check_names,
+            copilot_missing_since=(
+                str(row["copilot_missing_since"])
+                if row["copilot_missing_since"] is not None
                 else None
             ),
             blocked_streak=(
