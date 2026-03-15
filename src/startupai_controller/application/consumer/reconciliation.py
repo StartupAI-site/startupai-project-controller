@@ -56,6 +56,7 @@ class ReconciliationWiringDeps:
     # Board transition functions
     transition_issue_to_in_progress: Callable[..., None]
     return_issue_to_ready: Callable[..., None]
+    return_issue_to_review: Callable[..., None]
     transition_issue_to_review: Callable[..., None]
     set_blocked_with_reason: Callable[..., None]
 
@@ -119,7 +120,7 @@ def reconcile_locally_review_owned_ready_items(
         board_snapshot=board_snapshot,
         issue_ref_for_snapshot=issue_ref_for_snapshot,
         dry_run=dry_run,
-        transition_issue_to_review=deps.transition_issue_to_review,
+        return_issue_to_review=deps.return_issue_to_review,
     )
 
 

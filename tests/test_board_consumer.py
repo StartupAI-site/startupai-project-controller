@@ -37,6 +37,7 @@ from startupai_controller.board_consumer_cli import (
 from startupai_controller.consumer_workflow import load_workflow_definition
 from startupai_controller.consumer_board_state_helpers import (
     escalate_to_claude_from_shell as _escalate_to_claude,
+    return_issue_to_review_from_shell as _return_issue_to_review,
     return_issue_to_ready_from_shell as _return_issue_to_ready,
     transition_issue_to_in_progress_from_shell as _transition_issue_to_in_progress,
     transition_issue_to_review_from_shell as _transition_issue_to_review,
@@ -4008,11 +4009,19 @@ class TestConsumerShellSeams:
             items=(ready_item,),
             by_status={"Ready": (ready_item,)},
         )
-        transitioned: list[str] = []
+        repaired: list[str] = []
 
         monkeypatch.setattr(
+            "startupai_controller.consumer_board_state_helpers.return_issue_to_review_from_shell",
+            lambda issue_ref, *args, **kwargs: repaired.append(issue_ref),
+        )
+        monkeypatch.setattr(
             "startupai_controller.consumer_board_state_helpers.transition_issue_to_review_from_shell",
-            lambda issue_ref, *args, **kwargs: transitioned.append(issue_ref),
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "stale Ready repair must use direct Ready -> Review helper"
+                )
+            ),
         )
 
         result = _reconcile_board_truth(
@@ -4024,7 +4033,7 @@ class TestConsumerShellSeams:
         )
 
         assert result.moved_review == ("crew#10",)
-        assert transitioned == ["crew#10"]
+        assert repaired == ["crew#10"]
 
     def test_block_prelaunch_issue_queues_fallback_when_block_transition_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4364,6 +4373,34 @@ class TestRunDaemonLoop:
 
         assert transitions == [("crew#84", "Ready")]
         assert statuses["crew#84"] == "Ready"
+
+    def test_return_issue_to_review_uses_ports(self, tmp_path: Path) -> None:
+        cp_config = _load(tmp_path)
+        statuses = {"crew#10": "Ready"}
+        transitions: list[tuple[str, str]] = []
+
+        review_state_port = SimpleNamespace(
+            get_issue_status=lambda issue_ref: statuses[issue_ref]
+        )
+
+        def set_issue_status(issue_ref: str, status: str) -> None:
+            transitions.append((issue_ref, status))
+            statuses[issue_ref] = status
+
+        board_port = SimpleNamespace(set_issue_status=set_issue_status)
+
+        _return_issue_to_review(
+            "crew#10",
+            cp_config,
+            "StartupAI-site",
+            1,
+            from_statuses={"Ready"},
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+
+        assert transitions == [("crew#10", "Review")]
+        assert statuses["crew#10"] == "Review"
 
     def test_replay_deferred_actions_uses_ports(self, tmp_path: Path) -> None:
         config = _make_consumer_config(tmp_path)

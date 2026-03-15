@@ -70,6 +70,7 @@ def build_reconciliation_wiring_deps() -> ReconciliationWiringDeps:
         board_state_reconcile_stale=_board_state_helpers.reconcile_stale_in_progress_items,
         transition_issue_to_in_progress=_board_state_helpers.transition_issue_to_in_progress_from_shell,
         return_issue_to_ready=_board_state_helpers.return_issue_to_ready_from_shell,
+        return_issue_to_review=_board_state_helpers.return_issue_to_review_from_shell,
         transition_issue_to_review=_board_state_helpers.transition_issue_to_review_from_shell,
         set_blocked_with_reason=_automation_bridge.set_blocked_with_reason,
         resolve_issue_coordinates=_resolve_issue_coordinates,

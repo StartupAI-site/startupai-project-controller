@@ -162,6 +162,43 @@ def return_issue_to_ready(
     )
 
 
+def return_issue_to_review(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    build_github_port_bundle: Callable[..., Any],
+    from_statuses: set[str] | None = None,
+    review_state_port: ReviewStatePort | None = None,
+    board_port: BoardMutationPort | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Move a locally review-owned issue back to Review so board truth matches reality."""
+    port_review = review_state_port
+    port_board = board_port
+    if port_review is None or port_board is None:
+        bundle = build_github_port_bundle(
+            project_owner,
+            project_number,
+            config=config,
+            gh_runner=gh_runner,
+        )
+        port_review = port_review or bundle.review_state
+        port_board = port_board or bundle.board_mutations
+    old_status = port_review.get_issue_status(issue_ref)
+    if old_status in (from_statuses or {"Ready"}):
+        port_board.set_issue_status(issue_ref, "Review")
+        changed = True
+    else:
+        changed = False
+    if changed or old_status == "Review":
+        return
+    raise GhQueryError(
+        f"Failed moving {issue_ref} back to Review: current status={old_status}"
+    )
+
+
 def reconcile_active_repair_review_items(
     consumer_config: Any,
     critical_path_config: Any,
@@ -218,7 +255,7 @@ def reconcile_locally_review_owned_ready_items(
     board_snapshot: Any | None,
     issue_ref_for_snapshot: Callable[..., str | None],
     dry_run: bool,
-    transition_issue_to_review: Callable[..., None],
+    return_issue_to_review: Callable[..., None],
 ) -> list[str]:
     """Return stale Ready items that should be healed back to Review."""
     ready_items = (
@@ -262,7 +299,7 @@ def reconcile_locally_review_owned_ready_items(
         if issue_ref not in locally_review_owned:
             continue
         if not dry_run:
-            transition_issue_to_review(
+            return_issue_to_review(
                 issue_ref,
                 critical_path_config,
                 consumer_config.project_owner,
@@ -513,6 +550,34 @@ def return_issue_to_ready_from_shell(
     """Move a non-running claimed issue back to Ready so the lane stays truthful."""
     del board_info_resolver, board_mutator
     return return_issue_to_ready(
+        issue_ref,
+        config,
+        project_owner,
+        project_number,
+        build_github_port_bundle=build_github_port_bundle,
+        from_statuses=from_statuses,
+        review_state_port=review_state_port,
+        board_port=board_port,
+        gh_runner=gh_runner,
+    )
+
+
+def return_issue_to_review_from_shell(
+    issue_ref: str,
+    config: Any,
+    project_owner: str,
+    project_number: int,
+    *,
+    from_statuses: set[str] | None = None,
+    review_state_port: Any | None = None,
+    board_port: Any | None = None,
+    board_info_resolver: Callable[..., Any] | None = None,
+    board_mutator: Callable[..., None] | None = None,
+    gh_runner: Callable[..., str] | None = None,
+) -> None:
+    """Move a locally review-owned issue from stale Ready back to Review."""
+    del board_info_resolver, board_mutator
+    return return_issue_to_review(
         issue_ref,
         config,
         project_owner,
