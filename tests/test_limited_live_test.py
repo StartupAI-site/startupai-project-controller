@@ -246,6 +246,8 @@ class FakeBackend:
             return ("report-slo", "--local-only" in argv)
         if "tick" in argv:
             return ("tick", None)
+        if "one-shot" in argv:
+            return ("one-shot", None)
         return ("other", None)
 
     def _is_consumer_command(self, argv: list[str]) -> bool:
@@ -355,7 +357,7 @@ def test_one_shot_idle_json_is_nonfatal_for_harness(tmp_path: Path) -> None:
         status_full=[_status_payload()],
         report_slo=[_report_payload()],
         tick_payloads=[_tick_payload()],
-        failures={("other", None): 2},
+        failures={("one-shot", None): 2},
     )
     harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
 
@@ -378,7 +380,7 @@ def test_one_shot_idle_requires_idle_action_for_nonfatal_harness_classification(
         status_full=[_status_payload()],
         report_slo=[_report_payload()],
         tick_payloads=[_tick_payload()],
-        failures={("other", None): 2},
+        failures={("one-shot", None): 2},
     )
     harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
 
@@ -634,6 +636,77 @@ def test_limited_live_test_applies_timeout_to_preflight_process_checks(
         60.0,
     ) in backend.timeout_requests
     assert (["ps", "-eo", "pid=,command="], 60.0) in backend.timeout_requests
+    assert (
+        [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "startupai_controller.board_consumer",
+            "one-shot",
+            "--dry-run",
+            "--json",
+        ],
+        30.0,
+    ) in backend.timeout_requests
+    assert (
+        [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "startupai_controller.board_control_plane",
+            "tick",
+            "--json",
+            "--dry-run",
+        ],
+        30.0,
+    ) in backend.timeout_requests
+
+
+def test_limited_live_test_omits_baseline_one_shot_snapshot(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload(), _status_payload(), _status_payload()],
+        status_full=[_status_payload(), _status_payload()],
+        report_slo=[_report_payload(), _report_payload()],
+        tick_payloads=[_tick_payload(), _tick_payload()],
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    harness.run()
+
+    baseline_dir = harness.run_dir / "artifacts" / "baseline"
+    assert not any(
+        path.name.startswith("one-shot-dry-run") for path in baseline_dir.iterdir()
+    )
+
+
+def test_limited_live_test_records_preflight_one_shot_timeout_and_continues(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    process = FakeProcess(clock=clock, drain_exit_delay=1)
+    backend = FakeBackend(
+        clock=clock,
+        process=process,
+        status_local=[_status_payload()],
+        status_full=[_status_payload()],
+        report_slo=[_report_payload()],
+        tick_payloads=[_tick_payload()],
+        delays={("one-shot", None): 45.0},
+    )
+    harness = LimitedLiveTestHarness(_config(tmp_path), backend, clock)
+
+    summary = harness.run()
+
+    assert summary.conclusion == "test inconclusive due to insufficient board activity"
+    assert "preflight one-shot --dry-run timed out after 30.0 seconds" in summary.issues
 
 
 def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_conclusion(

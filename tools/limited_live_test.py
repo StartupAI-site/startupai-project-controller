@@ -50,6 +50,8 @@ FULL_SNAPSHOT_GUARD_SECONDS = 20.0
 LOCAL_SNAPSHOT_GUARD_SECONDS = 5.0
 RECLAIM_COMPLETION_GRACE_SECONDS = 10.0
 FORCED_SHUTDOWN_BUDGET_SECONDS = 120.0
+ONE_SHOT_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+BASELINE_SNAPSHOT_TIMEOUT_SECONDS = 30.0
 REVIEW_QUEUE_ELEVATED_DUE_COUNT = 20
 REVIEW_QUEUE_SEVERE_DUE_COUNT = 35
 SESSION_ID_PATTERN = re.compile(r"session id:\s*(?P<session_id>[0-9a-f-]+)")
@@ -459,17 +461,35 @@ class LimitedLiveTestHarness:
                 self._run_aux_command(self._consumer_recover_interrupted_command()),
                 "board_consumer recover-interrupted --json",
             )
-        self._require_one_shot_ok(
-            self._run_aux_command(self._consumer_one_shot_command()),
-            "board_consumer one-shot --dry-run --json",
+        one_shot_result = self._run_aux_command(
+            self._consumer_one_shot_command(),
+            timeout_seconds=ONE_SHOT_PREFLIGHT_TIMEOUT_SECONDS,
         )
+        one_shot_payload = _parse_json(one_shot_result.stdout)
+        if not one_shot_result.ok and not self._is_nonfatal_one_shot_idle(
+            one_shot_result, one_shot_payload
+        ):
+            message = (
+                "preflight one-shot --dry-run timed out after "
+                f"{one_shot_result.timeout_seconds} seconds"
+                if one_shot_result.timed_out
+                else "preflight one-shot --dry-run failed with exit code "
+                f"{one_shot_result.returncode}"
+            )
+            self.snapshot_failures.append(message)
+            self.issues.append(message)
 
     def _shutdown_state_path(self) -> Path:
         return self.config.state_root / "shutdown-state.json"
 
     def _capture_baseline_snapshots(self) -> None:
         for name, command in self._baseline_snapshot_commands():
-            self._capture_snapshot(name, command, self.baseline_dir)
+            self._capture_snapshot(
+                name,
+                command,
+                self.baseline_dir,
+                timeout_seconds=BASELINE_SNAPSHOT_TIMEOUT_SECONDS,
+            )
 
     def _capture_final_snapshots(self) -> None:
         for name, command in self._baseline_snapshot_commands():
@@ -839,9 +859,14 @@ class LimitedLiveTestHarness:
         *,
         reason: str | None = None,
         deadline_monotonic: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> SnapshotRecord:
         directory.mkdir(parents=True, exist_ok=True)
-        result = self._run_aux_command(command, deadline_monotonic=deadline_monotonic)
+        result = self._run_aux_command(
+            command,
+            deadline_monotonic=deadline_monotonic,
+            timeout_seconds=timeout_seconds,
+        )
         base = directory / name
         payload = _parse_json(result.stdout)
         if payload is not None:
@@ -1503,7 +1528,6 @@ class LimitedLiveTestHarness:
             ("report-slo", self._consumer_report_slo_command(local_only=False)),
             ("report-slo-local", self._consumer_report_slo_command(local_only=True)),
             ("tick-dry-run", self._control_plane_tick_command()),
-            ("one-shot-dry-run", self._consumer_one_shot_command()),
         ]
 
     def _require_ok(self, result: CommandResult, label: str) -> None:
@@ -1540,8 +1564,13 @@ class LimitedLiveTestHarness:
         argv: list[str],
         *,
         deadline_monotonic: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult:
-        configured_timeout = float(self.config.command_timeout_seconds)
+        configured_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(self.config.command_timeout_seconds)
+        )
         effective_timeout = configured_timeout
         deadline_clipped = False
         if deadline_monotonic is not None:
