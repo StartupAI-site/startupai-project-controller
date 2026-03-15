@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from tools.limited_live_test import (
     HarnessError,
     LimitedLiveTestConfig,
     LimitedLiveTestHarness,
+    SubprocessBackend,
 )
 
 UTC = timezone.utc
@@ -315,6 +317,61 @@ def _config(tmp_path: Path) -> LimitedLiveTestConfig:
         confirm_single_consumer=True,
         confirmation_note="verified no other host is running the consumer",
     )
+
+
+def test_subprocess_backend_timeout_terminates_auxiliary_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    backend = SubprocessBackend(clock)
+    kill_calls: list[tuple[int, int]] = []
+
+    class FakePopen:
+        def __init__(self) -> None:
+            self.pid = 4321
+            self.returncode: int | None = None
+            self.timeouts: list[float | None] = []
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            self.timeouts.append(timeout)
+            if len(self.timeouts) == 1:
+                raise subprocess.TimeoutExpired(
+                    cmd=["uv", "run"],
+                    timeout=timeout,
+                    output="partial stdout",
+                    stderr="partial stderr",
+                )
+            self.returncode = -signal.SIGTERM
+            return ("partial stdout", "partial stderr")
+
+        def send_signal(self, sig: int) -> None:
+            self.returncode = -sig
+
+    fake_process = FakePopen()
+
+    monkeypatch.setattr(
+        "tools.limited_live_test.subprocess.Popen",
+        lambda *args, **kwargs: fake_process,
+    )
+    monkeypatch.setattr(
+        "tools.limited_live_test.os.getpgid",
+        lambda pid: pid,
+    )
+
+    def _killpg(pgid: int, sig: int) -> None:
+        kill_calls.append((pgid, sig))
+        fake_process.returncode = -sig
+
+    monkeypatch.setattr("tools.limited_live_test.os.killpg", _killpg)
+
+    result = backend.run(["uv", "run"], timeout_seconds=30.0)
+
+    assert result.timed_out is True
+    assert result.returncode == 124
+    assert result.stdout == "partial stdout"
+    assert "timed out after 30.0 seconds" in result.stderr
+    assert fake_process.timeouts == [30.0]
+    assert kill_calls == [(4321, signal.SIGTERM)]
 
 
 def test_limited_live_test_happy_path_creates_artifacts(tmp_path: Path) -> None:

@@ -228,18 +228,29 @@ class SubprocessBackend:
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         started_at = self._clock.now_utc().isoformat()
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
-            completed_at = self._clock.now_utc().isoformat()
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
             stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            self._terminate_timed_out_process(process)
+            if process.returncode is None:
+                try:
+                    stdout, stderr = process.communicate(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    self._terminate_timed_out_process(
+                        process,
+                        sig=signal.SIGKILL,
+                    )
+                    stdout, stderr = process.communicate()
+            completed_at = self._clock.now_utc().isoformat()
             timeout_note = (
                 f"command timed out after {timeout_seconds} seconds"
                 if timeout_seconds is not None
@@ -256,16 +267,38 @@ class SubprocessBackend:
                 timed_out=True,
                 timeout_seconds=timeout_seconds,
             )
+        returncode = process.returncode or 0
         completed_at = self._clock.now_utc().isoformat()
         return CommandResult(
             argv=list(argv),
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
             started_at=started_at,
             completed_at=completed_at,
             timeout_seconds=timeout_seconds,
         )
+
+    def _terminate_timed_out_process(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        sig: int = signal.SIGTERM,
+    ) -> None:
+        try:
+            pgid = os.getpgid(process.pid)
+        except ProcessLookupError:
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                return
+            return
+        try:
+            process.send_signal(sig)
+        except ProcessLookupError:
+            return
 
     def start_consumer(self, argv: list[str], log_path: Path) -> ManagedProcess:
         log_path.parent.mkdir(parents=True, exist_ok=True)
