@@ -24,6 +24,7 @@ TRANSPORT_LOG_PATTERN = re.compile(
 )
 ISSUE_REF_PATTERN = re.compile(r"\b(?:app|crew|site)#\d+\b")
 BRANCH_NUMBER_PATTERN = re.compile(r"feat/(?P<number>\d+)-")
+HEAD_BRANCH_PATTERN = re.compile(r"head branch (?P<branch>feat/[^\s]+)")
 WORKTREE_REUSE_BLOCKED_PATTERN = re.compile(
     r"CycleResult\(action='error', issue_ref='(?P<issue_ref>[^']+)', "
     r"session_id=(?:'[^']+'|None), reason='(?P<reason>worktree_in_use:[^']+)'"
@@ -48,6 +49,17 @@ SUMMARY_CONCLUSIONS = (
 FULL_SNAPSHOT_GUARD_SECONDS = 20.0
 LOCAL_SNAPSHOT_GUARD_SECONDS = 5.0
 RECLAIM_COMPLETION_GRACE_SECONDS = 10.0
+FORCED_SHUTDOWN_BUDGET_SECONDS = 120.0
+REVIEW_QUEUE_ELEVATED_DUE_COUNT = 20
+REVIEW_QUEUE_SEVERE_DUE_COUNT = 35
+SESSION_ID_PATTERN = re.compile(r"session id:\s*(?P<session_id>[0-9a-f-]+)")
+ISSUE_BLOCK_PATTERN = re.compile(r"Issue: .* \(#(?P<number>\d+)\)")
+REPOSITORY_LINE_PATTERN = re.compile(r"Repository:\s+(?P<repo>[^\\s]+)")
+WORKDIR_BRANCH_PATTERN = re.compile(
+    r"workdir:\s+/home/chris/projects/worktrees/(?P<repo_prefix>app|crew|site)/(?P<branch>feat/[^\\s]+)"
+)
+BRANCH_LINE_PATTERN = re.compile(r"Branch:\s+(?P<branch>feat/[^\\s]+)")
+PR_URL_PATTERN = re.compile(r"https://github.com/[^\\s)']+/pull/\\d+")
 
 
 class HarnessError(RuntimeError):
@@ -114,12 +126,18 @@ class RunSummary:
     meaningful_board_activity: bool
     shutdown_mode: str
     drain_latency_seconds: float | None
+    graceful_drain_latency_seconds: float | None
+    shutdown_total_seconds: float | None
+    shutdown_total_deadline_seconds: float
     scheduled_drain_at: str | None
     actual_drain_requested_at: str | None
     drain_request_slip_seconds: float | None
     unexpected_exit: bool
     forced_shutdown: bool
     forced_shutdown_blockers: list[dict[str, Any]]
+    review_queue_pressure: str
+    review_queue_count: int
+    review_queue_due_count: int
     snapshot_failures: list[str]
     degraded_periods: list[dict[str, Any]]
     claim_suppression_periods: list[dict[str, Any]]
@@ -137,6 +155,8 @@ class WorkflowIssue:
     kind: str
     issue_ref: str
     pr_url: str | None
+    branch_name: str | None
+    repo_prefix: str | None
     count: int
     sample: str
 
@@ -324,6 +344,8 @@ class LimitedLiveTestHarness:
         self._forced_shutdown = False
         self._shutdown_mode = "natural"
         self._drain_latency_seconds: float | None = None
+        self._graceful_drain_latency_seconds: float | None = None
+        self._shutdown_total_seconds: float | None = None
         self._scheduled_drain_monotonic: float | None = None
         self._run_meta: dict[str, Any] = {}
         self._scheduled_drain_at: str | None = None
@@ -386,6 +408,9 @@ class LimitedLiveTestHarness:
             "scheduled_drain_at": self._scheduled_drain_at,
             "actual_drain_requested_at": self._actual_drain_requested_at,
             "drain_request_slip_seconds": self._drain_request_slip_seconds,
+            "shutdown_total_deadline_seconds": (
+                self.config.drain_timeout_seconds + FORCED_SHUTDOWN_BUDGET_SECONDS
+            ),
         }
         _write_json(self.run_dir / "run_meta.json", self._run_meta)
 
@@ -393,6 +418,10 @@ class LimitedLiveTestHarness:
         self._run_meta["scheduled_drain_at"] = self._scheduled_drain_at
         self._run_meta["actual_drain_requested_at"] = self._actual_drain_requested_at
         self._run_meta["drain_request_slip_seconds"] = self._drain_request_slip_seconds
+        self._run_meta["graceful_drain_latency_seconds"] = (
+            self._graceful_drain_latency_seconds
+        )
+        self._run_meta["shutdown_total_seconds"] = self._shutdown_total_seconds
         _write_json(self.run_dir / "run_meta.json", self._run_meta)
 
     def _perform_preflight(self) -> None:
@@ -537,9 +566,10 @@ class LimitedLiveTestHarness:
             payload = snapshot.payload or {}
             latest_payload = payload
             if child.poll() is not None:
-                self._drain_latency_seconds = (
-                    self.clock.monotonic() - drain_requested_at
-                )
+                elapsed = self.clock.monotonic() - drain_requested_at
+                self._graceful_drain_latency_seconds = elapsed
+                self._shutdown_total_seconds = elapsed
+                self._drain_latency_seconds = elapsed
                 self._shutdown_mode = "natural"
                 self.worked.append("consumer drained and exited naturally")
                 return
@@ -549,14 +579,18 @@ class LimitedLiveTestHarness:
                 )
                 while self.clock.monotonic() < wait_deadline:
                     if child.poll() is not None:
-                        self._drain_latency_seconds = (
-                            self.clock.monotonic() - drain_requested_at
-                        )
+                        elapsed = self.clock.monotonic() - drain_requested_at
+                        self._graceful_drain_latency_seconds = elapsed
+                        self._shutdown_total_seconds = elapsed
+                        self._drain_latency_seconds = elapsed
                         self._shutdown_mode = "natural"
                         self.worked.append("consumer drained and exited naturally")
                         return
                     self.clock.sleep(1.0)
             self.clock.sleep(float(self.config.shutdown_poll_seconds))
+        self._graceful_drain_latency_seconds = (
+            self.clock.monotonic() - drain_requested_at
+        )
         self._forced_shutdown_blockers = self._extract_forced_shutdown_blockers(
             latest_payload
         )
@@ -567,15 +601,17 @@ class LimitedLiveTestHarness:
         sigint_deadline = self.clock.monotonic() + 60
         while self.clock.monotonic() < sigint_deadline:
             if child.poll() is not None:
-                self._drain_latency_seconds = (
-                    self.clock.monotonic() - drain_requested_at
-                )
+                elapsed = self.clock.monotonic() - drain_requested_at
+                self._shutdown_total_seconds = elapsed
+                self._drain_latency_seconds = elapsed
                 self._recover_after_forced_shutdown()
                 return
             self.clock.sleep(1.0)
         child.send_signal(signal.SIGTERM)
         child.wait(timeout=60)
-        self._drain_latency_seconds = self.clock.monotonic() - drain_requested_at
+        elapsed = self.clock.monotonic() - drain_requested_at
+        self._shutdown_total_seconds = elapsed
+        self._drain_latency_seconds = elapsed
         self._recover_after_forced_shutdown()
 
     def _recover_after_forced_shutdown(self) -> None:
@@ -839,6 +875,26 @@ class LimitedLiveTestHarness:
                 issue.sample,
             ),
         )
+        public_workflow_issues = [
+            {
+                key: value
+                for key, value in {
+                    "kind": issue.kind,
+                    "issue_ref": issue.issue_ref,
+                    "pr_url": issue.pr_url,
+                    "branch_name": (
+                        issue.branch_name if issue.issue_ref == "unknown" else None
+                    ),
+                    "repo_prefix": (
+                        issue.repo_prefix if issue.issue_ref == "unknown" else None
+                    ),
+                    "count": issue.count,
+                    "sample": issue.sample,
+                }.items()
+                if value is not None
+            }
+            for issue in workflow_issues
+        ]
         control_plane_counts = []
         for record in self.tick_records:
             payload = record.payload or {}
@@ -871,6 +927,11 @@ class LimitedLiveTestHarness:
             }
             for blocker in self._forced_shutdown_blockers
         ]
+        (
+            review_queue_pressure,
+            review_queue_count,
+            review_queue_due_count,
+        ) = self._latest_review_queue_metrics()
         conclusion = self._determine_conclusion(
             degraded_periods,
             claim_periods,
@@ -883,6 +944,10 @@ class LimitedLiveTestHarness:
             )
         if not self._unexpected_exit:
             self.worked.append("consumer remained under supervised harness control")
+        if review_queue_pressure == "severe":
+            self.issues.append(
+                "Review queue pressure is severe; this is workflow load, not a transport defect."
+            )
         if self._forced_shutdown:
             if acceptable_forced_shutdown:
                 self.worked.append(
@@ -893,11 +958,11 @@ class LimitedLiveTestHarness:
                     "Drain timeout exceeded; sent SIGINT/SIGTERM escalation."
                 )
         for issue in workflow_issues:
-            qualifier = (
-                f" {issue.issue_ref} pr={issue.pr_url}"
-                if issue.pr_url
-                else f" {issue.issue_ref}"
-            )
+            qualifier = f" {issue.issue_ref}"
+            if issue.pr_url:
+                qualifier += f" pr={issue.pr_url}"
+            if issue.branch_name:
+                qualifier += f" branch={issue.branch_name}"
             self.issues.append(
                 f"Workflow issue [{issue.kind}{qualifier} x{issue.count}]: "
                 f"{issue.sample}"
@@ -916,17 +981,25 @@ class LimitedLiveTestHarness:
             meaningful_board_activity=self._meaningful_board_activity,
             shutdown_mode=self._shutdown_mode,
             drain_latency_seconds=self._drain_latency_seconds,
+            graceful_drain_latency_seconds=self._graceful_drain_latency_seconds,
+            shutdown_total_seconds=self._shutdown_total_seconds,
+            shutdown_total_deadline_seconds=(
+                self.config.drain_timeout_seconds + FORCED_SHUTDOWN_BUDGET_SECONDS
+            ),
             scheduled_drain_at=self._scheduled_drain_at,
             actual_drain_requested_at=self._actual_drain_requested_at,
             drain_request_slip_seconds=self._drain_request_slip_seconds,
             unexpected_exit=self._unexpected_exit,
             forced_shutdown=self._forced_shutdown,
             forced_shutdown_blockers=public_forced_shutdown_blockers,
+            review_queue_pressure=review_queue_pressure,
+            review_queue_count=review_queue_count,
+            review_queue_due_count=review_queue_due_count,
             snapshot_failures=list(self.snapshot_failures),
             degraded_periods=degraded_periods,
             claim_suppression_periods=claim_periods,
             consumer_transport_log_highlights=log_highlights,
-            workflow_issues=[asdict(issue) for issue in workflow_issues],
+            workflow_issues=public_workflow_issues,
             control_plane_proxy_counts=control_plane_counts,
             control_plane_health_transitions=control_plane_health_transitions,
             worked=_dedupe(self.worked),
@@ -945,6 +1018,8 @@ class LimitedLiveTestHarness:
                     kind="drain_request_late",
                     issue_ref="global",
                     pr_url=None,
+                    branch_name=None,
+                    repo_prefix=None,
                     count=1,
                     sample=(
                         "Drain request slipped by "
@@ -959,6 +1034,8 @@ class LimitedLiveTestHarness:
                     kind="stale_local_state_after_shutdown",
                     issue_ref="global",
                     pr_url=None,
+                    branch_name=None,
+                    repo_prefix=None,
                     count=1,
                     sample="Consumer stopped, but final local-only status still showed active leases/workers.",
                 )
@@ -1024,6 +1101,21 @@ class LimitedLiveTestHarness:
             for blocker in self._forced_shutdown_blockers
         )
 
+    def _latest_review_queue_metrics(self) -> tuple[str, int, int]:
+        """Return the latest review queue pressure summary from local status."""
+        payload = self._latest_local_status_payload() or {}
+        review_queue = payload.get("review_queue")
+        if isinstance(review_queue, dict):
+            count = int(review_queue.get("count") or 0)
+            due_count = int(review_queue.get("due_count") or 0)
+            pressure = str(review_queue.get("pressure") or "")
+            if pressure:
+                return pressure, count, due_count
+            return _review_queue_pressure(due_count), count, due_count
+        count = int(payload.get("review_queue_count") or 0)
+        due_count = int(payload.get("review_queue_due_count") or 0)
+        return _review_queue_pressure(due_count), count, due_count
+
     def _latest_local_status_payload(self) -> dict[str, Any] | None:
         """Return the latest local-only status payload captured by the harness."""
         for record in reversed(self.status_records):
@@ -1051,11 +1143,17 @@ class LimitedLiveTestHarness:
             f"- Meaningful board activity observed: `{summary.meaningful_board_activity}`",
             f"- Shutdown mode: `{summary.shutdown_mode}`",
             f"- Drain latency seconds: `{summary.drain_latency_seconds}`",
+            f"- Graceful drain latency seconds: `{summary.graceful_drain_latency_seconds}`",
+            f"- Shutdown total seconds: `{summary.shutdown_total_seconds}`",
+            f"- Shutdown total deadline seconds: `{summary.shutdown_total_deadline_seconds}`",
             f"- Scheduled drain at: `{summary.scheduled_drain_at}`",
             f"- Actual drain requested at: `{summary.actual_drain_requested_at}`",
             f"- Drain request slip seconds: `{summary.drain_request_slip_seconds}`",
             f"- Unexpected exit: `{summary.unexpected_exit}`",
             f"- Forced shutdown: `{summary.forced_shutdown}`",
+            f"- Review queue pressure: `{summary.review_queue_pressure}`",
+            f"- Review queue count: `{summary.review_queue_count}`",
+            f"- Review queue due count: `{summary.review_queue_due_count}`",
             "",
             "## Worked",
         ]
@@ -1123,6 +1221,8 @@ class LimitedLiveTestHarness:
                     kind="worktree_reuse_blocked",
                     issue_ref=issue_ref,
                     pr_url=None,
+                    branch_name=None,
+                    repo_prefix=issue_ref.split("#", 1)[0],
                     sample=stripped,
                 )
                 continue
@@ -1162,6 +1262,8 @@ class LimitedLiveTestHarness:
                             kind="review_reclaimed_after_removal",
                             issue_ref=issue_ref,
                             pr_url=pr_url,
+                            branch_name=None,
+                            repo_prefix=issue_ref.split("#", 1)[0],
                             sample=stripped,
                         )
                 claim_key = (issue_ref, pr_url)
@@ -1172,17 +1274,26 @@ class LimitedLiveTestHarness:
                         kind="review_reclaim_loop",
                         issue_ref=issue_ref,
                         pr_url=pr_url,
+                        branch_name=None,
+                        repo_prefix=issue_ref.split("#", 1)[0],
                         sample=reclaim_samples.setdefault(claim_key, stripped),
                     )
                 continue
             kind = _workflow_issue_kind(stripped)
             if kind is not None:
-                issue_ref = _infer_workflow_issue_ref(lines, index)
+                issue_ref, pr_url, branch_name, repo_prefix = (
+                    _infer_workflow_issue_context(
+                        lines,
+                        index,
+                    )
+                )
                 _record_workflow_issue(
                     grouped,
                     kind=kind,
                     issue_ref=issue_ref,
-                    pr_url=None,
+                    pr_url=pr_url,
+                    branch_name=branch_name,
+                    repo_prefix=repo_prefix,
                     sample=stripped,
                 )
         for record in self.status_records:
@@ -1204,6 +1315,8 @@ class LimitedLiveTestHarness:
                 kind="review_summary_parse_error",
                 issue_ref="global",
                 pr_url=None,
+                branch_name=None,
+                repo_prefix=None,
                 sample=sample,
             )
         return sorted(
@@ -1568,6 +1681,8 @@ def _record_workflow_issue(
     kind: str,
     issue_ref: str,
     pr_url: str | None,
+    branch_name: str | None,
+    repo_prefix: str | None,
     sample: str,
 ) -> None:
     key = (kind, issue_ref, pr_url)
@@ -1577,6 +1692,8 @@ def _record_workflow_issue(
             kind=kind,
             issue_ref=issue_ref,
             pr_url=pr_url,
+            branch_name=branch_name,
+            repo_prefix=repo_prefix,
             count=1,
             sample=sample,
         )
@@ -1584,25 +1701,141 @@ def _record_workflow_issue(
     existing.count += 1
 
 
-def _infer_workflow_issue_ref(lines: list[str], index: int) -> str:
+def _repo_prefix_for_repo_name(repo: str | None) -> str | None:
+    if repo == "StartupAI-site/app.startupai-site":
+        return "app"
+    if repo == "StartupAI-site/startupai-crew":
+        return "crew"
+    if repo == "StartupAI-site/startupai.site":
+        return "site"
+    return None
+
+
+def _issue_ref_from_block(issue_number: str | None, repo: str | None) -> str | None:
+    repo_prefix = _repo_prefix_for_repo_name(repo)
+    if repo_prefix is None or issue_number is None:
+        return None
+    return f"{repo_prefix}#{issue_number}"
+
+
+def _session_context_near_line(
+    lines: list[str],
+    index: int,
+) -> tuple[str | None, str | None, str | None]:
+    window_start = max(0, index - 25)
+    window_end = min(len(lines), index + 25)
+    best: tuple[int, str | None, str | None, str | None] | None = None
+    for candidate in range(window_start, window_end):
+        if SESSION_ID_PATTERN.search(lines[candidate]) is None:
+            continue
+        issue_number = None
+        repo = None
+        branch_name = None
+        for block_line in lines[candidate : min(len(lines), candidate + 12)]:
+            issue_match = ISSUE_BLOCK_PATTERN.search(block_line)
+            if issue_match is not None:
+                issue_number = issue_match.group("number")
+            repo_match = REPOSITORY_LINE_PATTERN.search(block_line)
+            if repo_match is not None:
+                repo = repo_match.group("repo")
+            branch_match = BRANCH_LINE_PATTERN.search(block_line)
+            if branch_match is not None:
+                branch_name = branch_match.group("branch")
+            workdir_match = WORKDIR_BRANCH_PATTERN.search(block_line)
+            if workdir_match is not None and branch_name is None:
+                branch_name = workdir_match.group("branch")
+                repo = repo or {
+                    "app": "StartupAI-site/app.startupai-site",
+                    "crew": "StartupAI-site/startupai-crew",
+                    "site": "StartupAI-site/startupai.site",
+                }.get(workdir_match.group("repo_prefix"))
+        issue_ref = _issue_ref_from_block(issue_number, repo)
+        if issue_ref is None:
+            continue
+        distance = abs(candidate - index)
+        if best is None or distance < best[0]:
+            best = (distance, issue_ref, _repo_prefix_for_repo_name(repo), branch_name)
+    if best is None:
+        return None, None, None
+    return best[1], best[2], best[3]
+
+
+def _pr_url_context_near_line(
+    lines: list[str],
+    index: int,
+) -> tuple[str | None, str | None]:
+    window_start = max(0, index - 25)
+    window_end = min(len(lines), index + 25)
+    for candidate in range(window_start, window_end):
+        match = CLAIMED_RESULT_PATTERN.search(lines[candidate])
+        if match is None:
+            continue
+        pr_url = match.group("pr_url")
+        if not pr_url or pr_url == "None":
+            continue
+        return match.group("issue_ref"), pr_url
+    return None, None
+
+
+def _branch_context_near_line(
+    lines: list[str],
+    index: int,
+    branch_name: str | None,
+) -> tuple[str | None, str | None]:
+    if not branch_name:
+        return None, None
+    window_start = max(0, index - 25)
+    window_end = min(len(lines), index + 25)
+    for candidate in range(window_start, window_end):
+        if branch_name not in lines[candidate]:
+            continue
+        issue_ref, repo_prefix, _matched_branch = _session_context_near_line(
+            lines,
+            candidate,
+        )
+        if issue_ref is not None:
+            return issue_ref, repo_prefix
+    return None, None
+
+
+def _infer_workflow_issue_context(
+    lines: list[str],
+    index: int,
+) -> tuple[str, str | None, str | None, str | None]:
+    issue_ref, repo_prefix, branch_name = _session_context_near_line(lines, index)
+    if issue_ref is not None:
+        return issue_ref, None, branch_name, repo_prefix
+
     same_line_match = ISSUE_REF_PATTERN.search(lines[index])
     if same_line_match is not None:
-        return same_line_match.group(0)
+        issue_ref = same_line_match.group(0)
+        return issue_ref, None, None, issue_ref.split("#", 1)[0]
 
-    branch_match = BRANCH_NUMBER_PATTERN.search(lines[index])
-    branch_number = branch_match.group("number") if branch_match is not None else None
-    window_start = max(0, index - 3)
-    window_end = min(len(lines), index + 4)
-    window_refs: list[str] = []
-    for line in lines[window_start:window_end]:
-        for issue_ref in ISSUE_REF_PATTERN.findall(line):
-            if branch_number is None or issue_ref.endswith(f"#{branch_number}"):
-                window_refs.append(issue_ref)
-    if window_refs:
-        return window_refs[0]
-    if branch_number is not None:
-        return f"unknown#{branch_number}"
-    return "unknown"
+    pr_issue_ref, pr_url = _pr_url_context_near_line(lines, index)
+    if pr_issue_ref is not None and pr_url is not None:
+        return pr_issue_ref, pr_url, None, pr_issue_ref.split("#", 1)[0]
+
+    branch_name = None
+    workdir_match = WORKDIR_BRANCH_PATTERN.search(lines[index])
+    if workdir_match is not None:
+        branch_name = workdir_match.group("branch")
+    else:
+        branch_match = BRANCH_LINE_PATTERN.search(lines[index])
+        if branch_match is not None:
+            branch_name = branch_match.group("branch")
+        else:
+            head_branch_match = HEAD_BRANCH_PATTERN.search(lines[index])
+            if head_branch_match is not None:
+                branch_name = head_branch_match.group("branch")
+    branch_issue_ref, branch_repo_prefix = _branch_context_near_line(
+        lines,
+        index,
+        branch_name,
+    )
+    if branch_issue_ref is not None:
+        return branch_issue_ref, None, branch_name, branch_repo_prefix
+
+    return "unknown", None, branch_name, None
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -1614,6 +1847,15 @@ def _dedupe(items: list[str]) -> list[str]:
         seen.add(item)
         output.append(item)
     return output
+
+
+def _review_queue_pressure(due_count: int) -> str:
+    """Classify review queue pressure from the due count only."""
+    if due_count >= REVIEW_QUEUE_SEVERE_DUE_COUNT:
+        return "severe"
+    if due_count >= REVIEW_QUEUE_ELEVATED_DUE_COUNT:
+        return "elevated"
+    return "normal"
 
 
 def build_parser() -> argparse.ArgumentParser:

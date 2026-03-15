@@ -82,6 +82,18 @@ When moving the consumer to a new machine:
 is reconstructible operational state — it caches board state and tracks session
 history for performance and SLO reporting.
 
+### Interrupted Runtime Cleanup
+
+If the consumer was forced down during drain or stopped unexpectedly, recover
+local runtime state before restarting:
+
+```bash
+uv run python -m startupai_controller.board_consumer recover-interrupted --json
+```
+
+This command is idempotent. A clean no-op is still success and reports
+`recovered_leases: 0`.
+
 ### Worst Case: Delete and Rebuild
 
 If the local database is corrupted or lost:
@@ -125,6 +137,15 @@ journalctl --user -u startupai-consumer -f --since "5 minutes ago"
 # 4. Run a dry-run one-shot to verify it can read the board
 uv run python -m startupai_controller.board_consumer one-shot --dry-run
 ```
+
+Review-lane pressure is also visible in local status:
+
+```bash
+uv run python -m startupai_controller.board_consumer status --json --local-only
+```
+
+If `review_queue.pressure` is `severe`, treat that as workflow queue health,
+not as a transport defect by itself.
 
 ## Common Issues
 

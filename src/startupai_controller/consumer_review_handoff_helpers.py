@@ -180,7 +180,7 @@ def transition_claimed_session_to_review(
     mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None],
     queue_status_transition: QueueStatusTransitionFn,
     log_error: Callable[[Exception], None],
-) -> None:
+) -> bool:
     """Move one claimed issue into Review or queue the transition on failure."""
     try:
         transition_issue_to_review(
@@ -193,6 +193,7 @@ def transition_claimed_session_to_review(
             gh_runner=gh_runner,
         )
         record_successful_github_mutation(db)
+        return True
     except Exception as err:
         log_error(err)
         mark_degraded(db, f"review-transition:{err}")
@@ -202,7 +203,7 @@ def transition_claimed_session_to_review(
             to_status="Review",
             from_statuses={"In Progress"},
         )
-        db.update_session(session_id, phase="review")
+        return False
 
 
 def post_claimed_session_verdict_marker(

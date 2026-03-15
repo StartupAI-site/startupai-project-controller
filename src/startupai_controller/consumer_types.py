@@ -139,6 +139,17 @@ class SessionExecutionOutcome:
 
 
 @dataclass(frozen=True)
+class ReviewHandoffOutcome:
+    """Outcome of handing a claimed execution off to review ownership."""
+
+    review_owned: bool
+    session_status: str
+    failure_reason: str | None
+    immediate_review_summary: ReviewQueueDrainSummary
+    done_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class PrCreationOutcome:
     """PR creation/salvage result for a claimed session."""
 

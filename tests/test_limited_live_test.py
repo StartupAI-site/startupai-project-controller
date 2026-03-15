@@ -682,8 +682,8 @@ def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_con
     assert summary.workflow_issues == [
         {
             "kind": "pr_creation_skipped",
-            "issue_ref": "app#129",
-            "pr_url": None,
+            "issue_ref": "unknown",
+            "branch_name": "feat/129-example",
             "count": 2,
             "sample": (
                 "2026-03-13 18:52:27,264 board-consumer ERROR PR creation skipped: "
@@ -692,7 +692,8 @@ def test_limited_live_test_surfaces_grouped_workflow_issues_without_changing_con
         }
     ]
     assert any(
-        "Workflow issue [pr_creation_skipped app#129 x2]" in item
+        "Workflow issue [pr_creation_skipped unknown branch=feat/129-example x2]"
+        in item
         for item in summary.issues
     )
 
@@ -739,7 +740,6 @@ def test_limited_live_test_groups_reclaim_loops_and_worktree_blockers(
         {
             "kind": "worktree_reuse_blocked",
             "issue_ref": "crew#15",
-            "pr_url": None,
             "count": 1,
             "sample": (
                 "2026-03-13 21:24:07,653 board-consumer INFO Worker result [slot=3 issue=crew#15]: "
@@ -821,7 +821,6 @@ def test_limited_live_test_surfaces_review_summary_parse_failures_from_status_fa
         {
             "kind": "review_summary_parse_error",
             "issue_ref": "global",
-            "pr_url": None,
             "count": 3,
             "sample": (
                 "Invalid issue ref 'StartupAI-site/app.startupai-site#43'. Expected format "

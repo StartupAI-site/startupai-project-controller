@@ -18,6 +18,7 @@ from startupai_controller.consumer_types import (
     PreparedCycleContext,
     PreparedLaunchContext,
     PrCreationOutcome,
+    ReviewHandoffOutcome,
     SelectedLaunchCandidate,
     SessionExecutionOutcome,
 )
@@ -197,7 +198,7 @@ resolve_launch_context_for_cycle = (
 create_pr_for_execution_result: Callable[..., PrCreationOutcome] = (
     _claimed_session_wiring.create_pr_for_execution_result
 )
-transition_claimed_session_to_review: Callable[..., None] = (
+transition_claimed_session_to_review: Callable[..., bool] = (
     _claimed_session_wiring.transition_claimed_session_to_review
 )
 post_claimed_session_verdict_marker: Callable[..., None] = (
@@ -224,7 +225,7 @@ post_claimed_session_result_comment: Callable[..., None] = (
 maybe_escalate_claimed_session_failure: Callable[..., None] = (
     _claimed_session_wiring.maybe_escalate_claimed_session_failure
 )
-handoff_execution_to_review: Callable[..., ReviewQueueDrainSummary] = (
+handoff_execution_to_review: Callable[..., ReviewHandoffOutcome] = (
     _claimed_session_wiring.handoff_execution_to_review
 )
 
@@ -250,9 +251,7 @@ def execute_claimed_session(
     board_port: BoardMutationPort | None = None,
     pr_port: PullRequestPort | None = None,
     create_pr_for_execution_result_fn: Callable[..., PrCreationOutcome] | None = None,
-    handoff_execution_to_review_fn: (
-        Callable[..., ReviewQueueDrainSummary] | None
-    ) = None,
+    handoff_execution_to_review_fn: Callable[..., ReviewHandoffOutcome] | None = None,
     handle_non_review_execution_outcome_fn: (
         Callable[..., tuple[str, ResolutionEvaluation | None, str | None]] | None
     ) = None,

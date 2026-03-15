@@ -270,6 +270,25 @@ def queue_verdict_marker(
     )
 
 
+def queue_review_recovery(
+    db: DeferredActionStorePort,
+    issue_ref: str,
+    *,
+    pr_url: str,
+    session_id: str,
+) -> None:
+    """Queue a missed review-queue write for replay."""
+    db.queue_deferred_action(
+        issue_ref,
+        "enqueue_review_item",
+        {
+            "issue_ref": issue_ref,
+            "pr_url": pr_url,
+            "session_id": session_id,
+        },
+    )
+
+
 def load_admission_summary(
     control_state: dict[str, str],
     automation_config: BoardAutomationConfig | None,
