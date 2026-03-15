@@ -153,7 +153,9 @@ def _apply_review_rescue_decision(
                 if reason == "auto-merge-already-enabled"
                 else None
             ),
-            last_result="terminal" if reason == "auto-merge-already-enabled" else "skipped",
+            last_result=(
+                "terminal" if reason == "auto-merge-already-enabled" else "skipped"
+            ),
         )
     if action == "blocked":
         return ReviewRescueResult(
@@ -246,7 +248,13 @@ def automerge_review(
         if not review_refs:
             return ((), False, 0, "", pr_port.get_gate_status(pr_repo, pr_number))
         if codex_gate_evaluator is None:
-            return (review_refs, False, 4, "missing codex gate evaluator", pr_port.get_gate_status(pr_repo, pr_number))
+            return (
+                review_refs,
+                False,
+                4,
+                "missing codex gate evaluator",
+                pr_port.get_gate_status(pr_repo, pr_number),
+            )
         gate_code, gate_msg = codex_gate_evaluator(
             pr_repo=pr_repo,
             pr_number=pr_number,

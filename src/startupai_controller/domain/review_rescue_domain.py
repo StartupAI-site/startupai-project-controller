@@ -12,7 +12,9 @@ from startupai_controller.domain.models import (
 )
 
 
-def normalize_check_names(names: frozenset[str] | set[str] | tuple[str, ...]) -> tuple[str, ...]:
+def normalize_check_names(
+    names: frozenset[str] | set[str] | tuple[str, ...],
+) -> tuple[str, ...]:
     """Return stable required-check names for persistence and comparisons."""
     return tuple(sorted({name.strip() for name in names if name and name.strip()}))
 
@@ -23,26 +25,30 @@ def serialize_blocker_reason(
     detail: str | None = None,
 ) -> str:
     """Project a blocker kind into the stable persisted reason string."""
-    return {
-        ReviewBlockerKind.AUTO_MERGE_PENDING_VERIFICATION: (
-            "auto-merge-pending-verification"
-        ),
-        ReviewBlockerKind.BEHIND_BRANCH_UPDATE_REQUIRED: (
-            "behind-branch-update-required"
-        ),
-        ReviewBlockerKind.DRAFT_PR: "draft-pr",
-        ReviewBlockerKind.MERGE_CONFLICT: "merge-conflict",
-        ReviewBlockerKind.MERGE_STATE_UNSTABLE: "merge-state-unstable",
-        ReviewBlockerKind.MISSING_COPILOT_REVIEW: "missing-copilot-review",
-        ReviewBlockerKind.MISSING_CODEX_VERDICT_MARKER: (
-            "missing-codex-verdict-marker"
-        ),
-        ReviewBlockerKind.PR_FETCH_FAILED: "pr-fetch-failed",
-        ReviewBlockerKind.REQUIRED_CHECKS_FAILED: "required-checks-failed",
-        ReviewBlockerKind.REQUIRED_CHECKS_PENDING: "required-checks-pending",
-        ReviewBlockerKind.REVIEW_CHECKS_FAILED: "review-checks-failed",
-        ReviewBlockerKind.REVIEW_CHECKS_PENDING: "review-checks-pending",
-    }[blocker] if detail is None else detail
+    return (
+        {
+            ReviewBlockerKind.AUTO_MERGE_PENDING_VERIFICATION: (
+                "auto-merge-pending-verification"
+            ),
+            ReviewBlockerKind.BEHIND_BRANCH_UPDATE_REQUIRED: (
+                "behind-branch-update-required"
+            ),
+            ReviewBlockerKind.DRAFT_PR: "draft-pr",
+            ReviewBlockerKind.MERGE_CONFLICT: "merge-conflict",
+            ReviewBlockerKind.MERGE_STATE_UNSTABLE: "merge-state-unstable",
+            ReviewBlockerKind.MISSING_COPILOT_REVIEW: "missing-copilot-review",
+            ReviewBlockerKind.MISSING_CODEX_VERDICT_MARKER: (
+                "missing-codex-verdict-marker"
+            ),
+            ReviewBlockerKind.PR_FETCH_FAILED: "pr-fetch-failed",
+            ReviewBlockerKind.REQUIRED_CHECKS_FAILED: "required-checks-failed",
+            ReviewBlockerKind.REQUIRED_CHECKS_PENDING: "required-checks-pending",
+            ReviewBlockerKind.REVIEW_CHECKS_FAILED: "review-checks-failed",
+            ReviewBlockerKind.REVIEW_CHECKS_PENDING: "review-checks-pending",
+        }[blocker]
+        if detail is None
+        else detail
+    )
 
 
 def serialize_terminal_reason(reason: ReviewTerminalReason) -> str:
@@ -178,7 +184,9 @@ def review_rescue_decision(snapshot: ReviewSnapshot) -> ReviewRescueDecision:
 
     if snapshot.rescue_pending or snapshot.rescue_missing:
         blocker = ReviewBlockerKind.REVIEW_CHECKS_PENDING
-        waiting = normalize_check_names(snapshot.rescue_pending | snapshot.rescue_missing)
+        waiting = normalize_check_names(
+            snapshot.rescue_pending | snapshot.rescue_missing
+        )
         return ReviewRescueDecision(
             status=ReviewRescueStatus.ACTIVE,
             blocker=blocker,

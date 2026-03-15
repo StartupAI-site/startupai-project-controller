@@ -314,16 +314,12 @@ def apply_review_decision(
         decision.blocker,
         detail=decision.detail,
     )
-    if (
-        decision.blocker
-        in {
-            ReviewBlockerKind.MERGE_CONFLICT,
-            ReviewBlockerKind.REQUIRED_CHECKS_FAILED,
-        }
-        and is_trusted_review_pr(
-            snapshot=context.snapshot,
-            automation_config=context.automation_config,
-        )
+    if decision.blocker in {
+        ReviewBlockerKind.MERGE_CONFLICT,
+        ReviewBlockerKind.REQUIRED_CHECKS_FAILED,
+    } and is_trusted_review_pr(
+        snapshot=context.snapshot,
+        automation_config=context.automation_config,
     ):
         return ReviewRescueResult(
             pr_repo=context.pr_repo,
