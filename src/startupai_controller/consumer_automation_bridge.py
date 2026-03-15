@@ -289,6 +289,7 @@ def review_rescue(
     pr_port: Any | None = None,
     review_state_port: Any | None = None,
     board_port: Any | None = None,
+    session_store: Any | None = None,
 ) -> Any:
     """Reconcile one PR in Review back toward self-healing merge flow."""
     return _wiring_review_rescue(
@@ -304,6 +305,7 @@ def review_rescue(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        session_store=session_store,
         default_pr_port_fn=_default_pr_port,
         default_review_state_port_fn=_default_review_state_port,
         default_board_mutation_port_fn=_default_board_mutation_port,

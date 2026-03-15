@@ -9,7 +9,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, TypedDict
 
-from startupai_controller.domain.models import ReviewQueueEntry, SessionInfo
+from startupai_controller.domain.models import (
+    ReviewQueueEntry,
+    ReviewRescueEvent,
+    SessionInfo,
+)
 
 
 class SessionUpdateFields(TypedDict, total=False):
@@ -91,6 +95,27 @@ class SessionStorePort(Protocol):
         """Delete one review-queue entry."""
         ...
 
+    def append_review_rescue_event(
+        self,
+        issue_ref: str,
+        *,
+        pr_repo: str,
+        pr_number: int,
+        result_kind: str,
+        reason: str | None = None,
+        payload_json: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """Append one review rescue audit event."""
+        ...
+
+    def list_review_rescue_events(
+        self,
+        issue_ref: str | None = None,
+    ) -> list[ReviewRescueEvent]:
+        """Return review rescue audit events."""
+        ...
+
     def update_review_queue_item(
         self,
         issue_ref: str,
@@ -99,6 +124,8 @@ class SessionStorePort(Protocol):
         last_result: str,
         last_reason: str | None = None,
         last_state_digest: str | None = None,
+        last_check_names: tuple[str, ...] = (),
+        copilot_missing_since: str | None = None,
         blocked_streak: int = 0,
         blocked_class: str | None = None,
         now: datetime | None = None,

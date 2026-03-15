@@ -36,6 +36,7 @@ from startupai_controller.board_automation import (
     automerge_review,
     review_rescue,
     review_rescue_all,
+    review_recover_verdicts,
     route_protected_queue_executors,
     resolve_issues_from_event,
     resolve_pr_to_issues,
@@ -48,6 +49,7 @@ from startupai_controller.domain.models import (
     LinkedIssue,
     OpenPullRequest,
     PrGateStatus,
+    ReviewQueueEntry,
 )
 from startupai_controller.domain.repair_policy import marker_for as _marker_for
 from startupai_controller.promote_ready import BoardInfo
@@ -250,6 +252,25 @@ def _fake_board_port(calls: list[tuple[str, str]] | None = None):
     )
 
 
+def _fake_session_store(
+    *,
+    review_items_by_issue: dict[str, ReviewQueueEntry] | None = None,
+    sessions_by_id: dict[str, SimpleNamespace] | None = None,
+    latest_session_by_issue: dict[str, SimpleNamespace] | None = None,
+    list_review_items: tuple[ReviewQueueEntry, ...] | None = None,
+):
+    review_items = review_items_by_issue or {}
+    sessions = sessions_by_id or {}
+    latest_sessions = latest_session_by_issue or {}
+    all_items = tuple(list_review_items or tuple(review_items.values()))
+    return SimpleNamespace(
+        get_review_queue_item=lambda issue_ref: review_items.get(issue_ref),
+        get_session=lambda session_id: sessions.get(session_id),
+        latest_session_for_issue=lambda issue_ref: latest_sessions.get(issue_ref),
+        list_review_queue_items=lambda: list(all_items),
+    )
+
+
 def _fake_issue_context_port(
     bodies_by_issue: dict[tuple[str, str, int], str] | None = None,
 ):
@@ -324,6 +345,36 @@ def _make_review_snapshot(
         rescue_failed=rescue_failed or set(),
         rescue_cancelled=rescue_cancelled or set(),
         rescue_missing=rescue_missing or set(),
+    )
+
+
+def _make_review_queue_entry(
+    *,
+    issue_ref: str,
+    pr_url: str,
+    pr_repo: str,
+    pr_number: int,
+    source_session_id: str | None = None,
+    last_result: str | None = None,
+    last_reason: str | None = None,
+    copilot_missing_since: str | None = None,
+) -> ReviewQueueEntry:
+    now = datetime(2026, 3, 15, 12, 0, tzinfo=timezone.utc).isoformat()
+    return ReviewQueueEntry(
+        issue_ref=issue_ref,
+        pr_url=pr_url,
+        pr_repo=pr_repo,
+        pr_number=pr_number,
+        source_session_id=source_session_id,
+        enqueued_at=now,
+        updated_at=now,
+        next_attempt_at=now,
+        last_attempt_at=None,
+        attempt_count=0,
+        last_result=last_result,
+        last_reason=last_reason,
+        last_state_digest=None,
+        copilot_missing_since=copilot_missing_since,
     )
 
 
@@ -3568,6 +3619,241 @@ def test_review_rescue_requeues_conflicting_local_pr_before_pending_checks(
     assert requeue_calls == [("app#97", "Ready")]
 
 
+def test_review_rescue_requeues_only_provenance_matched_issue(
+    tmp_path: Path,
+) -> None:
+    """Local review repair must not move unrelated linked Review items back to Ready."""
+    config = _load(tmp_path)
+    policy = _automation_config()
+    gate_status = PrGateStatus(
+        required={"ci", "db-test-gate"},
+        passed={"ci"},
+        failed={"db-test-gate"},
+        pending=set(),
+        cancelled=set(),
+        merge_state_status="BLOCKED",
+        mergeable="MERGEABLE",
+        is_draft=False,
+        state="OPEN",
+        auto_merge_enabled=True,
+        checks={},
+    )
+    snapshot = _make_review_snapshot(
+        pr_repo="StartupAI-site/app.startupai-site",
+        pr_number=177,
+        review_refs=("app#71", "app#72"),
+        pr_author="chris00walker",
+        pr_body=(
+            "Closes #71\nCloses #72\n\n"
+            "<!-- startupai-board-bot:consumer:"
+            "session=sess-71 issue=app#71 repo=app "
+            "branch=feat/71-fix executor=codex -->"
+        ),
+        gate_status=gate_status,
+        rescue_checks=("ci", "db-test-gate"),
+        rescue_passed={"ci"},
+        rescue_failed={"db-test-gate"},
+    )
+    requeue_calls: list[tuple[str, str]] = []
+
+    result = review_rescue(
+        "StartupAI-site/app.startupai-site",
+        177,
+        config,
+        policy,
+        "StartupAI-site",
+        1,
+        snapshot=snapshot,
+        pr_port=_fake_pr_port(),
+        review_state_port=_fake_review_state_port(
+            status_by_issue={"app#71": "Review", "app#72": "Review"}
+        ),
+        board_port=_fake_board_port(requeue_calls),
+    )
+
+    assert result.requeued_refs == ("app#71",)
+    assert requeue_calls == [("app#71", "Ready")]
+
+
+def test_review_rescue_backfills_missing_verdict_from_session_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing verdict-marker rescue should use session history, not snapshot verdict state."""
+    config = _load(tmp_path)
+    policy = _automation_config()
+    pr_url = "https://github.com/StartupAI-site/app.startupai-site/pull/177"
+    snapshot = _make_review_snapshot(
+        pr_repo="StartupAI-site/app.startupai-site",
+        pr_number=177,
+        review_refs=("app#71",),
+        pr_author="chris00walker",
+        pr_body=(
+            "Closes #71\n\n"
+            "<!-- startupai-board-bot:consumer:"
+            "session=sess-missing issue=app#71 repo=app "
+            "branch=feat/71-verdict executor=codex -->"
+        ),
+        pr_comment_bodies=(),
+        copilot_review_present=True,
+        codex_gate_code=4,
+        codex_gate_message="Missing codex verdict marker",
+    )
+    refreshed_snapshot = replace(snapshot, codex_gate_code=0, codex_gate_message="pass")
+    verdict_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        automation,
+        "automerge_review",
+        lambda *a, **k: (0, "enabled"),
+    )
+
+    result = review_rescue(
+        "StartupAI-site/app.startupai-site",
+        177,
+        config,
+        policy,
+        "StartupAI-site",
+        1,
+        snapshot=snapshot,
+        pr_port=_fake_pr_port(
+            post_codex_verdict_if_missing=lambda actual_pr_url, session_id: verdict_calls.append(
+                (actual_pr_url, session_id)
+            )
+            or True,
+            review_snapshots=lambda _prs, trusted_codex_actors: {
+                ("StartupAI-site/app.startupai-site", 177): refreshed_snapshot
+            },
+        ),
+        session_store=_fake_session_store(
+            latest_session_by_issue={
+                "app#71": SimpleNamespace(
+                    id="sess-review",
+                    status="success",
+                    phase="review",
+                    pr_url=pr_url,
+                )
+            }
+        ),
+    )
+
+    assert verdict_calls == [(pr_url, "sess-review")]
+    assert result.auto_merge_enabled is True
+
+
+def test_review_rescue_uses_copilot_timeout_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timed-out Copilot review blockers should use the explicit fallback path."""
+    config = _load(tmp_path)
+    policy = replace(_automation_config(), copilot_review_fallback_timeout_seconds=60)
+    snapshot = _make_review_snapshot(
+        pr_repo="StartupAI-site/app.startupai-site",
+        pr_number=177,
+        review_refs=("app#71",),
+        pr_author="chris00walker",
+        pr_body=(
+            "Closes #71\n\n"
+            "<!-- startupai-board-bot:consumer:"
+            "session=sess-71 issue=app#71 repo=app "
+            "branch=feat/71-fallback executor=codex -->"
+        ),
+        copilot_review_present=False,
+        codex_gate_code=0,
+        codex_gate_message="pass",
+    )
+    board_calls: list[tuple[str, str]] = []
+    automerge_snapshots: list[bool] = []
+    monkeypatch.setattr(
+        automation,
+        "automerge_review",
+        lambda *a, **k: automerge_snapshots.append(k["snapshot"].copilot_review_present)
+        or (0, "enabled"),
+    )
+
+    result = review_rescue(
+        "StartupAI-site/app.startupai-site",
+        177,
+        config,
+        policy,
+        "StartupAI-site",
+        1,
+        snapshot=snapshot,
+        board_port=_fake_board_port(board_calls),
+        session_store=_fake_session_store(
+            review_items_by_issue={
+                "app#71": _make_review_queue_entry(
+                    issue_ref="app#71",
+                    pr_url=(
+                        "https://github.com/StartupAI-site/app.startupai-site/pull/177"
+                    ),
+                    pr_repo="StartupAI-site/app.startupai-site",
+                    pr_number=177,
+                    source_session_id="sess-71",
+                    copilot_missing_since=(
+                        datetime.now(timezone.utc) - timedelta(minutes=10)
+                    ).isoformat(),
+                )
+            }
+        ),
+    )
+
+    assert result.auto_merge_enabled is True
+    assert result.terminal_reason == "copilot-review-timeout-fallback"
+    assert automerge_snapshots == [True]
+    assert any(
+        "review-rescue: proceeding without Copilot review after timeout." in body
+        for _ref, body in board_calls
+    )
+
+
+def test_review_recover_verdicts_sweeps_hyphenated_missing_marker_rows(
+    tmp_path: Path,
+) -> None:
+    """Explicit recovery sweep should backfill rows using the new stable blocker literal."""
+    config = _load(tmp_path)
+    pr_url = "https://github.com/StartupAI-site/app.startupai-site/pull/177"
+    entry = _make_review_queue_entry(
+        issue_ref="app#71",
+        pr_url=pr_url,
+        pr_repo="StartupAI-site/app.startupai-site",
+        pr_number=177,
+        source_session_id="sess-review",
+        last_result="blocked",
+        last_reason="missing-codex-verdict-marker",
+    )
+    verdict_calls: list[tuple[str, str]] = []
+
+    sweep = review_recover_verdicts(
+        config,
+        "StartupAI-site",
+        1,
+        session_store=_fake_session_store(
+            list_review_items=(entry,),
+            sessions_by_id={
+                "sess-review": SimpleNamespace(
+                    id="sess-review",
+                    status="success",
+                    phase="review",
+                    pr_url=pr_url,
+                )
+            },
+        ),
+        dry_run=False,
+        pr_port=_fake_pr_port(
+            post_codex_verdict_if_missing=lambda actual_pr_url, session_id: verdict_calls.append(
+                (actual_pr_url, session_id)
+            )
+            or True,
+        ),
+    )
+
+    assert sweep.scanned == ("app#71",)
+    assert sweep.eligible == ("app#71",)
+    assert sweep.backfilled == ("app#71",)
+    assert verdict_calls == [(pr_url, "sess-review")]
+
+
 def test_review_rescue_all_scans_execution_authority_repos(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3698,6 +3984,9 @@ def test_parser_accepts_codex_gate_and_automerge_commands() -> None:
     assert rescue_args.command == "review-rescue"
     rescue_all_args = parser.parse_args(["review-rescue-all", "--dry-run"])
     assert rescue_all_args.command == "review-rescue-all"
+    recover_args = parser.parse_args(["review-recover-verdicts", "--json", "--dry-run"])
+    assert recover_args.command == "review-recover-verdicts"
+    assert recover_args.json is True
 
 
 def test_dispatch_agent_posts_executor_lane_comment(
@@ -4509,7 +4798,7 @@ def test_automerge_review_returns_blocked_for_pending(
         pr_port=pr_port,
     )
     assert code == 2
-    assert "pending verification" in msg
+    assert msg == "auto-merge-pending-verification"
 
 
 # ---------------------------------------------------------------------------

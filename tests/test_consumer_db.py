@@ -14,6 +14,7 @@ import pytest
 from startupai_controller.adapters.consumer_db_store import (
     ConsumerDB,
     VALID_SESSION_STATUSES,
+    _SCHEMA_VERSION,
 )
 from startupai_controller.domain.models import SessionInfo
 
@@ -81,6 +82,89 @@ class TestSchemaInit:
         assert session.shutdown_signal_sent_at == timestamp
         assert session.last_external_event_before_shutdown_signal_at == timestamp
         assert session.shutdown_class_at_signal == "stuck_waiting_on_external_execution"
+        db.close()
+
+    def test_schema_migrates_legacy_review_queue_explicitly(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = tmp_path / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE review_queue (
+                issue_ref TEXT PRIMARY KEY,
+                pr_url TEXT NOT NULL,
+                pr_repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                source_session_id TEXT,
+                enqueued_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                next_attempt_at TEXT NOT NULL,
+                last_attempt_at TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_result TEXT,
+                last_reason TEXT
+            );
+
+            INSERT INTO review_queue (
+                issue_ref,
+                pr_url,
+                pr_repo,
+                pr_number,
+                source_session_id,
+                enqueued_at,
+                updated_at,
+                next_attempt_at,
+                last_attempt_at,
+                attempt_count,
+                last_result,
+                last_reason
+            ) VALUES (
+                'crew#84',
+                'https://github.com/o/r/pull/1',
+                'o/r',
+                1,
+                'sess-1',
+                '2026-03-06T12:00:00+00:00',
+                '2026-03-06T12:00:00+00:00',
+                '2026-03-06T12:05:00+00:00',
+                NULL,
+                0,
+                'blocked',
+                'missing-codex-verdict-marker'
+            );
+
+            PRAGMA user_version = 0;
+            """)
+        conn.commit()
+        conn.close()
+
+        db = ConsumerDB(db_path=db_path)
+        entry = db.get_review_queue_item("crew#84")
+
+        assert entry is not None
+        assert entry.issue_ref == "crew#84"
+        assert entry.last_reason == "missing-codex-verdict-marker"
+
+        check = sqlite3.connect(str(db_path))
+        review_queue_columns = {
+            row[1]
+            for row in check.execute("PRAGMA table_info(review_queue)").fetchall()
+        }
+        rescue_tables = {
+            row[0]
+            for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        user_version = check.execute("PRAGMA user_version").fetchone()[0]
+        check.close()
+
+        assert "blocked_streak" in review_queue_columns
+        assert "blocked_class" in review_queue_columns
+        assert "last_check_names_json" in review_queue_columns
+        assert "copilot_missing_since" in review_queue_columns
+        assert "review_rescue_events" in rescue_tables
+        assert user_version == _SCHEMA_VERSION
         db.close()
 
 

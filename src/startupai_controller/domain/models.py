@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,62 @@ class ReviewSnapshot:
     rescue_missing: set[str]
 
 
+class ReviewRescueStatus(str, Enum):
+    """Semantic rescue state for one review PR."""
+
+    ACTIVE = "active"
+    TERMINAL = "terminal"
+
+
+class ReviewBlockerKind(str, Enum):
+    """Typed blocker classification for review rescue."""
+
+    AUTO_MERGE_PENDING_VERIFICATION = "auto_merge_pending_verification"
+    BEHIND_BRANCH_UPDATE_REQUIRED = "behind_branch_update_required"
+    MERGE_CONFLICT = "merge_conflict"
+    MERGE_STATE_UNSTABLE = "merge_state_unstable"
+    MISSING_COPILOT_REVIEW = "missing_copilot_review"
+    MISSING_CODEX_VERDICT_MARKER = "missing_codex_verdict_marker"
+    PR_FETCH_FAILED = "pr_fetch_failed"
+    REQUIRED_CHECKS_FAILED = "required_checks_failed"
+    REQUIRED_CHECKS_PENDING = "required_checks_pending"
+    REVIEW_CHECKS_FAILED = "review_checks_failed"
+    REVIEW_CHECKS_PENDING = "review_checks_pending"
+    DRAFT_PR = "draft_pr"
+
+
+class ReviewRetryClass(str, Enum):
+    """Retry class for one active rescue decision."""
+
+    AUTOMERGE = "automerge"
+    DEFAULT = "default"
+    INFRASTRUCTURE = "infrastructure"
+    MANUAL = "manual"
+    STABLE = "stable"
+    TRANSIENT = "transient"
+
+
+class ReviewTerminalReason(str, Enum):
+    """Terminal reason for a review queue item."""
+
+    AUTO_MERGE_ALREADY_ENABLED = "auto_merge_already_enabled"
+    AUTO_MERGE_ENABLED = "auto_merge_enabled"
+    COPILOT_REVIEW_TIMEOUT_FALLBACK = "copilot_review_timeout_fallback"
+    PULL_REQUEST_NO_LONGER_OPEN = "pull_request_no_longer_open"
+
+
+@dataclass(frozen=True)
+class ReviewRescueDecision:
+    """Semantic review rescue decision before persistence projection."""
+
+    status: ReviewRescueStatus
+    blocker: ReviewBlockerKind | None = None
+    retry_class: ReviewRetryClass | None = None
+    terminal_reason: ReviewTerminalReason | None = None
+    required_check_names: tuple[str, ...] = ()
+    detail: str | None = None
+
+
 @dataclass(frozen=True)
 class ReviewRescueResult:
     """Result of reconciling one PR in Review."""
@@ -176,6 +233,10 @@ class ReviewRescueResult:
     requeued_refs: tuple[str, ...] = ()
     skipped_reason: str | None = None
     blocked_reason: str | None = None
+    queue_reason: str | None = None
+    terminal_reason: str | None = None
+    check_names: tuple[str, ...] = ()
+    last_result: str | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +249,16 @@ class ReviewRescueSweep:
     auto_merge_enabled: tuple[str, ...] = ()
     requeued: tuple[str, ...] = ()
     blocked: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewVerdictRecoverySweep:
+    """Summary of one explicit verdict-marker recovery sweep."""
+
+    scanned: tuple[str, ...]
+    eligible: tuple[str, ...] = ()
+    backfilled: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
 
 
@@ -323,6 +394,8 @@ class ReviewQueueEntry:
     last_result: str | None
     last_reason: str | None
     last_state_digest: str | None
+    last_check_names: tuple[str, ...] = ()
+    copilot_missing_since: str | None = None
     blocked_streak: int = 0
     blocked_class: str | None = None
 
@@ -452,3 +525,16 @@ class IssueFields:
     owner: str
     handoff_to: str
     blocked_reason: str
+
+
+@dataclass(frozen=True)
+class ReviewRescueEvent:
+    """Append-only audit record for one rescue outcome."""
+
+    issue_ref: str
+    pr_repo: str
+    pr_number: int
+    result_kind: str
+    reason: str | None
+    payload_json: str | None
+    created_at: str

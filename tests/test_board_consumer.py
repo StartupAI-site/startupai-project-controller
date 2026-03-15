@@ -2261,12 +2261,11 @@ class TestRunOneCycle:
         sessions = setup["db"].recent_sessions(limit=1)
         assert sessions[0].status == "success"
         assert sessions[0].session_kind == "new_work"
-        review_entry = setup["db"].get_review_queue_item("crew#84")
-        assert review_entry is not None
-        assert review_entry.pr_number == 10
-        assert review_entry.last_result == "auto_merge_enabled"
-        assert review_entry.last_state_digest == "digest-1"
-        assert review_entry.attempt_count == 1
+        assert setup["db"].get_review_queue_item("crew#84") is None
+        events = setup["db"].list_review_rescue_events("crew#84")
+        assert len(events) == 1
+        assert events[0].pr_number == 10
+        assert events[0].reason == "auto-merge-enabled"
 
     def test_review_queue_drain_requeues_issue_and_updates_snapshot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2428,8 +2427,11 @@ class TestRunOneCycle:
 
         assert rescue_calls == [("StartupAI-site/startupai-crew", 210)]
         assert summary.auto_merge_enabled == ("StartupAI-site/startupai-crew#210",)
-        assert db.get_review_queue_item("crew#84").last_result == "auto_merge_enabled"
-        assert db.get_review_queue_item("crew#85").last_result == "auto_merge_enabled"
+        assert db.get_review_queue_item("crew#84") is None
+        assert db.get_review_queue_item("crew#85") is None
+        events = db.list_review_rescue_events()
+        assert [event.issue_ref for event in events] == ["crew#84", "crew#85"]
+        assert all(event.reason == "auto-merge-enabled" for event in events)
 
     def test_review_queue_retry_seconds_are_state_class_aware(self) -> None:
         assert (
@@ -2505,7 +2507,7 @@ class TestRunOneCycle:
             == REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS
         )
 
-    def test_apply_review_queue_result_parks_auto_merge_enabled_items(
+    def test_apply_review_queue_result_deletes_auto_merge_enabled_items(
         self, tmp_path: Path
     ) -> None:
         db = _make_db(tmp_path)
@@ -2533,15 +2535,11 @@ class TestRunOneCycle:
             now=now,
         )
 
-        updated = db.get_review_queue_item("crew#84")
-        assert updated is not None
-        assert updated.last_result == "auto_merge_enabled"
-        assert (
-            updated.next_attempt_at
-            == (
-                now + timedelta(seconds=REVIEW_QUEUE_AUTOMERGE_RETRY_SECONDS)
-            ).isoformat()
-        )
+        assert db.get_review_queue_item("crew#84") is None
+        events = db.list_review_rescue_events("crew#84")
+        assert len(events) == 1
+        assert events[0].result_kind == "success"
+        assert events[0].reason == "auto-merge-enabled"
 
     def test_apply_review_queue_partial_failure_backs_off_due_entries(
         self, tmp_path: Path
@@ -2840,10 +2838,10 @@ class TestRunOneCycle:
 
         assert summary.due_count == 1
         assert summary.auto_merge_enabled == ("StartupAI-site/startupai-crew#210",)
-        updated = db.get_review_queue_item("crew#84")
-        assert updated is not None
-        assert updated.last_result == "auto_merge_enabled"
-        assert updated.last_state_digest == "digest-new"
+        assert db.get_review_queue_item("crew#84") is None
+        events = db.list_review_rescue_events("crew#84")
+        assert len(events) == 1
+        assert events[0].reason == "auto-merge-enabled"
 
     def test_build_review_snapshots_batches_pr_payload_queries_by_repo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5249,9 +5247,10 @@ class TestBlockedStreakEscalation:
             ),
             now=now,
         )
-        cleared = db.get_review_queue_item("crew#84")
-        assert cleared.blocked_streak == 0
-        assert cleared.blocked_class is None
+        assert db.get_review_queue_item("crew#84") is None
+        events = db.list_review_rescue_events("crew#84")
+        assert len(events) == 1
+        assert events[0].reason == "auto-merge-enabled"
 
     def test_apply_result_signals_escalation_at_ceiling(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)

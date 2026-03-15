@@ -44,6 +44,7 @@ def run_review_rescue_for_group(
     config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
     automation_config: BoardAutomationConfig,
+    store: SessionStorePort,
     pr_port: PullRequestPort,
     pr_repo: str,
     pr_number: int,
@@ -66,6 +67,7 @@ def run_review_rescue_for_group(
                 snapshot=snapshot,
                 gh_runner=gh_runner,
                 pr_port=pr_port,
+                session_store=store,
             )
         )
     except GhQueryError as err:
@@ -246,6 +248,7 @@ def process_due_review_group(
             config=config,
             critical_path_config=critical_path_config,
             automation_config=automation_config,
+            store=store,
             pr_port=pr_port,
             pr_repo=pr_repo,
             pr_number=pr_number,

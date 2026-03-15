@@ -21,7 +21,9 @@ from startupai_controller.board_automation_config import (
     load_automation_config,
 )
 from startupai_controller.board_graph import classify_parallelism_snapshot
+from startupai_controller.adapters.consumer_db_store import DEFAULT_DB_PATH
 from startupai_controller.runtime.wiring import build_github_port_bundle
+from startupai_controller.runtime.wiring import build_session_store, open_consumer_db
 from startupai_controller.automation_port_helpers import _default_review_state_port
 from startupai_controller.validate_critical_path_promotion import CriticalPathConfig
 
@@ -662,15 +664,20 @@ def _cmd_review_rescue(args: argparse.Namespace, config: CriticalPathConfig) -> 
         )
         return 3
 
-    result = core.review_rescue(
-        pr_repo=args.pr_repo,
-        pr_number=args.pr_number,
-        config=config,
-        automation_config=automation_config,
-        project_owner=args.project_owner,
-        project_number=args.project_number,
-        dry_run=args.dry_run,
-    )
+    db = open_consumer_db(DEFAULT_DB_PATH)
+    try:
+        result = core.review_rescue(
+            pr_repo=args.pr_repo,
+            pr_number=args.pr_number,
+            config=config,
+            automation_config=automation_config,
+            project_owner=args.project_owner,
+            project_number=args.project_number,
+            dry_run=args.dry_run,
+            session_store=build_session_store(db),
+        )
+    finally:
+        db.close()
     ref = f"{args.pr_repo}#{args.pr_number}"
     if result.rerun_checks:
         print(f"{ref}: reran review checks {list(result.rerun_checks)}")
@@ -697,13 +704,18 @@ def _cmd_review_rescue_all(args: argparse.Namespace, config: CriticalPathConfig)
         print(f"CONFIG_ERROR: {error}", file=sys.stderr)
         return 3
 
-    sweep = core.review_rescue_all(
-        config=config,
-        automation_config=automation_config,
-        project_owner=args.project_owner,
-        project_number=args.project_number,
-        dry_run=args.dry_run,
-    )
+    db = open_consumer_db(DEFAULT_DB_PATH)
+    try:
+        sweep = core.review_rescue_all(
+            config=config,
+            automation_config=automation_config,
+            project_owner=args.project_owner,
+            project_number=args.project_number,
+            dry_run=args.dry_run,
+            session_store=build_session_store(db),
+        )
+    finally:
+        db.close()
     if args.json:
         print(
             json.dumps(
@@ -730,6 +742,44 @@ def _cmd_review_rescue_all(args: argparse.Namespace, config: CriticalPathConfig)
         print(f"Re-queued for repair: {list(sweep.requeued)}")
     if sweep.blocked:
         print(f"Blocked: {list(sweep.blocked)}")
+    if sweep.skipped:
+        print(f"Skipped: {list(sweep.skipped)}")
+    return 0
+
+
+def _cmd_review_recover_verdicts(
+    args: argparse.Namespace, config: CriticalPathConfig
+) -> int:
+    """Handler for review-recover-verdicts subcommand."""
+    core = _core()
+    db = open_consumer_db(DEFAULT_DB_PATH)
+    try:
+        sweep = core.review_recover_verdicts(
+            config=config,
+            project_owner=args.project_owner,
+            project_number=args.project_number,
+            session_store=build_session_store(db),
+            dry_run=args.dry_run,
+        )
+    finally:
+        db.close()
+
+    payload = {
+        "scanned": list(sweep.scanned),
+        "eligible": list(sweep.eligible),
+        "backfilled": list(sweep.backfilled),
+        "skipped": list(sweep.skipped),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"Review verdict sweep scanned: {len(sweep.scanned)}")
+    if sweep.eligible:
+        prefix = "Would backfill" if args.dry_run else "Eligible"
+        print(f"{prefix}: {list(sweep.eligible)}")
+    if sweep.backfilled:
+        print(f"Backfilled: {list(sweep.backfilled)}")
     if sweep.skipped:
         print(f"Skipped: {list(sweep.skipped)}")
     return 0

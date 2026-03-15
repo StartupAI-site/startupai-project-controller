@@ -19,6 +19,7 @@ Eight subcommands for automated GitHub Project board state management:
 - automerge-review: Auto-merge PRs that satisfy strict review + CI gates
 - review-rescue: Reconcile one PR in Review by rerunning cancelled checks or enabling auto-merge
 - review-rescue-all: Sweep governed repos for stuck Review PRs
+- review-recover-verdicts: Sweep active review rows for missing verdict-marker repair
 
 Exit codes: 0 success, 2 blocked/no-op, 3 config error, 4 API error.
 """
@@ -116,6 +117,7 @@ from startupai_controller.domain.models import (
     ReviewRescueResult,
     ReviewRescueSweep,
     ReviewSnapshot,
+    ReviewVerdictRecoverySweep,
     SchedulingDecision,
     IssueSnapshot,
 )
@@ -181,6 +183,7 @@ from startupai_controller.automation_ready_review_wiring import (  # noqa: E402
     codex_review_gate,
     _configured_review_checks,
     _build_review_snapshot,
+    review_recover_verdicts,
     review_rescue,
     review_rescue_all,
     automerge_review,
@@ -250,6 +253,7 @@ from startupai_controller.automation_cli_handlers import (  # noqa: E402
     _cmd_automerge_review,
     _cmd_review_rescue,
     _cmd_review_rescue_all,
+    _cmd_review_recover_verdicts,
     _cmd_enforce_execution_policy,
     _cmd_classify_parallelism,
 )

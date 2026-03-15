@@ -36,6 +36,7 @@ from startupai_controller.domain.models import (
     ReviewRescueResult,
     ReviewRescueSweep,
     ReviewSnapshot,
+    ReviewVerdictRecoverySweep,
     SchedulingDecision,
 )
 from startupai_controller.validate_critical_path_promotion import (
@@ -63,12 +64,14 @@ from startupai_controller.application.automation.review_wiring import (
     review_scope_refs as _wiring_review_scope_refs,
     configured_review_checks as _wiring_configured_review_checks,
     build_review_snapshot as _wiring_build_review_snapshot,
+    review_recover_verdicts as _wiring_review_recover_verdicts,
     sync_review_state as _wiring_sync_review_state,
     codex_review_gate as _wiring_codex_review_gate,
     review_rescue as _wiring_review_rescue,
     review_rescue_all as _wiring_review_rescue_all,
     automerge_review as _wiring_automerge_review,
 )
+from startupai_controller.ports.session_store import SessionStorePort
 from startupai_controller.application.automation.event_resolution import (
     resolve_issues_from_event as _app_resolve_issues_from_event,
     resolve_pr_to_issues as _app_resolve_pr_to_issues,
@@ -486,6 +489,7 @@ def review_rescue(
     pr_port: _PullRequestPort | None = None,
     review_state_port: _ReviewStatePort | None = None,
     board_port: _BoardMutationPort | None = None,
+    session_store: SessionStorePort | None = None,
 ) -> ReviewRescueResult:
     """Reconcile one PR in Review back toward self-healing merge flow."""
     core = _core()
@@ -502,6 +506,7 @@ def review_rescue(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        session_store=session_store,
         default_pr_port_fn=_default_pr_port,
         default_review_state_port_fn=_default_review_state_port,
         default_board_mutation_port_fn=_default_board_mutation_port,
@@ -520,6 +525,7 @@ def review_rescue_all(
     pr_port: _PullRequestPort | None = None,
     review_state_port: _ReviewStatePort | None = None,
     board_port: _BoardMutationPort | None = None,
+    session_store: SessionStorePort | None = None,
 ) -> ReviewRescueSweep:
     """Run review rescue across all governed repos."""
     core = _core()
@@ -533,10 +539,41 @@ def review_rescue_all(
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        session_store=session_store,
         default_pr_port_fn=_default_pr_port,
         default_review_state_port_fn=_default_review_state_port,
         default_board_mutation_port_fn=_default_board_mutation_port,
         review_rescue_fn=core.review_rescue,
+    )
+
+
+def review_recover_verdicts(
+    config: CriticalPathConfig,
+    project_owner: str,
+    project_number: int,
+    *,
+    session_store: SessionStorePort,
+    dry_run: bool = False,
+    gh_runner: Callable[..., str] | None = None,
+    pr_port: _PullRequestPort | None = None,
+) -> ReviewVerdictRecoverySweep:
+    """Run the explicit verdict recovery sweep across active review rows."""
+    if pr_port is None:
+        pr_port = _default_pr_port(
+            project_owner,
+            project_number,
+            config,
+            gh_runner=gh_runner,
+        )
+    return _wiring_review_recover_verdicts(
+        config,
+        project_owner,
+        project_number,
+        session_store=session_store,
+        dry_run=dry_run,
+        gh_runner=gh_runner,
+        pr_port=pr_port,
+        default_pr_port_fn=_default_pr_port,
     )
 
 

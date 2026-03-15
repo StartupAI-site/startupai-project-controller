@@ -55,12 +55,27 @@ ESCALATION_CEILING_DEFAULT = 8  # ~40 min at 5-min default retry
 def blocker_class(blocked_reason: str) -> str:
     """Classify a blocked_reason into a stable blocker class string."""
     normalized = blocked_reason.strip().lower()
-    if "auto-merge pending verification" in normalized:
+    if (
+        normalized == "auto-merge-pending-verification"
+        or normalized.startswith("auto-merge-pending-verification")
+        or "auto-merge pending verification" in normalized
+    ):
         return "automerge"
-    if "required checks pending" in normalized or "review checks pending" in normalized:
+    if (
+        normalized == "required-checks-pending"
+        or normalized == "review-checks-pending"
+        or "required checks pending" in normalized
+        or "review checks pending" in normalized
+        or normalized == "behind-branch-update-required"
+        or normalized == "merge-state-unstable"
+        or normalized == "pr-fetch-failed"
+    ):
         return "transient"
     if (
-        "required checks failed" in normalized
+        normalized == "required-checks-failed"
+        or normalized == "review-checks-failed"
+        or normalized == "merge-conflict"
+        or "required checks failed" in normalized
         or "review checks failed" in normalized
         or "mergeable=conflicting" in normalized
         or normalized == "automerge-not-enabled"
@@ -68,6 +83,7 @@ def blocker_class(blocked_reason: str) -> str:
         return "failed_checks"
     if (
         "missing codex verdict marker" in normalized
+        or normalized == "missing-codex-verdict-marker"
         or normalized == "missing-copilot-review"
         or normalized == "draft-pr"
         or normalized.startswith("state=")
@@ -95,12 +111,27 @@ def escalation_ceiling_for_blocker_class(blocker_class_name: str) -> int:
 def review_queue_retry_seconds_for_blocked_reason(blocked_reason: str) -> int:
     """Return the retry delay for a blocked review outcome."""
     normalized = blocked_reason.strip().lower()
-    if "auto-merge pending verification" in normalized:
+    if (
+        normalized == "auto-merge-pending-verification"
+        or normalized.startswith("auto-merge-pending-verification")
+        or "auto-merge pending verification" in normalized
+    ):
         return REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
-    if "required checks pending" in normalized or "review checks pending" in normalized:
+    if (
+        normalized == "required-checks-pending"
+        or normalized == "review-checks-pending"
+        or normalized == "behind-branch-update-required"
+        or normalized == "merge-state-unstable"
+        or normalized == "pr-fetch-failed"
+        or "required checks pending" in normalized
+        or "review checks pending" in normalized
+    ):
         return REVIEW_QUEUE_PENDING_RETRY_SECONDS
     if (
-        "required checks failed" in normalized
+        normalized == "required-checks-failed"
+        or normalized == "review-checks-failed"
+        or normalized == "merge-conflict"
+        or "required checks failed" in normalized
         or "review checks failed" in normalized
         or "mergeable=conflicting" in normalized
         or normalized == "automerge-not-enabled"
@@ -108,6 +139,7 @@ def review_queue_retry_seconds_for_blocked_reason(blocked_reason: str) -> int:
         return REVIEW_QUEUE_FAILED_RETRY_SECONDS
     if (
         "missing codex verdict marker" in normalized
+        or normalized == "missing-codex-verdict-marker"
         or normalized == "missing-copilot-review"
         or normalized == "draft-pr"
         or normalized.startswith("state=")

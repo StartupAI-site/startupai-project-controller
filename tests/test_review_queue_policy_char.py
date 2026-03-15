@@ -51,6 +51,9 @@ class TestBlockerClass:
     def test_automerge_pending_verification(self) -> None:
         assert _blocker_class("Auto-merge pending verification") == "automerge"
 
+    def test_hyphenated_automerge_pending_verification(self) -> None:
+        assert _blocker_class("auto-merge-pending-verification") == "automerge"
+
     def test_automerge_case_insensitive(self) -> None:
         assert _blocker_class("  AUTO-MERGE PENDING VERIFICATION  ") == "automerge"
 
@@ -157,6 +160,14 @@ class TestRetrySecondsForBlockedReason:
         assert (
             _review_queue_retry_seconds_for_blocked_reason(
                 "Auto-merge pending verification"
+            )
+            == REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
+        )
+
+    def test_hyphenated_automerge_pending_verification(self) -> None:
+        assert (
+            _review_queue_retry_seconds_for_blocked_reason(
+                "auto-merge-pending-verification"
             )
             == REVIEW_QUEUE_PENDING_AUTOMERGE_RETRY_SECONDS
         )

@@ -59,10 +59,11 @@ def is_pre_backfill_eligible(
 
     Eligible if verdict-blocked or newly seeded.
     """
+    normalized_reason = (last_reason or "").strip().lower().replace("-", " ")
     is_verdict_blocked = (
         last_result == "blocked"
-        and last_reason is not None
-        and "missing codex verdict marker" in last_reason.lower()
+        and bool(normalized_reason)
+        and "missing codex verdict marker" in normalized_reason
     )
     is_newly_seeded = last_result is None
     return is_verdict_blocked or is_newly_seeded

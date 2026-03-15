@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Callable
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
-from startupai_controller.domain.automerge_policy import automerge_gate_decision
 from startupai_controller.domain.models import (
+    PrGateStatus,
     ReviewRescueResult,
     ReviewRescueSweep,
     ReviewSnapshot,
+    ReviewVerdictRecoverySweep,
+)
+from startupai_controller.domain.review_rescue_domain import (
+    review_rescue_decision,
+    serialize_blocker_reason,
 )
 from startupai_controller.domain.repair_policy import parse_consumer_provenance
-from startupai_controller.domain.rescue_policy import rescue_decision
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.pull_requests import PullRequestPort
 from startupai_controller.ports.review_state import ReviewStatePort
+from startupai_controller.ports.session_store import SessionStorePort
+from startupai_controller.application.automation.review_rescue_services import (
+    RescueReviewContext,
+    apply_review_decision,
+    backfill_verdict_if_eligible,
+    copilot_fallback_is_eligible,
+    load_review_decision,
+    post_copilot_fallback_comment,
+    recover_review_verdicts as recover_review_verdicts_service,
+    update_branch_if_behind,
+)
 
 
 def _set_issue_status_if_matches(
@@ -52,37 +68,34 @@ def _requeue_local_review_failures(
     board_port: BoardMutationPort,
 ) -> tuple[str, ...]:
     """Return linked review refs to Ready when a local PR needs another coding pass."""
-    actor = (pr_author or "").strip().lower()
-    body = pr_body or ""
-    if not actor and not body:
-        pr_view = pr_port.get_pull_request(pr_repo, pr_number)
-        if pr_view is None:
-            return ()
-        actor = (pr_view.author or "").strip().lower()
-        body = pr_view.body or ""
-    if actor not in automation_config.trusted_local_authors:
+    _ = (pr_port, pr_repo, pr_number)
+    if not pr_author or not pr_body:
         return ()
-
-    provenance = parse_consumer_provenance(body)
+    author = pr_author.strip().lower()
+    if author not in automation_config.trusted_local_authors:
+        return ()
+    provenance = parse_consumer_provenance(pr_body)
     if provenance is None:
         return ()
-
-    issue_ref = provenance.get("issue_ref", "").strip()
-    executor = provenance.get("executor", "").strip().lower()
-    if executor not in automation_config.execution_authority_executors:
+    if provenance.get("executor", "").strip().lower() not in (
+        automation_config.execution_authority_executors
+    ):
         return ()
-    if issue_ref not in review_refs:
+    target_issue_ref = provenance.get("issue_ref", "").strip()
+    if target_issue_ref not in review_refs:
         return ()
-
+    requeued: list[str] = []
     changed, _old_status = _set_issue_status_if_matches(
-        issue_ref,
+        target_issue_ref,
         {"Review"},
         "Ready",
         review_state_port=review_state_port,
         board_port=board_port,
         dry_run=dry_run,
     )
-    return (issue_ref,) if changed or dry_run else ()
+    if changed or dry_run:
+        requeued.append(target_issue_ref)
+    return tuple(requeued)
 
 
 def _rerun_cancelled_review_checks(
@@ -136,12 +149,21 @@ def _apply_review_rescue_decision(
             pr_repo=pr_repo,
             pr_number=pr_number,
             skipped_reason=reason,
+            terminal_reason=(
+                "auto-merge-already-enabled-terminal"
+                if reason == "auto-merge-already-enabled"
+                else None
+            ),
+            last_result=(
+                "terminal" if reason == "auto-merge-already-enabled" else "skipped"
+            ),
         )
     if action == "blocked":
         return ReviewRescueResult(
             pr_repo=pr_repo,
             pr_number=pr_number,
             blocked_reason=reason,
+            last_result="blocked",
         )
     if action in ("requeue_conflicting", "requeue_failed"):
         requeued_refs = _requeue_local_review_failures(
@@ -161,11 +183,13 @@ def _apply_review_rescue_decision(
                 pr_repo=pr_repo,
                 pr_number=pr_number,
                 requeued_refs=requeued_refs,
+                last_result="requeued",
             )
         return ReviewRescueResult(
             pr_repo=pr_repo,
             pr_number=pr_number,
             blocked_reason=reason,
+            last_result="blocked",
         )
     if action == "enable_automerge":
         code, _msg = automerge_runner(
@@ -180,12 +204,15 @@ def _apply_review_rescue_decision(
             pr_repo=pr_repo,
             pr_number=pr_number,
             auto_merge_enabled=code == 0,
-            blocked_reason=None if code == 0 else "automerge-not-enabled",
+            terminal_reason="auto-merge-enabled" if code == 0 else None,
+            blocked_reason=None if code == 0 else _msg,
+            last_result="success" if code == 0 else "blocked",
         )
     return ReviewRescueResult(
         pr_repo=pr_repo,
         pr_number=pr_number,
         blocked_reason=reason,
+        last_result="blocked",
     )
 
 
@@ -203,77 +230,93 @@ def automerge_review(
     codex_gate_evaluator: Callable[..., tuple[int, str]] | None = None,
 ) -> tuple[int, str]:
     """Auto-merge a review PR when codex gate and required checks pass."""
-    if snapshot is not None:
-        review_refs = list(snapshot.review_refs)
-        copilot_review_present = snapshot.copilot_review_present
-        gate_code = snapshot.codex_gate_code
-        gate_msg = snapshot.codex_gate_message
-        status = snapshot.gate_status
-    else:
-        review_refs = []
-        for issue_ref in pr_port.linked_issue_refs(pr_repo, pr_number):
-            if review_state_port.get_issue_status(issue_ref) == "Review":
-                review_refs.append(issue_ref)
-        if not review_refs:
-            return 2, (
-                f"{pr_repo}#{pr_number}: not in board Review scope; "
-                "automerge controller no-op"
+    current_snapshot = snapshot
+
+    def _load_state() -> tuple[tuple[str, ...], bool, int, str, PrGateStatus]:
+        if current_snapshot is not None:
+            return (
+                tuple(current_snapshot.review_refs),
+                current_snapshot.copilot_review_present,
+                current_snapshot.codex_gate_code,
+                current_snapshot.codex_gate_message,
+                current_snapshot.gate_status,
             )
-        copilot_review_present = pr_port.has_copilot_review_signal(
-            pr_repo,
-            pr_number,
+        review_refs = tuple(
+            issue_ref
+            for issue_ref in pr_port.linked_issue_refs(pr_repo, pr_number)
+            if review_state_port.get_issue_status(issue_ref) == "Review"
         )
+        if not review_refs:
+            return ((), False, 0, "", pr_port.get_gate_status(pr_repo, pr_number))
         if codex_gate_evaluator is None:
-            return 4, f"{pr_repo}#{pr_number}: missing codex gate evaluator"
+            return (
+                review_refs,
+                False,
+                4,
+                "missing codex gate evaluator",
+                pr_port.get_gate_status(pr_repo, pr_number),
+            )
         gate_code, gate_msg = codex_gate_evaluator(
             pr_repo=pr_repo,
             pr_number=pr_number,
             dry_run=dry_run,
         )
-        status = pr_port.get_gate_status(pr_repo, pr_number)
+        return (
+            review_refs,
+            pr_port.has_copilot_review_signal(pr_repo, pr_number),
+            gate_code,
+            gate_msg,
+            pr_port.get_gate_status(pr_repo, pr_number),
+        )
 
-    code, msg, action = automerge_gate_decision(
-        pr_repo=pr_repo,
-        pr_number=pr_number,
-        review_refs=tuple(review_refs),
-        copilot_review_present=copilot_review_present,
-        codex_gate_code=gate_code,
-        codex_gate_message=gate_msg,
-        pr_state=status.state,
-        is_draft=status.is_draft,
-        auto_merge_enabled=status.auto_merge_enabled,
-        required_failed=status.failed,
-        required_pending=status.pending,
-        mergeable=status.mergeable,
-        merge_state_status=status.merge_state_status,
-    )
-
-    if action in ("no_op", "already_enabled"):
-        return code, msg
-
-    if action == "update_branch_then_enable" and update_branch:
+    review_refs, copilot_review_present, gate_code, gate_msg, status = _load_state()
+    label = f"{pr_repo}#{pr_number}"
+    if not review_refs:
+        return 2, f"{label}: not in board Review scope; automerge controller no-op"
+    if gate_code == 4:
+        return 4, f"{label}: {gate_msg}"
+    if status.state.upper() != "OPEN":
+        return 2, f"{label}: state={status.state}, not OPEN"
+    if status.is_draft:
+        return 2, f"{label}: draft-pr"
+    if status.auto_merge_enabled:
+        return 0, f"{label}: auto-merge-already-enabled (already enabled)"
+    if not copilot_review_present:
+        return 2, f"{label}: missing-copilot-review"
+    if gate_code != 0:
+        return gate_code, gate_msg
+    if status.failed:
+        return 2, "required-checks-failed"
+    if status.pending:
+        return 2, "required-checks-pending"
+    if status.merge_state_status == "BEHIND" and update_branch:
         if dry_run:
-            return code, msg
+            return 0, f"{label}: would update branch then enable auto-merge"
         pr_port.update_branch(pr_repo, pr_number)
-
+        if current_snapshot is not None:
+            current_snapshot = pr_port.review_snapshots(
+                {(pr_repo, pr_number): tuple(current_snapshot.review_refs)},
+                trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
+            )[(pr_repo, pr_number)]
+        review_refs, copilot_review_present, gate_code, gate_msg, status = _load_state()
+        if gate_code != 0:
+            return gate_code, gate_msg
+        if status.failed:
+            return 2, "required-checks-failed"
+        if status.pending:
+            return 2, "required-checks-pending"
     if status.mergeable not in {"MERGEABLE", "UNKNOWN"}:
-        return 2, (
-            f"{pr_repo}#{pr_number}: mergeable={status.mergeable}, " "cannot auto-merge"
-        )
-
+        return 2, f"mergeable={status.mergeable}"
     if dry_run:
-        return 0, (
-            f"{pr_repo}#{pr_number}: would enable auto-merge " "(squash, strict gates)"
-        )
-
+        return 0, f"{label}: would enable auto-merge (squash, strict gates)"
     merge_status = pr_port.enable_automerge(
         pr_repo,
         pr_number,
         delete_branch=delete_branch,
     )
     if merge_status == "confirmed":
-        return 0, f"{pr_repo}#{pr_number}: auto-merge enabled (verified)"
-    return 2, f"{pr_repo}#{pr_number}: auto-merge pending verification"
+        return 0, f"{label}: auto-merge enabled (verified)"
+    return 2, "auto-merge-pending-verification"
 
 
 def review_rescue(
@@ -286,6 +329,7 @@ def review_rescue(
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
+    session_store: SessionStorePort | None = None,
     automerge_runner: Callable[..., tuple[int, str]],
 ) -> ReviewRescueResult:
     """Reconcile one PR in Review back toward self-healing merge flow."""
@@ -298,36 +342,105 @@ def review_rescue(
     )
     if rerun_result is not None:
         return rerun_result
-
-    action, reason = rescue_decision(
-        review_refs=tuple(snapshot.review_refs),
-        has_cancelled_checks=False,
-        pr_state=snapshot.gate_status.state,
-        is_draft=snapshot.gate_status.is_draft,
-        mergeable=snapshot.gate_status.mergeable,
-        copilot_review_present=snapshot.copilot_review_present,
-        codex_gate_code=snapshot.codex_gate_code,
-        codex_gate_message=snapshot.codex_gate_message,
-        required_failed=snapshot.gate_status.failed,
-        required_pending=snapshot.gate_status.pending,
-        rescue_failed=snapshot.rescue_failed,
-        rescue_pending=snapshot.rescue_pending,
-        rescue_missing=snapshot.rescue_missing,
-        auto_merge_enabled=snapshot.gate_status.auto_merge_enabled,
-    )
-    return _apply_review_rescue_decision(
+    context = RescueReviewContext(
         pr_repo=pr_repo,
         pr_number=pr_number,
         snapshot=snapshot,
-        action=action,
-        reason=reason,
         automation_config=automation_config,
         dry_run=dry_run,
         pr_port=pr_port,
         review_state_port=review_state_port,
         board_port=board_port,
+        session_store=session_store,
+    )
+    backfill_result = backfill_verdict_if_eligible(context)
+    if backfill_result is not None:
+        snapshot = pr_port.review_snapshots(
+            {(pr_repo, pr_number): tuple(snapshot.review_refs)},
+            trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
+        )[(pr_repo, pr_number)]
+        context = RescueReviewContext(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            snapshot=snapshot,
+            automation_config=automation_config,
+            dry_run=dry_run,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            session_store=session_store,
+        )
+    if update_branch_if_behind(context):
+        snapshot = pr_port.review_snapshots(
+            {(pr_repo, pr_number): tuple(snapshot.review_refs)},
+            trusted_codex_actors=frozenset(automation_config.trusted_codex_actors),
+        )[(pr_repo, pr_number)]
+        context = RescueReviewContext(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            snapshot=snapshot,
+            automation_config=automation_config,
+            dry_run=dry_run,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+            session_store=session_store,
+        )
+    decision = load_review_decision(context)
+    if copilot_fallback_is_eligible(context=context):
+        post_copilot_fallback_comment(context)
+        fallback_snapshot = replace(snapshot, copilot_review_present=True)
+        code, msg = automerge_runner(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            snapshot=fallback_snapshot,
+            dry_run=dry_run,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+        )
+        if code == 0:
+            return ReviewRescueResult(
+                pr_repo=pr_repo,
+                pr_number=pr_number,
+                auto_merge_enabled=True,
+                terminal_reason="copilot-review-timeout-fallback",
+                last_result="success",
+            )
+        return ReviewRescueResult(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            blocked_reason=msg,
+            queue_reason=msg,
+            last_result="blocked",
+        )
+    result = apply_review_decision(
+        context=context,
+        decision=decision,
         automerge_runner=automerge_runner,
     )
+    if result.queue_reason in {"required-checks-failed", "merge-conflict"}:
+        requeued_refs = _requeue_local_review_failures(
+            pr_repo=pr_repo,
+            pr_number=pr_number,
+            review_refs=snapshot.review_refs,
+            automation_config=automation_config,
+            dry_run=dry_run,
+            pr_author=snapshot.pr_author,
+            pr_body=snapshot.pr_body,
+            pr_port=pr_port,
+            review_state_port=review_state_port,
+            board_port=board_port,
+        )
+        if requeued_refs:
+            return ReviewRescueResult(
+                pr_repo=pr_repo,
+                pr_number=pr_number,
+                requeued_refs=requeued_refs,
+                queue_reason=result.queue_reason,
+                check_names=result.check_names,
+                last_result="requeued",
+            )
+    return result
 
 
 def _execution_authority_repo_slugs(
@@ -351,6 +464,7 @@ def review_rescue_all(
     pr_port: PullRequestPort,
     review_state_port: ReviewStatePort,
     board_port: BoardMutationPort,
+    session_store: SessionStorePort | None = None,
     review_rescue_runner: Callable[..., ReviewRescueResult],
 ) -> ReviewRescueSweep:
     """Run review rescue across all governed repos."""
@@ -372,6 +486,7 @@ def review_rescue_all(
                 pr_port=pr_port,
                 review_state_port=review_state_port,
                 board_port=board_port,
+                session_store=session_store,
             )
             ref = f"{pr_repo}#{pr.number}"
             if result.rerun_checks:
@@ -393,4 +508,18 @@ def review_rescue_all(
         requeued=tuple(requeued),
         blocked=tuple(blocked),
         skipped=tuple(skipped),
+    )
+
+
+def review_recover_verdicts(
+    *,
+    store: SessionStorePort,
+    pr_port: PullRequestPort,
+    dry_run: bool = False,
+) -> ReviewVerdictRecoverySweep:
+    """Sweep active review rows for eligible codex verdict marker repair."""
+    return recover_review_verdicts_service(
+        store=store,
+        pr_port=pr_port,
+        dry_run=dry_run,
     )
