@@ -287,9 +287,7 @@ class ReconciliationDeps:
 
     issue_ref_for_snapshot: Callable[[SnapshotIssueRefView], str | None]
     reconcile_active_repair_review_items: ReconcileActiveRepairReviewItemsFn
-    reconcile_locally_review_owned_ready_items: (
-        ReconcileLocallyReviewOwnedReadyItemsFn
-    )
+    reconcile_locally_review_owned_ready_items: ReconcileLocallyReviewOwnedReadyItemsFn
     reconcile_stale_in_progress_items: ReconcileStaleInProgressItemsFn
 
 
