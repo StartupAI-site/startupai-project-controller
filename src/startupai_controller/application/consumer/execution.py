@@ -15,6 +15,7 @@ from startupai_controller.consumer_types import (
     PrCreationOutcome,
     PreparedCycleContext,
     PreparedLaunchContext,
+    ReviewHandoffOutcome,
     SessionExecutionOutcome,
 )
 from startupai_controller.consumer_workflow import WorkflowDefinition
@@ -44,6 +45,22 @@ NON_SELF_HEALING_PR_FAILURES = {
 def _iso_now() -> str:
     """Return the current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _done_reason_from_review_handoff(
+    *,
+    failure_reason: str | None,
+    summary: ReviewQueueDrainSummary,
+) -> str | None:
+    """Map one durable review handoff into the session done_reason vocabulary."""
+    if failure_reason == "validation_failed":
+        return "review_handoff_blocked_validation_failed"
+    blocked_entries = summary.blocked
+    if any(entry.endswith(":missing-copilot-review") for entry in blocked_entries):
+        return "review_handoff_blocked_missing_copilot_review"
+    if any("required checks failed" in entry for entry in blocked_entries):
+        return "review_handoff_blocked_required_checks_failed"
+    return None
 
 
 class CreatePrForExecutionResultFn(Protocol):
@@ -76,10 +93,11 @@ class HandoffExecutionToReviewFn(Protocol):
         session_id: str,
         pr_url: str,
         session_status: str,
+        failure_reason: str | None,
         session_store: SessionStorePort,
         review_state_port: ReviewStatePort | None,
         board_port: BoardMutationPort | None,
-    ) -> ReviewQueueDrainSummary: ...
+    ) -> ReviewHandoffOutcome: ...
 
 
 class HandleNonReviewExecutionOutcomeFn(Protocol):
@@ -164,7 +182,7 @@ class TransitionClaimedSessionToReviewFn(Protocol):
         critical_path_config: CriticalPathConfig,
         review_state_port: ReviewStatePort | None,
         board_port: BoardMutationPort | None,
-    ) -> None: ...
+    ) -> bool: ...
 
 
 class PostClaimedSessionVerdictMarkerFn(Protocol):
@@ -302,6 +320,19 @@ class QueueClaimedSessionForReviewFn(Protocol):
     ) -> ReviewQueueEntry | None: ...
 
 
+class QueueReviewRecoveryFn(Protocol):
+    """Queue deferred recovery for a missed review-queue persistence write."""
+
+    def __call__(
+        self,
+        db: ConsumerRuntimeStatePort,
+        *,
+        issue_ref: str,
+        pr_url: str,
+        session_id: str,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class ExecutionDeps:
     """Injected seams for claimed-session execution."""
@@ -324,6 +355,7 @@ class ReviewHandoffDeps:
     transition_claimed_session_to_review: TransitionClaimedSessionToReviewFn
     post_claimed_session_verdict_marker: PostClaimedSessionVerdictMarkerFn
     queue_claimed_session_for_review: QueueClaimedSessionForReviewFn
+    queue_review_recovery: QueueReviewRecoveryFn
     run_immediate_review_handoff: RunImmediateReviewHandoffFn
     record_metric: RecordMetricFn
 
@@ -418,11 +450,13 @@ def execute_claimed_session(
             done_reason="drain_requested_pre_execution",
         )
 
+    initial_external_event_at = _iso_now()
     session_store.update_session(
         session_id,
         {
             "phase": "executing",
-            "last_execution_progress_at": _iso_now(),
+            "last_external_event_at": initial_external_event_at,
+            "last_execution_progress_at": initial_external_event_at,
         },
     )
     get_session = getattr(session_store, "get_session", None)
@@ -432,9 +466,13 @@ def execute_claimed_session(
     )
 
     def _record_execution_progress() -> None:
+        timestamp = _iso_now()
         session_store.update_session(
             session_id,
-            {"last_execution_progress_at": _iso_now()},
+            {
+                "last_external_event_at": timestamp,
+                "last_execution_progress_at": timestamp,
+            },
         )
 
     def _heartbeat_and_record_drain() -> None:
@@ -475,7 +513,7 @@ def execute_claimed_session(
         gh_runner=gh_runner.run_gh if gh_runner is not None else None,
     )
 
-    should_transition_to_review = bool(pr_outcome.pr_url) and (
+    review_candidate = bool(pr_outcome.pr_url) and (
         launch_context.session_kind != "repair"
         or pr_outcome.session_status == "success"
     )
@@ -484,8 +522,10 @@ def execute_claimed_session(
     resolution_evaluation = None
     done_reason: str | None = None
     effective_session_status = pr_outcome.session_status
-    if should_transition_to_review:
-        immediate_review_summary = deps.handoff_execution_to_review(
+    effective_failure_reason = pr_outcome.failure_reason
+    should_transition_to_review = False
+    if review_candidate:
+        handoff_outcome = deps.handoff_execution_to_review(
             config=config,
             db=db,
             prepared=prepared,
@@ -493,10 +533,16 @@ def execute_claimed_session(
             session_id=session_id,
             pr_url=pr_outcome.pr_url or "",
             session_status=pr_outcome.session_status,
+            failure_reason=pr_outcome.failure_reason,
             session_store=session_store,
             review_state_port=review_state_port,
             board_port=board_port,
         )
+        immediate_review_summary = handoff_outcome.immediate_review_summary
+        effective_session_status = handoff_outcome.session_status
+        effective_failure_reason = handoff_outcome.failure_reason
+        done_reason = handoff_outcome.done_reason
+        should_transition_to_review = handoff_outcome.review_owned
     else:
         if pr_port is None or board_port is None:
             raise ValueError(
@@ -523,7 +569,7 @@ def execute_claimed_session(
 
     return deps.build_session_execution_outcome(
         session_status=effective_session_status,
-        failure_reason=pr_outcome.failure_reason,
+        failure_reason=effective_failure_reason,
         pr_url=pr_outcome.pr_url,
         has_commits=pr_outcome.has_commits,
         codex_result=codex_result,
@@ -544,16 +590,17 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    failure_reason: str | None,
     session_store: SessionStorePort,
     review_state_port: ReviewStatePort | None,
     board_port: BoardMutationPort | None,
-) -> ReviewQueueDrainSummary:
+) -> ReviewHandoffOutcome:
     """Transition a claimed session into Review and perform immediate rescue."""
     cp_config = prepared.cp_config
     auto_config = prepared.auto_config
     candidate = launch_context.issue_ref
 
-    deps.transition_claimed_session_to_review(
+    review_transition_succeeded = deps.transition_claimed_session_to_review(
         db=db,
         issue_ref=candidate,
         session_id=session_id,
@@ -562,34 +609,100 @@ def handoff_execution_to_review(
         review_state_port=review_state_port,
         board_port=board_port,
     )
+    if not review_transition_succeeded:
+        return ReviewHandoffOutcome(
+            review_owned=False,
+            session_status="failed",
+            failure_reason="review_handoff_transition_failed",
+            immediate_review_summary=ReviewQueueDrainSummary(),
+        )
     deps.record_metric(db, config, "session_transition_review", issue_ref=candidate)
 
-    immediate_review_summary = ReviewQueueDrainSummary()
-    if session_status != "success":
-        return immediate_review_summary
-
     handoff_store = session_store
-    deps.post_claimed_session_verdict_marker(
-        db=db,
-        pr_url=pr_url,
-        session_id=session_id,
-    )
-    queue_entry = deps.queue_claimed_session_for_review(
-        store=handoff_store,
-        issue_ref=candidate,
-        pr_url=pr_url,
-        session_id=session_id,
-    )
-    if queue_entry is None or auto_config is None:
-        return immediate_review_summary
+    if session_status == "success":
+        deps.post_claimed_session_verdict_marker(
+            db=db,
+            pr_url=pr_url,
+            session_id=session_id,
+        )
+    try:
+        queue_entry = deps.queue_claimed_session_for_review(
+            store=handoff_store,
+            issue_ref=candidate,
+            pr_url=pr_url,
+            session_id=session_id,
+        )
+    except Exception:
+        deps.queue_review_recovery(
+            db,
+            issue_ref=candidate,
+            pr_url=pr_url,
+            session_id=session_id,
+        )
+        return ReviewHandoffOutcome(
+            review_owned=True,
+            session_status="failed",
+            failure_reason="review_handoff_persistence_failed",
+            immediate_review_summary=ReviewQueueDrainSummary(),
+        )
+    if queue_entry is None:
+        deps.queue_review_recovery(
+            db,
+            issue_ref=candidate,
+            pr_url=pr_url,
+            session_id=session_id,
+        )
+        return ReviewHandoffOutcome(
+            review_owned=True,
+            session_status="failed",
+            failure_reason="review_handoff_persistence_failed",
+            immediate_review_summary=ReviewQueueDrainSummary(),
+        )
 
-    return deps.run_immediate_review_handoff(
+    if auto_config is None:
+        done_reason = _done_reason_from_review_handoff(
+            failure_reason=failure_reason,
+            summary=ReviewQueueDrainSummary(),
+        )
+        return ReviewHandoffOutcome(
+            review_owned=True,
+            session_status="success",
+            failure_reason=None,
+            immediate_review_summary=ReviewQueueDrainSummary(),
+            done_reason=done_reason,
+        )
+
+    if session_status != "success":
+        summary = ReviewQueueDrainSummary()
+        done_reason = _done_reason_from_review_handoff(
+            failure_reason=failure_reason,
+            summary=summary,
+        )
+        return ReviewHandoffOutcome(
+            review_owned=True,
+            session_status="success",
+            failure_reason=None,
+            immediate_review_summary=summary,
+            done_reason=done_reason,
+        )
+
+    immediate_review_summary = deps.run_immediate_review_handoff(
         config=config,
         critical_path_config=cp_config,
         automation_config=auto_config,
         store=handoff_store,
         queue_entry=queue_entry,
         db=db,
+    )
+    return ReviewHandoffOutcome(
+        review_owned=True,
+        session_status="success",
+        failure_reason=None,
+        immediate_review_summary=immediate_review_summary,
+        done_reason=_done_reason_from_review_handoff(
+            failure_reason=failure_reason,
+            summary=immediate_review_summary,
+        ),
     )
 
 

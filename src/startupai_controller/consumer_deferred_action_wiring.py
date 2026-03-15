@@ -73,6 +73,7 @@ def replay_deferred_status_action_from_shell(
 def replay_deferred_action_from_shell(
     *,
     action: _deferred_action_helpers.DeferredActionView,
+    db: _deferred_action_helpers.DeferredActionStorePort,
     config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
     pr_port: PullRequestPort | None,
@@ -87,6 +88,7 @@ def replay_deferred_action_from_shell(
     """Execute one deferred action using live shell seams."""
     _deferred_action_helpers.replay_deferred_action(
         action=action,
+        db=db,
         config=config,
         critical_path_config=critical_path_config,
         pr_port=pr_port,

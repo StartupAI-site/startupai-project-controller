@@ -133,9 +133,9 @@ def transition_claimed_session_to_review(
     board_mutator: BoardStatusMutatorFn | None = None,
     gh_runner: GitHubRunnerFn | None = None,
     logger,
-) -> None:
+) -> bool:
     """Move one claimed issue into Review or queue the transition on failure."""
-    _execution_outcome_wiring.transition_claimed_session_to_review(
+    return _execution_outcome_wiring.transition_claimed_session_to_review(
         db=cast(_review_handoff_helpers.ReviewHandoffStatePort, db),
         issue_ref=issue_ref,
         session_id=session_id,

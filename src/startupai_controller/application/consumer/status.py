@@ -33,6 +33,8 @@ RecentSessionStatusPayload = ObjectPayload
 WorkerStatusPayload = ObjectPayload
 DrainBlockerPayload = ObjectPayload
 EXECUTION_PROGRESS_STUCK_SECONDS = 120
+REVIEW_QUEUE_ELEVATED_DUE_COUNT = 20
+REVIEW_QUEUE_SEVERE_DUE_COUNT = 35
 
 
 class MetricWindowPayload(TypedDict):
@@ -274,11 +276,23 @@ def _local_review_queue_summary(
     """Return bounded local review-queue diagnostics."""
     entries = db.list_review_queue_items()
     due_count = db.due_review_queue_count(now=now)
+    blocked_count = sum(1 for entry in entries if entry.last_result == "blocked")
     return {
         "count": len(entries),
         "due_count": due_count,
+        "blocked_count": blocked_count,
+        "pressure": _review_queue_pressure(due_count),
         "refs": [entry.issue_ref for entry in entries[:10]],
     }
+
+
+def _review_queue_pressure(due_count: int) -> str:
+    """Classify current review queue pressure from the due count."""
+    if due_count >= REVIEW_QUEUE_SEVERE_DUE_COUNT:
+        return "severe"
+    if due_count >= REVIEW_QUEUE_ELEVATED_DUE_COUNT:
+        return "elevated"
+    return "normal"
 
 
 def _metric_window_payload(
@@ -479,6 +493,11 @@ def _effective_drain_observed_at(
     return session.drain_observed_at or drain_requested_at
 
 
+def _last_external_event_at(session: SessionInfo) -> str | None:
+    """Return the canonical last external-process event timestamp."""
+    return session.last_external_event_at or session.last_execution_progress_at
+
+
 def _shutdown_class(
     session: SessionInfo,
     *,
@@ -493,8 +512,9 @@ def _shutdown_class(
     if not _external_execution_started(session):
         return "stuck_waiting_on_controller_cleanup"
     progress_at = None
-    if session.last_execution_progress_at:
-        progress_at = parse_iso8601_timestamp(session.last_execution_progress_at)
+    last_event_at = _last_external_event_at(session)
+    if last_event_at:
+        progress_at = parse_iso8601_timestamp(last_event_at)
     if progress_at is None and session.started_at:
         progress_at = parse_iso8601_timestamp(session.started_at)
     if progress_at is None:
@@ -549,6 +569,7 @@ def _worker_status_payload(
             worker,
             drain_requested_at=drain_requested_at,
         ),
+        "last_external_event_at": _last_external_event_at(worker),
         "last_execution_progress_at": worker.last_execution_progress_at,
         "shutdown_class": _shutdown_class(
             worker,
@@ -715,6 +736,7 @@ def _recent_session_status_payload(
             session,
             drain_requested_at=drain_requested_at,
         ),
+        "last_external_event_at": _last_external_event_at(session),
         "last_execution_progress_at": session.last_execution_progress_at,
         "shutdown_class": _shutdown_class(
             session,
@@ -756,6 +778,7 @@ def _drain_blockers_payload(
                 "external_execution_started": worker["external_execution_started"],
                 "active_seconds": worker["active_seconds"],
                 "drain_observed_at": worker.get("drain_observed_at"),
+                "last_external_event_at": worker.get("last_external_event_at"),
                 "last_execution_progress_at": worker.get("last_execution_progress_at"),
                 "shutdown_class": worker.get("shutdown_class"),
             }
@@ -962,6 +985,10 @@ def _build_status_payload(
         "transport_metrics": _transport_status_payload(transport_1h, transport_24h),
         "review_summary": review_summary,
         "review_queue": review_queue,
+        "review_queue_pressure": review_queue.get("pressure"),
+        "review_queue_count": review_queue.get("count"),
+        "review_queue_due_count": review_queue.get("due_count"),
+        "review_queue_blocked_count": review_queue.get("blocked_count"),
         "admission": admission_summary,
         "repo_workflows": {
             repo_prefix: deps.workflow_status_payload(status)

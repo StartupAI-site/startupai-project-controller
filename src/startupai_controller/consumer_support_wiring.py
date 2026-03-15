@@ -17,6 +17,7 @@ maybe_activate_claim_suppression = (
 )
 queue_status_transition = _runtime_support_wiring.queue_status_transition
 queue_verdict_marker = _runtime_support_wiring.queue_verdict_marker
+queue_review_recovery = _runtime_support_wiring.queue_review_recovery
 load_admission_summary = _runtime_support_wiring.load_admission_summary
 next_available_slot = _runtime_support_wiring.next_available_slot
 session_retry_state = _runtime_support_wiring.session_retry_state

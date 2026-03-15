@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Callable, Protocol, TypeAlias
 
 from startupai_controller.consumer_config import ConsumerConfig
+from startupai_controller.domain.repair_policy import parse_pr_url
 from startupai_controller.ports.board_mutations import BoardMutationPort
 from startupai_controller.ports.control_plane_state import ControlValueStorePort
 from startupai_controller.ports.pull_requests import PullRequestPort
@@ -37,6 +39,20 @@ class DeferredActionView(Protocol):
 
 class DeferredActionStorePort(ControlValueStorePort, Protocol):
     """Persistence surface needed to replay and delete deferred actions."""
+
+    def enqueue_review_item(
+        self,
+        issue_ref: str,
+        *,
+        pr_url: str,
+        pr_repo: str,
+        pr_number: int,
+        source_session_id: str | None = None,
+        next_attempt_at: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """Persist one review-queue entry for later rescue processing."""
+        ...
 
     def list_deferred_actions(self) -> list[DeferredActionView]:
         """Return deferred actions in replay order."""
@@ -235,9 +251,35 @@ def replay_deferred_automerge_enable(
     runtime_automerge_enabler(pr_repo, pr_number, gh_runner=gh_runner)
 
 
+def replay_deferred_review_enqueue(
+    *,
+    payload: DeferredActionPayload,
+    db: DeferredActionStorePort,
+) -> None:
+    """Replay a deferred review-queue persistence request."""
+    issue_ref = _payload_string(payload, "issue_ref")
+    pr_url = _payload_string(payload, "pr_url")
+    session_id = payload.get("session_id")
+    parsed = parse_pr_url(pr_url)
+    if parsed is None:
+        raise GhQueryError(f"Invalid deferred review PR URL: {pr_url}")
+    owner, repo, pr_number = parsed
+    now = datetime.now(timezone.utc)
+    db.enqueue_review_item(
+        issue_ref,
+        pr_url=pr_url,
+        pr_repo=f"{owner}/{repo}",
+        pr_number=pr_number,
+        source_session_id=(str(session_id) if session_id is not None else None),
+        next_attempt_at=now.isoformat(),
+        now=now,
+    )
+
+
 def replay_deferred_action(
     *,
     action: DeferredActionView,
+    db: DeferredActionStorePort,
     config: ConsumerConfig,
     critical_path_config: CriticalPathConfig,
     pr_port: PullRequestPort | None,
@@ -325,6 +367,9 @@ def replay_deferred_action(
             runtime_automerge_enabler=runtime_automerge_enabler,
         )
         return
+    if action.action_type == "enqueue_review_item":
+        replay_deferred_review_enqueue(payload=payload, db=db)
+        return
     raise GhQueryError(f"Unsupported deferred action type: {action.action_type}")
 
 
@@ -351,6 +396,7 @@ def replay_deferred_actions(
         try:
             replay_deferred_action(
                 action=action,
+                db=db,
                 config=config,
                 critical_path_config=critical_path_config,
                 pr_port=pr_port,

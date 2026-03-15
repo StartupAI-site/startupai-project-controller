@@ -20,6 +20,7 @@ from startupai_controller.consumer_types import (
     PrCreationOutcome,
     PreparedCycleContext,
     PreparedLaunchContext,
+    ReviewHandoffOutcome,
     SessionExecutionOutcome,
 )
 from startupai_controller.domain.models import (
@@ -86,9 +87,9 @@ def transition_claimed_session_to_review(
     board_info_resolver: BoardInfoResolverFn | None = None,
     board_mutator: BoardStatusMutatorFn | None = None,
     gh_runner: GitHubRunnerFn | None = None,
-) -> None:
+) -> bool:
     """Move one claimed issue into Review or queue the transition on failure."""
-    _session_execution_wiring.transition_claimed_session_to_review(
+    return _session_execution_wiring.transition_claimed_session_to_review(
         db=db,
         issue_ref=issue_ref,
         session_id=session_id,
@@ -294,13 +295,14 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    failure_reason: str | None,
     session_store: SessionStorePort | None = None,
     review_state_port: ReviewStatePort | None = None,
     board_port: BoardMutationPort | None = None,
     board_info_resolver: BoardInfoResolverFn | None = None,
     board_mutator: BoardStatusMutatorFn | None = None,
     gh_runner: GitHubRunnerFn | None = None,
-) -> ReviewQueueDrainSummary:
+) -> ReviewHandoffOutcome:
     """Transition a claimed session into Review and perform immediate rescue."""
     return _execution_outcome_wiring.handoff_execution_to_review(
         config=config,
@@ -310,6 +312,7 @@ def handoff_execution_to_review(
         session_id=session_id,
         pr_url=pr_url,
         session_status=session_status,
+        failure_reason=failure_reason,
         session_store=session_store or build_session_store(cast(ConsumerDB, db)),
         review_state_port=review_state_port,
         board_port=board_port,
@@ -319,6 +322,7 @@ def handoff_execution_to_review(
         transition_claimed_session_to_review=transition_claimed_session_to_review,
         post_claimed_session_verdict_marker=post_claimed_session_verdict_marker,
         queue_claimed_session_for_review=queue_claimed_session_for_review,
+        queue_review_recovery=_support_wiring.queue_review_recovery,
         run_immediate_review_handoff=run_immediate_review_handoff,
         record_metric=_support_wiring.record_metric,
     )
@@ -345,9 +349,7 @@ def execute_claimed_session(
     board_port: BoardMutationPort | None = None,
     pr_port: PullRequestPort | None = None,
     create_pr_for_execution_result_fn: Callable[..., PrCreationOutcome] | None = None,
-    handoff_execution_to_review_fn: (
-        Callable[..., ReviewQueueDrainSummary] | None
-    ) = None,
+    handoff_execution_to_review_fn: Callable[..., ReviewHandoffOutcome] | None = None,
     handle_non_review_execution_outcome_fn: (
         Callable[..., tuple[str, ResolutionEvaluation | None, str | None]] | None
     ) = None,

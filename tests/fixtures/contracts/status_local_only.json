@@ -45,6 +45,7 @@
       "drain_observed_at": "<iso8601>",
       "external_execution_started": false,
       "issue_ref": "crew#84",
+      "last_external_event_at": null,
       "last_execution_progress_at": null,
       "phase": "running",
       "session_id": "<session-id:running>",
@@ -111,6 +112,7 @@
       "failure_reason": null,
       "id": "<session-id:running>",
       "issue_ref": "crew#84",
+      "last_external_event_at": null,
       "last_execution_progress_at": null,
       "next_retry_at": null,
       "phase": "running",
@@ -145,6 +147,7 @@
       "failure_reason": "api_error",
       "id": "<session-id:failed>",
       "issue_ref": "crew#85",
+      "last_external_event_at": null,
       "last_execution_progress_at": null,
       "next_retry_at": "<iso8601>",
       "phase": "blocked",
@@ -186,10 +189,16 @@
     }
   },
   "review_queue": {
+    "blocked_count": 0,
     "count": 0,
     "due_count": 0,
+    "pressure": "normal",
     "refs": []
   },
+  "review_queue_blocked_count": 0,
+  "review_queue_count": 0,
+  "review_queue_due_count": 0,
+  "review_queue_pressure": "normal",
   "review_summary": {
     "count": 0,
     "refs": [],
@@ -258,6 +267,7 @@
       "external_execution_started": false,
       "id": "<session-id:running>",
       "issue_ref": "crew#84",
+      "last_external_event_at": null,
       "last_execution_progress_at": null,
       "phase": "running",
       "pr_url": null,

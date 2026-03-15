@@ -28,6 +28,7 @@ from startupai_controller.consumer_types import (
     PrCreationOutcome,
     PreparedCycleContext,
     PreparedLaunchContext,
+    ReviewHandoffOutcome,
     SessionExecutionOutcome,
 )
 from startupai_controller.consumer_workflow import WorkflowDefinition
@@ -204,9 +205,9 @@ def transition_claimed_session_to_review(
     mark_degraded: Callable[[ConsumerRuntimeStatePort, str], None],
     queue_status_transition: _review_handoff_helpers.QueueStatusTransitionFn,
     logger: LoggerLike,
-) -> None:
+) -> bool:
     """Move one claimed issue into Review or queue the transition on failure."""
-    _review_handoff_helpers.transition_claimed_session_to_review(
+    return _review_handoff_helpers.transition_claimed_session_to_review(
         db=db,
         issue_ref=issue_ref,
         session_id=session_id,
@@ -322,18 +323,20 @@ def handoff_execution_to_review(
     session_id: str,
     pr_url: str,
     session_status: str,
+    failure_reason: str | None,
     session_store: SessionStorePort,
     review_state_port: ReviewStatePort | None,
     board_port: BoardMutationPort | None,
     board_info_resolver: BoardInfoResolverFn | None,
     board_mutator: BoardStatusMutatorFn | None,
     gh_runner: GitHubRunnerFn | GhRunnerPort | None,
-    transition_claimed_session_to_review: Callable[..., None],
+    transition_claimed_session_to_review: Callable[..., bool],
     post_claimed_session_verdict_marker: Callable[..., None],
     queue_claimed_session_for_review: Callable[..., ReviewQueueEntry | None],
+    queue_review_recovery: Callable[..., None],
     run_immediate_review_handoff: Callable[..., ReviewQueueDrainSummary],
     record_metric: Callable[..., None],
-) -> ReviewQueueDrainSummary:
+) -> ReviewHandoffOutcome:
     """Transition a claimed session into Review and perform immediate rescue."""
     gh_runner_fn = _gh_runner_callable(gh_runner)
 
@@ -346,7 +349,7 @@ def handoff_execution_to_review(
         critical_path_config: CriticalPathConfig,
         review_state_port: ReviewStatePort | None,
         board_port: BoardMutationPort | None,
-    ) -> None:
+    ) -> bool:
         return transition_claimed_session_to_review(
             db=db,
             issue_ref=issue_ref,
@@ -392,6 +395,20 @@ def handoff_execution_to_review(
             db=db,
         )
 
+    def _queue_review_recovery(
+        db: ConsumerRuntimeStatePort,
+        *,
+        issue_ref: str,
+        pr_url: str,
+        session_id: str,
+    ) -> None:
+        return queue_review_recovery(
+            db,
+            issue_ref=issue_ref,
+            pr_url=pr_url,
+            session_id=session_id,
+        )
+
     return _handoff_execution_to_review_use_case(
         config=config,
         db=db,
@@ -400,6 +417,7 @@ def handoff_execution_to_review(
             transition_claimed_session_to_review=_transition_claimed_session_to_review,
             post_claimed_session_verdict_marker=_post_claimed_session_verdict_marker,
             queue_claimed_session_for_review=queue_claimed_session_for_review,
+            queue_review_recovery=_queue_review_recovery,
             run_immediate_review_handoff=_run_immediate_review_handoff,
             record_metric=record_metric,
         ),
@@ -407,6 +425,7 @@ def handoff_execution_to_review(
         session_id=session_id,
         pr_url=pr_url,
         session_status=session_status,
+        failure_reason=failure_reason,
         session_store=session_store,
         review_state_port=review_state_port,
         board_port=board_port,
@@ -705,7 +724,7 @@ def execute_claimed_session(
     parse_codex_result: Callable[..., CodexResultPayload | None],
     session_status_from_codex_result: Callable[..., tuple[str, str | None]],
     create_pr_for_execution_result: Callable[..., PrCreationOutcome],
-    handoff_execution_to_review: Callable[..., ReviewQueueDrainSummary],
+    handoff_execution_to_review: Callable[..., ReviewHandoffOutcome],
     handle_non_review_execution_outcome: Callable[
         ...,
         tuple[str, ResolutionEvaluation | None, str | None],
@@ -767,10 +786,11 @@ def execute_claimed_session(
         session_id: str,
         pr_url: str,
         session_status: str,
+        failure_reason: str | None,
         session_store: SessionStorePort,
         review_state_port: ReviewStatePort | None,
         board_port: BoardMutationPort | None,
-    ) -> ReviewQueueDrainSummary:
+    ) -> ReviewHandoffOutcome:
         return handoff_execution_to_review(
             config=config,
             db=db,
@@ -779,6 +799,7 @@ def execute_claimed_session(
             session_id=session_id,
             pr_url=pr_url,
             session_status=session_status,
+            failure_reason=failure_reason,
             session_store=session_store,
             review_state_port=review_state_port,
             board_port=effective_board_port,

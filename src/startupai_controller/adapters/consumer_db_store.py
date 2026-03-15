@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     branch_reconcile_error TEXT,
     drain_observed_at TEXT,
     last_execution_progress_at TEXT,
+    last_external_event_at TEXT,
     resolution_kind TEXT,
     verification_class TEXT,
     resolution_evidence_json TEXT,
@@ -270,6 +271,7 @@ class ConsumerDB:
         ConsumerDB._ensure_column(
             conn, "sessions", "last_execution_progress_at", "TEXT"
         )
+        ConsumerDB._ensure_column(conn, "sessions", "last_external_event_at", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "resolution_kind", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "verification_class", "TEXT")
         ConsumerDB._ensure_column(conn, "sessions", "resolution_evidence_json", "TEXT")
@@ -541,6 +543,7 @@ class ConsumerDB:
             "branch_reconcile_error",
             "drain_observed_at",
             "last_execution_progress_at",
+            "last_external_event_at",
             "resolution_kind",
             "verification_class",
             "resolution_evidence_json",
@@ -565,6 +568,16 @@ class ConsumerDB:
             )
         if not fields:
             return
+        if (
+            "last_external_event_at" in fields
+            and "last_execution_progress_at" not in fields
+        ):
+            fields["last_execution_progress_at"] = fields["last_external_event_at"]
+        if (
+            "last_execution_progress_at" in fields
+            and "last_external_event_at" not in fields
+        ):
+            fields["last_external_event_at"] = fields["last_execution_progress_at"]
 
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [session_id]
@@ -1263,6 +1276,7 @@ class ConsumerDB:
             branch_reconcile_error=row["branch_reconcile_error"],
             drain_observed_at=row["drain_observed_at"],
             last_execution_progress_at=row["last_execution_progress_at"],
+            last_external_event_at=row["last_external_event_at"],
             resolution_kind=row["resolution_kind"],
             verification_class=row["verification_class"],
             resolution_evidence_json=row["resolution_evidence_json"],

@@ -34,6 +34,7 @@ class SessionUpdateFields(TypedDict, total=False):
     branch_reconcile_error: str | None
     drain_observed_at: str | None
     last_execution_progress_at: str | None
+    last_external_event_at: str | None
     resolution_kind: str | None
     verification_class: str | None
     resolution_evidence_json: str | None
