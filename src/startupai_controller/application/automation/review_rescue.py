@@ -7,6 +7,7 @@ from typing import Callable
 
 from startupai_controller.board_automation_config import BoardAutomationConfig
 from startupai_controller.domain.models import (
+    PrGateStatus,
     ReviewRescueResult,
     ReviewRescueSweep,
     ReviewSnapshot,
@@ -231,7 +232,7 @@ def automerge_review(
     """Auto-merge a review PR when codex gate and required checks pass."""
     current_snapshot = snapshot
 
-    def _load_state() -> tuple[tuple[str, ...], bool, int, str, object]:
+    def _load_state() -> tuple[tuple[str, ...], bool, int, str, PrGateStatus]:
         if current_snapshot is not None:
             return (
                 tuple(current_snapshot.review_refs),
